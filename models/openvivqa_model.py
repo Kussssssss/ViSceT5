@@ -349,21 +349,14 @@ class OpenViVQAModel(PreTrainedModel):
         token_mask: torch.Tensor,
         box_mask: Optional[torch.Tensor],
         device: torch.device,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-
+    ) -> torch.Tensor:
         ocr_token_ids = ocr_token_ids.to(device)
         token_mask = token_mask.to(device)
         ocr_to_word_map = ocr_to_word_map.to(device)
-        char_ids = char_ids.to(device)
-        char_mask = char_mask.to(device)
 
-        B, L_tok = ocr_token_ids.size()
+        L_tok = ocr_token_ids.size(1)
         if ocr_to_word_map.size(1) != L_tok:
-            ocr_to_word_map = _pad_or_crop_lastdim_int(
-                ocr_to_word_map,
-                L_tok,
-                pad_value=-1,
-            )
+            ocr_to_word_map = _pad_or_crop_lastdim_int(ocr_to_word_map, L_tok, pad_value=-1)
 
         ocr_text_tok, _ = self.ocr_encoder(ocr_token_ids, token_mask)
         ocr_text_tok = ocr_text_tok.to(self.target_dtype)
@@ -371,146 +364,131 @@ class OpenViVQAModel(PreTrainedModel):
         B, L_tok2, D = ocr_text_tok.size()
         if L_tok2 != L_tok:
             L_tok = L_tok2
-            ocr_to_word_map = _pad_or_crop_lastdim_int(
-                ocr_to_word_map,
-                L_tok,
-                pad_value=-1,
-            )
-            token_mask = _pad_or_crop_lastdim_int(
-                token_mask.long(),
-                L_tok,
-                pad_value=0,
-            ).to(token_mask.dtype)
+            ocr_to_word_map = _pad_or_crop_lastdim_int(ocr_to_word_map, L_tok, pad_value=-1)
+            token_mask = _pad_or_crop_lastdim_int(token_mask.long(), L_tok, pad_value=0).to(token_mask.dtype)
 
         N_word = int(char_ids.size(1))
 
         char_feat_word = _char_embedding(
             self.char_embedding,
             self.char_position_embedding,
-            char_ids,
-            char_mask,
+            char_ids.to(device),
+            char_mask.to(device),
             mean=True,
         )
         char_feat_word = self.ocr_char_layernorm(char_feat_word).to(self.target_dtype)
 
-        text_word_feat = torch.zeros(
-            B,
-            N_word,
-            D,
-            device=device,
-            dtype=self.target_dtype,
-        )
-        word_counts = torch.zeros(
-            B,
-            N_word,
-            device=device,
-            dtype=self.target_dtype,
-        )
+        ocr_box_feat_tok_list = []
 
         for i in range(B):
             map_i = ocr_to_word_map[i]
             tok_mask_i = token_mask[i]
+
             valid = (map_i >= 0) & (tok_mask_i > 0)
+            map_clamped = map_i.clamp(min=0, max=max(N_word - 1, 0))
 
-            if not valid.any() or N_word == 0:
-                continue
+            char_feat_tok_i = char_feat_word[i][map_clamped] * valid.unsqueeze(-1)
 
-            idx = map_i[valid].clamp(0, N_word - 1)
-            src = ocr_text_tok[i][valid]
-
-            text_word_feat[i].scatter_add_(
-                0,
-                idx.unsqueeze(-1).expand_as(src),
-                src,
-            )
-            word_counts[i].scatter_add_(
-                0,
-                idx,
-                torch.ones_like(
-                    idx,
-                    dtype=self.target_dtype,
-                    device=device,
-                ),
-            )
-
-        text_word_feat = text_word_feat / word_counts.unsqueeze(-1).clamp_min(1e-6)
-
-        # Word-level semantic feature.
-        ocr_sem_word = (text_word_feat + char_feat_word).to(self.target_dtype)
-
-        ocr_word_feat_list = []
-        ocr_word_mask_list = []
-
-        for i in range(B):
             info_i = ocr_info[i]
-
+            # --- XỬ LÝ BOXES ---
             boxes_word_all = info_i.get("boxes_word_all")
-            if boxes_word_all is None:
-                boxes_word_all = torch.zeros(
-                    N_word,
-                    4,
-                    device=device,
-                    dtype=self.target_dtype,
-                )
-            elif not torch.is_tensor(boxes_word_all):
-                boxes_word_all = torch.tensor(
-                    boxes_word_all,
-                    device=device,
-                    dtype=self.target_dtype,
-                )
+            if not torch.is_tensor(boxes_word_all):
+                boxes_word_all = torch.tensor(boxes_word_all, device=device, dtype=self.target_dtype)
             else:
-                boxes_word_all = boxes_word_all.to(
-                    device=device,
-                    dtype=self.target_dtype,
-                )
+                boxes_word_all = boxes_word_all.to(device=device, dtype=self.target_dtype)
 
             if boxes_word_all.size(0) != N_word:
                 if boxes_word_all.size(0) > N_word:
                     boxes_word_all = boxes_word_all[:N_word]
                 else:
-                    pad = torch.zeros(
-                        N_word - boxes_word_all.size(0),
-                        4,
-                        device=device,
-                        dtype=self.target_dtype,
-                    )
+                    pad = torch.zeros(N_word - boxes_word_all.size(0), 4, device=device, dtype=self.target_dtype)
                     boxes_word_all = torch.cat([boxes_word_all, pad], dim=0)
 
-            box_mask_i = box_mask[i] if box_mask is not None else None
-            word_mask_all = self._get_ocr_word_mask(
-                info_i,
-                box_mask_i,
-                N_word,
-                device,
-            )
+            # Map boxes sang token level
+            boxes_tok_i = boxes_word_all[map_clamped] * valid.unsqueeze(-1)
 
-            sal_info = {
+            # --- XỬ LÝ DET FEATURES ---
+            det_word_all = info_i.get("det_features")
+            if det_word_all is not None:
+                if not torch.is_tensor(det_word_all):
+                    det_word_all = torch.tensor(det_word_all, device=device, dtype=self.target_dtype)
+                else:
+                    det_word_all = det_word_all.to(device=device, dtype=self.target_dtype)
+
+                if det_word_all.size(0) != N_word:
+                    if det_word_all.size(0) > N_word:
+                        det_word_all = det_word_all[:N_word]
+                    else:
+                        pad_d = torch.zeros(N_word - det_word_all.size(0), det_word_all.size(-1), device=device, dtype=self.target_dtype)
+                        det_word_all = torch.cat([det_word_all, pad_d], dim=0)
+
+                # Map det sang token level
+                det_tok_i = det_word_all[map_clamped] * valid.unsqueeze(-1)
+            else:
+                det_tok_i = None
+
+            # --- XỬ LÝ REC FEATURES ---
+            rec_word_all = info_i.get("rec_features")
+            if rec_word_all is not None:
+                if not torch.is_tensor(rec_word_all):
+                    rec_word_all = torch.tensor(rec_word_all, device=device, dtype=self.target_dtype)
+                else:
+                    rec_word_all = rec_word_all.to(device=device, dtype=self.target_dtype)
+
+                if rec_word_all.size(0) != N_word:
+                    if rec_word_all.size(0) > N_word:
+                        rec_word_all = rec_word_all[:N_word]
+                    else:
+                        pad_r = torch.zeros(N_word - rec_word_all.size(0), rec_word_all.size(-1), device=device, dtype=self.target_dtype)
+                        rec_word_all = torch.cat([rec_word_all, pad_r], dim=0)
+
+                # Map rec sang token level
+                rec_tok_i = rec_word_all[map_clamped] * valid.unsqueeze(-1)
+            else:
+                rec_tok_i = None
+
+            # --- XỬ LÝ WORD MASK ---
+            if box_mask is not None:
+                word_mask_all = box_mask[i]
+            else:
+                word_mask_all = info_i.get("word_mask_all", None)
+                if word_mask_all is None:
+                    word_mask_all = torch.ones(boxes_word_all.size(0), device=device, dtype=torch.long)
+
+            if not torch.is_tensor(word_mask_all):
+                word_mask_all = torch.tensor(word_mask_all, device=device, dtype=torch.long)
+            else:
+                word_mask_all = word_mask_all.to(device=device)
+
+            if word_mask_all.size(0) != N_word:
+                if word_mask_all.size(0) > N_word:
+                    word_mask_all = word_mask_all[:N_word]
+                else:
+                    padm = torch.zeros(N_word - word_mask_all.size(0), device=device, dtype=torch.long)
+                    word_mask_all = torch.cat([word_mask_all, padm], dim=0)
+
+            tok_mask_all_i = word_mask_all[map_clamped] * valid.long()
+
+            # Bổ sung det và rec đã ở token level vào dictionary để đẩy qua hàm Semantic
+            sal_info_tok = {
                 "width": info_i["width"],
                 "height": info_i["height"],
-                "boxes": boxes_word_all,
+                "boxes": boxes_tok_i,
+                "det": det_tok_i,
+                "rec": rec_tok_i
             }
 
             sal_input_i, _ = self.semantic_ocr_embedding(
-                [sal_info],
-                ocr_sem_word[i].unsqueeze(0),
+                [sal_info_tok],
+                ocr_text_tok[i].unsqueeze(0),
+                char_feat_tok_i.unsqueeze(0)
             )
+            sal_input_i, _ = self.spatial_embedding(sal_input_i, [sal_info_tok], mask=tok_mask_all_i.unsqueeze(0))
 
-            spatial_feat_i, _ = self.spatial_embedding(
-                sal_input_i,
-                [sal_info],
-                mask=word_mask_all.unsqueeze(0),
-            )
+            ocr_box_feat_tok_list.append(sal_input_i.squeeze(0))
 
-            feat_i = spatial_feat_i.squeeze(0).to(self.target_dtype)
-            feat_i = feat_i * word_mask_all.to(self.target_dtype).unsqueeze(-1)
-
-            ocr_word_feat_list.append(feat_i)
-            ocr_word_mask_list.append(word_mask_all)
-
-        ocr_fused_feat = torch.stack(ocr_word_feat_list, dim=0).to(self.target_dtype)
-        ocr_word_mask = torch.stack(ocr_word_mask_list, dim=0).long()
-
-        return ocr_fused_feat, ocr_word_mask
+        final_ocr_feat = torch.stack(ocr_box_feat_tok_list, dim=0).to(self.target_dtype)
+        return final_ocr_feat
 
     # --- ENCODE OCR (BẢN LITE BASELINE) ---
     def _encode_ocr_baseline_features(
@@ -734,11 +712,19 @@ class OpenViVQAModel(PreTrainedModel):
 
         txt_emb_for_enc, txt_attn_mask_for_enc = self._encode_text(q_ids_for_enc, enc_attention_mask, device)
 
+        # Encoded question for QACLIP
+        txt_outputs = self.vit5.encoder(
+            input_ids=q_ids_for_enc,
+            attention_mask=txt_attn_mask_for_enc,
+            return_dict=True
+        )
+        txt_hidden_states = txt_outputs.last_hidden_state.to(dtype=self.target_dtype)
+
         if self.pretrain:
-            txt_emb_for_clip = txt_emb_for_enc[:, : q_ids_for_clip.size(1)]
+            txt_emb_for_clip = txt_hidden_states[:, : q_ids_for_clip.size(1)]
             txt_attn_mask_for_clip = txt_attn_mask_for_enc[:, : q_ids_for_clip.size(1)]
         else:
-            txt_emb_for_clip = txt_emb_for_enc
+            txt_emb_for_clip = txt_hidden_states
             txt_attn_mask_for_clip = txt_attn_mask_for_enc
 
         pixel_values_dev = pixel_values.to(device)
