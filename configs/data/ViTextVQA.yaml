@@ -1,0 +1,17 @@
+dataset_name: ViTextVQA
+dataset:
+  train:
+    dir: '1fKBlPAA2DmEf1Y1MESIUIuqlUeCBTXjE'
+    drive_id: ''
+  validation:
+    dir: ''
+    drive_id: '18nt6rJQZSf0g6Z7t0skaTuU_Bgc7EHAP'
+  test:
+    dir: ''
+    drive_id: '1S58lXoNadz0j4A4GhJPSc-Glq3ydaC1N'
+image:
+  dir: ''
+  drive_id: '1HsqhYGjaPSGISGLRRFSK00hmUHFRMjte'
+ocr:
+  dir: ''
+  drive_id: '1krqFSZHNWDjqrcbFkAMV7dvEFJz103iZ'

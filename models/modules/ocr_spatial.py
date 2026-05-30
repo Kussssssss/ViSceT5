@@ -141,14 +141,12 @@ class SemanticOCREmbedding(nn.Module):
         self.linear_boxes = nn.Linear(4, ns.d_model)
         self.layer_norm_bboxes = nn.LayerNorm(ns.d_model)
 
-        # Thêm Linear và LayerNorm cho det và rec features
         self.linear_det = nn.Linear(ns.d_det, ns.d_model)
         self.layer_norm_det = nn.LayerNorm(ns.d_model)
 
         self.linear_rec = nn.Linear(ns.d_rec, ns.d_model)
         self.layer_norm_rec = nn.LayerNorm(ns.d_model)
 
-        # Chỉ dùng LayerNorm cho text và char (đầu vào vốn đã là d_model)
         self.layer_norm_tok = nn.LayerNorm(ns.d_model)
         self.layer_norm_char = nn.LayerNorm(ns.d_model)
 
@@ -159,20 +157,18 @@ class SemanticOCREmbedding(nn.Module):
 
         boxes, dets, recs = [], [], []
         for info in ocr_info:
-            # Boxes
+
             b = info["boxes"]
             if not torch.is_tensor(b): b = torch.tensor(b, device=target_device, dtype=target_dtype)
             else: b = b.to(device=target_device, dtype=target_dtype)
             boxes.append(b)
 
-            # Det features
             d = info.get("det")
             if d is not None:
                 if not torch.is_tensor(d): d = torch.tensor(d, device=target_device, dtype=target_dtype)
                 else: d = d.to(device=target_device, dtype=target_dtype)
                 dets.append(d)
 
-            # Rec features
             r = info.get("rec")
             if r is not None:
                 if not torch.is_tensor(r): r = torch.tensor(r, device=target_device, dtype=target_dtype)
@@ -182,7 +178,6 @@ class SemanticOCREmbedding(nn.Module):
         ocr_boxes = torch.stack(boxes, dim=0)
         ocr_box_features = self.layer_norm_bboxes(self.linear_boxes(ocr_boxes))
 
-        # Xử lý Det và Rec features (nếu có truyền vào)
         if len(dets) > 0:
             ocr_dets = torch.stack(dets, dim=0)
             ocr_det_features = self.layer_norm_det(self.linear_det(ocr_dets))
@@ -195,18 +190,14 @@ class SemanticOCREmbedding(nn.Module):
         else:
             ocr_rec_features = 0.0
 
-        # Chuẩn hóa dtype & device cho text và char
         ocr_tok_features = ocr_tok_features.to(device=target_device, dtype=target_dtype)
         ocr_char_features = ocr_char_features.to(device=target_device, dtype=target_dtype)
 
-        # Cho tok và char đi qua LayerNorm riêng
         ocr_tok_norm = self.layer_norm_tok(ocr_tok_features)
         ocr_char_norm = self.layer_norm_char(ocr_char_features)
 
-        # Cộng các features
         combined_text_features = ocr_tok_norm + ocr_char_norm
 
-        # Tổng hợp toàn bộ (Boxes + Det + Rec + Text + Char)
         final_features = ocr_box_features + ocr_det_features + ocr_rec_features + combined_text_features
 
         return final_features, combined_text_features
