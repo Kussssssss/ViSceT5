@@ -177,7 +177,6 @@ class OpenViVQAModel(PreTrainedModel):
         )
         self.ocr_encoder.set_word_embed_proxy(lambda ids: self.vit5.get_input_embeddings()(ids))
         self.semantic_ocr_embedding = SemanticOCREmbedding(ns)
-        self.spatial_embedding = SpatialCirclePosition(ns)
 
         self.char_max_num = int(getattr(config, "char_max_num", 50))
         self.char_num = int(getattr(config, "char_num"))
@@ -200,6 +199,11 @@ class OpenViVQAModel(PreTrainedModel):
             self.ocr_lite_text_proj.bias.zero_()
 
         self.pretrain = bool(getattr(self.config, "pretrain", True))
+        self.pretrain_ablation_mode = str(
+            getattr(self.config, "pretrain_ablation_mode", "full")
+        ).lower().strip()
+        self.use_twc = bool(getattr(self.config, "use_twc", True))
+
         self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-12).to(torch.float32)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
@@ -871,8 +875,12 @@ class OpenViVQAModel(PreTrainedModel):
             mlm_labels = torch.where(mlm_labels == -1, torch.full_like(mlm_labels, -100), mlm_labels)
 
             outputs = self.vit5(
-                encoder_outputs=enc_out, attention_mask=fused_mask, labels=mlm_labels,
-                use_cache=False, output_hidden_states=True, return_dict=True,
+                encoder_outputs=enc_out,
+                attention_mask=fused_mask,
+                labels=mlm_labels,
+                use_cache=False,
+                output_hidden_states=True,
+                return_dict=True,
             )
             out_dict["textcls_scores"] = outputs.logits
             out_dict["mlm_loss"] = outputs.loss
@@ -881,154 +889,98 @@ class OpenViVQAModel(PreTrainedModel):
             dec_first = dec_last[:, 0, :]
             out_dict["pollutecls_scores"] = self.pollute_head(dec_first.float())
 
-            # Bỏ qua Contrastive Loss nếu OCR Consformer bị tắt
             out_dict["contrastive_scores"] = None
             out_dict["o2r_block"] = None
             out_dict["r2o_block"] = None
 
-            if use_ocr and o2r_labels is not None:
+            use_twc = bool(getattr(self.config, "use_twc", getattr(self, "use_twc", True)))
+
+            # SỬA LỖI INDEXERROR: ĐỊNH VỊ CHÍNH XÁC PHÂN ĐOẠN OCR TRONG LAST HIDDEN STATE
+            if use_twc and use_ocr and o2r_labels is not None:
                 enc_hid = enc_out.last_hidden_state
-            
                 L_txt = txt_emb_for_enc.size(1)
                 L_img = img_pack["img_tokens"].size(1)
                 L_ocr = ocr_fused_feat.size(1)
-            
-                off_ocr = L_txt + L_img
+
+                off_img = L_txt
+                off_ocr = off_img + L_img # Vị trí bắt đầu chính xác của ocr_fused_feat
+
+                # Cắt chuẩn xác tensor đại diện cho OCR (chiều dài là L_ocr khớp hoàn toàn với valid_map_mask)
                 ocr_enc_out = enc_hid[:, off_ocr: off_ocr + L_ocr, :]
-            
-                word_vectors = ocr_enc_out
-                Bc, N_word, D0 = word_vectors.size()
-            
-                split_vec = twc_split_word_idx
-            
-                if split_vec is None:
-                    split_vec = torch.full(
-                        (Bc,),
-                        N_word // 2,
-                        dtype=torch.long,
-                        device=device,
-                    )
-                else:
-                    split_vec = split_vec.to(device=device, dtype=torch.long)
-            
-                split_vec = split_vec.clamp(
-                    min=0,
-                    max=N_word // 2 if N_word >= 2 else N_word,
-                )
-            
-                if torch.all(split_vec == split_vec[0]):
-                    split = int(split_vec[0].item())
-            
-                    if split > 0:
-                        ocr_feat = word_vectors[:, :split, :]
-                        rel_feat = word_vectors[:, split: split * 2, :]
-            
-                        o2r_used = (
-                            o2r_labels[:, :split, :split]
-                            if o2r_labels is not None
-                            else None
-                        )
-                        r2o_used = (
-                            r2o_labels[:, :split, :split]
-                            if r2o_labels is not None
-                            else None
-                        )
-                    else:
-                        ocr_feat = None
-                        rel_feat = None
-                        o2r_used = None
-                        r2o_used = None
-            
-                else:
-                    split = int(split_vec.min().item())
-            
-                    if split > 0:
-                        ocr_feat = word_vectors[:, :split, :]
-            
-                        rel_feat = torch.stack(
-                            [
-                                word_vectors[
-                                    b,
-                                    int(split_vec[b].item()): int(split_vec[b].item()) + split,
-                                    :,
-                                ]
-                                for b in range(Bc)
-                            ],
-                            dim=0,
-                        )
-            
-                        o2r_used = (
-                            o2r_labels[:, :split, :split]
-                            if o2r_labels is not None
-                            else None
-                        )
-                        r2o_used = (
-                            r2o_labels[:, :split, :split]
-                            if r2o_labels is not None
-                            else None
-                        )
-                    else:
-                        ocr_feat = None
-                        rel_feat = None
-                        o2r_used = None
-                        r2o_used = None
-            
-                if ocr_feat is not None and rel_feat is not None:
+
+                valid_map_mask = (ocr_map >= 0) & (token_mask_for_ocr > 0)
+
+                if valid_map_mask.any():
+                    Bc, _, D0 = ocr_enc_out.size()
+                    N_word = int(twa_ocr_char.size(1))
+
+                    if N_word % 2 != 0:
+                        raise RuntimeError(f"TWC requires OCR original + OCR augmented pairs, but N_word={N_word} is odd.")
+
+                    word_vectors = torch.zeros(Bc, N_word, D0, device=device, dtype=ocr_enc_out.dtype)
+                    word_counts = torch.zeros(Bc, N_word, device=device, dtype=ocr_enc_out.dtype)
+
+                    for b in range(Bc):
+                        vmask_b = valid_map_mask[b]
+                        if not vmask_b.any(): continue
+
+                        src = ocr_enc_out[b][vmask_b] # ĐÃ KHỚP SHAPE [196] với [196, 768]
+                        idx = ocr_map[b][vmask_b].clamp(0, max(N_word - 1, 0))
+
+                        word_vectors[b].scatter_add_(0, idx.unsqueeze(-1).expand_as(src), src)
+                        ones = torch.ones_like(idx, dtype=word_counts.dtype, device=device)
+                        word_counts[b].scatter_add_(0, idx, ones)
+
+                    word_counts = word_counts.unsqueeze(-1).clamp_min(1e-9)
+                    word_vectors = word_vectors / word_counts
+
+                    half = N_word // 2
+                    ocr_feat = word_vectors[:, :half, :]
+                    rel_feat = word_vectors[:, half:, :]
+
                     def _safe_l2(x, dim=-1, eps=1e-6):
                         n = x.norm(dim=dim, keepdim=True).clamp_min(eps)
                         x = x / n
-                        return torch.nan_to_num(
-                            x,
-                            nan=0.0,
-                            posinf=0.0,
-                            neginf=0.0,
-                        )
-            
+                        return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
                     ocr_feat = _safe_l2(ocr_feat, dim=-1)
                     rel_feat = _safe_l2(rel_feat, dim=-1)
-            
+
                     Bn, W, Dn = ocr_feat.shape
                     ocr_flat = ocr_feat.reshape(Bn * W, Dn)
                     rel_flat = rel_feat.reshape(Bn * W, Dn)
-            
-                    logit_scale = self.logit_scale.clamp(
-                        min=np.log(1 / 100),
-                        max=np.log(100),
-                    ).exp()
-            
+
+                    logit_scale = self.logit_scale.clamp(min=np.log(1 / 100), max=np.log(100)).exp()
+
                     contrastive_scores = logit_scale * (ocr_flat @ rel_flat.t())
-                    contrastive_scores = torch.nan_to_num(
-                        contrastive_scores,
-                        nan=0.0,
-                        posinf=1e4,
-                        neginf=-1e4,
-                    )
-            
+                    contrastive_scores = torch.nan_to_num(contrastive_scores, nan=0.0, posinf=1e4, neginf=-1e4)
+
                     out_dict["contrastive_scores"] = contrastive_scores
-            
-                    if o2r_used is not None:
-                        blocks = [
-                            o2r_used[b].to(device)
-                            for b in range(o2r_used.size(0))
-                        ]
-                        out_dict["o2r_block"] = torch.block_diag(*blocks)
-            
-                    if r2o_used is not None:
-                        blocks_r = [
-                            r2o_used[b].to(device)
-                            for b in range(r2o_used.size(0))
-                        ]
+
+                    B_lab, _, _ = o2r_labels.shape
+                    blocks = [o2r_labels[b].to(device) for b in range(B_lab)]
+                    out_dict["o2r_block"] = torch.block_diag(*blocks)
+
+                    if r2o_labels is not None:
+                        blocks_r = [r2o_labels[b].to(device) for b in range(B_lab)]
                         out_dict["r2o_block"] = torch.block_diag(*blocks_r)
-                        
+                    else:
+                        out_dict["r2o_block"] = None
+
             if return_visual_search_debug:
                 out_dict["vs_debug"] = vs_out
                 out_dict["clip_input_ids"] = q_ids_for_clip.detach().cpu()
+
             return out_dict
 
         if labels is not None:
             outputs = self.vit5(
-                encoder_outputs=enc_out, attention_mask=fused_mask, labels=labels.to(device),
-                use_cache=False, output_hidden_states=False, return_dict=True,
+                encoder_outputs=enc_out,
+                attention_mask=fused_mask,
+                labels=labels.to(device),
+                use_cache=False,
+                output_hidden_states=False,
+                return_dict=True,
             )
             out_dict["loss"] = outputs.loss
             out_dict["logits"] = outputs.logits

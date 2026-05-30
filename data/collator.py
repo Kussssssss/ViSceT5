@@ -12,46 +12,6 @@ from data.vocab import (
 from data.dataset import ViT5VQADataset
 
 class ViT5VQADataCollator:
-    """Data collator for ViT5-based VQA with full TWC pretraining.
-
-    Pretrain mode
-    ─────────────
-    * **MLM branch** — question tokens *concatenated with OCR surface text*
-      (pad tokens stripped) are masked and fed to the text encoder
-      (OCR-Aware MLM).  Question-aware OCR filtering is applied so that
-      tokens appearing in the question are never discarded.
-    * **TWC branch** — the original and augmented OCR views are encoded
-      WITHOUT masking; the soft-label matrices o2r / r2o drive the
-      Token-Word Contrastive loss exactly as described in the TWA paper
-      (Jin et al., ACM MM 2022).
-    * **ITM** — a polluted-OCR flag signals whether the image–text pair is
-      genuine or mismatched.
-    * **Shared OCR context** — both MLM and TWC read from the same filtered
-      OCR result for each sample (cached inside the pretrain loop) so the
-      two objectives always see identical input.
-
-    Finetune / inference mode
-    ─────────────────────────
-    * Normal question tokenisation with question-aware OCR filtering.
-    * TWC views always produced via _findRelatedOCR_plain (no label
-      matrices needed at inference).
-
-    Key design decisions aligned with TWA / CT-HSR papers
-    ──────────────────────────────────────────────────────
-    1. OCR tokens are NOT masked before being fed to the TWC encoder —
-       masking would destroy the representation that contrastive loss needs
-       to align.
-    2. The soft label for NOISE (correct word → adversarial) and CORRECT
-       (OCR error → dictionary word) are intentionally asymmetric across
-       the o2r / r2o directions to reflect directionality of the
-       OCR-error correction task.
-    3. The `ocr_to_word_map` tensor encodes word indices across both views
-       concatenated (0..N-1 for view A, N..2N-1 for view B); the split
-       point `twc_split_word_idx` is returned so the model head can split them.
-    4. Unknown characters in char_ids fall back to index 0 (<unk>) which is
-       explicitly placed at position 0 in COMBINED_CHARS.
-    """
-
     def __init__(
         self,
         tokenizer,
@@ -62,111 +22,94 @@ class ViT5VQADataCollator:
         viet_vocab_path,
         eng_vocab_path,
         dataframe,
-        pretrain: bool = True,
-        debug: bool = TEST,
+        pretrain=True,
+        debug=TEST,
     ):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
+
+        # PHẢI có dòng này trước khi dùng self.cfg
         self.cfg = config
 
         self.pretrain = bool(pretrain)
         self.debug = bool(debug)
 
-        self.itm_history: List[Tuple] = []
-        self.itm_history_max = 256
-        self.seq_max = int(getattr(self.cfg, "ocr_max_scene_text", 180))
-        self.txt_max_len = 128 if self.pretrain else int(
-            getattr(self.cfg, "text_max_input_length", 32)
+        self.pretrain_ablation_mode = str(
+            getattr(self.cfg, "pretrain_ablation_mode", "full")
+        ).lower().strip()
+
+        self.use_ocr_aug_pretrain = self.pretrain_ablation_mode in [
+            "full",
+            "only_twc_ocr_aug",
+        ]
+
+        self.use_ocr_aug_finetune = bool(
+            getattr(self.cfg, "use_ocr_aug_finetune", False)
         )
+
+        self.itm_history = []
+        self.itm_history_max = 256
+
+        self.seq_max = int(getattr(self.cfg, "ocr_max_scene_text", 180))
+
+        if self.pretrain:
+          self.txt_max_len = 128
+        else:
+          self.txt_max_len = int(getattr(self.cfg, "text_max_input_length", 32))
+
         self.tgt_max_len = int(getattr(self.cfg, "text_max_target_length", 56))
         self.char_max_num = int(getattr(self.cfg, "char_max_num", 50))
+
         self.pad_id = int(getattr(self.tokenizer, "pad_token_id", 0))
         self.eos_id = int(getattr(self.tokenizer, "eos_token_id", 1))
         self.mask_token_id = self.tokenizer.convert_tokens_to_ids("<extra_id_0>")
-        self.mask_prob = float(
-            getattr(self.cfg, "pretrain_mask_prob", 0.15 if self.pretrain else 0.0)
-        )
+
+        self.mask_prob = float(getattr(self.cfg, "pretrain_mask_prob", 0.15 if self.pretrain else 0.0))
         self.mask_seed = int(getattr(self.cfg, "pretrain_mask_seed", 42))
 
         self.lowercase = bool(getattr(self.cfg, "ocr_lowercase", True))
         self.non_alnum_max = float(getattr(self.cfg, "ocr_max_non_alnum_ratio", 0.6))
         self.min_len_keep = int(getattr(self.cfg, "ocr_min_text_len_keep", 2))
         self.ignore_index = int(getattr(self.cfg, "mlm_ignore_index", -100))
-        self.contrastive_ignore = float(
-            getattr(self.cfg, "contrastive_ignore_value", -1.0)
-        )
+        self.contrastive_ignore = float(getattr(self.cfg, "contrastive_ignore_value", -1.0))
 
-        self.adv_probability_pretrain = float(
-            getattr(
-                self.cfg,
-                "adv_probability_pretrain",
-                getattr(self.cfg, "adv_probability", 0.35),
-            )
-        )
-        self.adv_probability_finetune = float(
-            getattr(
-                self.cfg,
-                "adv_probability_finetune",
-                getattr(self.cfg, "adv_probability", 1.0),
-            )
-        )
-        self.contrastive_label_list = list(
-            getattr(self.cfg, "contrastive_label_list", [0.9, 0.9])
-        )
+        self.adv_probability_pretrain = float(getattr(self.cfg, "adv_probability_pretrain", getattr(self.cfg, "adv_probability", 0.35)))
+        self.adv_probability_finetune = float(getattr(self.cfg, "adv_probability_finetune", getattr(self.cfg, "adv_probability", 1.0)))
+        self.contrastive_label_list = list(getattr(self.cfg, "contrastive_label_list", [0.9, 0.9]))
         self.editlen = int(getattr(self.cfg, "editlen", 2))
 
         tokenizer_regex = re.compile(r"[\w]+", re.UNICODE)
 
         self.char_set = {c: idx for idx, c in enumerate(COMBINED_CHARS)}
-        self._char_keys = [
-            c for c in COMBINED_CHARS
-            if c not in {'<unk>', '<s>', '</s>', '<pad>', ' ', '.', ',', 
-                         '!', '?', '-', '_', ':', ';', '"', "'",
-                         '(', ')', '[', ']', '/', '@',
-                         '#', '$', '%', '&', '*', '+', '=', '<', '>'}
-        ]
+        self._char_keys = [c for c in COMBINED_CHARS if c not in {"<s>", "</s>", "<unk>", "<pad>"}]
 
-        self.regex_special = re.compile(
-            r"^(http|https|www"
-            r"|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-            r"|\d+[./-]\d+"
-            r"|\d{3,}"
-            r"|[a-zA-Z]+\d+"
-            r"|\d+[a-zA-Z]+)"
-        )
-        self.viet_consonants = [
-            "ngh", "ng", "gh", "gi", "kh", "nh", "ph", "qu", "th", "tr", "ch",
-            "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s",
-            "t", "v", "x",
-        ]
+        self.regex_special = re.compile(r"^(http|https|www|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|\d+[./-]\d+|\d{3,}|[a-zA-Z]+\d+|\d+[a-zA-Z]+)")
+        self.viet_consonants = ["ngh", "ng", "gh", "gi", "kh", "nh", "ph", "qu", "th", "tr", "ch", "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "x"]
 
-        self.global_vocab: Dict[str, int] = {}
-        self.correction_cache: Dict[str, str] = {}
-        self.global_base_map: Dict[str, List] = collections.defaultdict(list)
+        self.global_vocab = {}
+        self.correction_cache = {}
+        self.global_base_map = collections.defaultdict(list)
 
         if term_vocab_path and os.path.exists(term_vocab_path):
-            print(f"[DataCollator] Loading global vocab from: {term_vocab_path}")
-            with open(term_vocab_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    w = line.strip().lower()
-                    if w:
-                        self.global_vocab[w] = min(
-                            self.global_vocab.get(w, 1), 1
-                        )
+             print(f"[DataCollator] Loading global vocab from: {term_vocab_path}")
+             with open(term_vocab_path, 'r', encoding='utf-8') as f:
+                 for line in f:
+                     w = line.strip().lower()
+                     if w:
+                         self.global_vocab[w] = min(self.global_vocab.get(w, 1), 1)
 
-        # (2) QA pairs (rank 1)
         answers = dataframe["answer"].dropna().astype(str).tolist()
         questions = dataframe["question"].dropna().astype(str).tolist()
         qa_regex = re.compile(r"[\w]+")
         for text in answers + questions:
             words = qa_regex.findall(text.lower())
             for w in words:
-                if w.isdigit() or len(w) > 25 or len(w) == 1:
-                    continue
+                if w.isdigit(): continue
+                if len(w) > 25: continue
+                if len(w) == 1: continue
                 self.global_vocab[w] = min(self.global_vocab.get(w, 1), 1)
 
-        # (3) Vietnamese vocab JSON-L (rank 0 — highest priority)
         if os.path.exists(viet_vocab_path):
             with open(viet_vocab_path, "r", encoding="utf-8") as f:
                 for line in f:
@@ -177,42 +120,42 @@ class ViT5VQADataCollator:
                         entry = json.loads(line)
                     except Exception:
                         continue
+
                     raw = entry.get("text", "")
                     if not raw:
                         continue
+
                     norm = _normalize_text(raw, lowercase=True)
                     if not norm:
                         continue
+
                     toks = tokenizer_regex.findall(norm)
-                    if not toks or len(toks) > 2:
+                    if not toks:
                         continue
+
+                    if len(toks) > 2:
+                        continue
+
                     for w in toks:
                         w = w.strip()
-                        if not w or w.isdigit() or len(w) > 25 or len(w) == 1:
-                            continue
-                        self.global_vocab[w] = min(
-                            self.global_vocab.get(w, 0), 0
-                        )
+                        if not w: continue
+                        if w.isdigit(): continue
+                        if len(w) > 25: continue
+                        if len(w) == 1: continue
+
+                        self.global_vocab[w] = min(self.global_vocab.get(w, 0), 0)
 
         if os.path.exists(eng_vocab_path):
-            with open(eng_vocab_path, "r", encoding="utf-8") as f:
+            with open(eng_vocab_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     w = line.strip().lower()
-                    if w:
-                        self.global_vocab[w] = min(
-                            self.global_vocab.get(w, 2), 2
-                        )
+                    if w: self.global_vocab[w] = min(self.global_vocab.get(w, 2), 2)
 
         for w, src_rank in self.global_vocab.items():
             base_form = _remove_vietnamese_accents(w)
             self.global_base_map[base_form].append((w, src_rank))
 
-        print(
-            f"[Collator] global_vocab size: {len(self.global_vocab)}. "
-            f"Base map size: {len(self.global_base_map)}"
-        )
-
-    # ── Static helpers ────────────────────────────────────────────────────────
+        print(f"[Collator] : {len(self.global_vocab)}. Base Map Size: {len(self.global_base_map)}")
 
     @staticmethod
     def _tokenize_simple(s: str) -> List[str]:
@@ -222,419 +165,284 @@ class ViT5VQADataCollator:
     def _jaccard_tokens(a: str, b: str) -> float:
         ta = set(ViT5VQADataCollator._tokenize_simple(a))
         tb = set(ViT5VQADataCollator._tokenize_simple(b))
-        if not ta or not tb:
-            return 0.0
+        if not ta or not tb: return 0.0
         return len(ta & tb) / len(ta | tb)
 
     @staticmethod
-    def _load_term_vocab(fname: str) -> collections.OrderedDict:
+    def _load_term_vocab(fname):
         vocab = collections.OrderedDict()
         try:
             with open(fname, "r", encoding="utf-8") as f:
-                for i, line in enumerate(f):
-                    vocab[line.rstrip("\n")] = i
-        except Exception:
-            vocab["[UNK]"] = 0
+                for i, line in enumerate(f): vocab[line.rstrip("\n")] = i
+        except: vocab["[UNK]"] = 0
         return vocab
 
+    def set_mode(self, pretrain, mask_prob=None, mask_seed=None, debug=None):
+        self.pretrain = bool(pretrain)
+        if mask_prob is not None: self.mask_prob = float(mask_prob)
+        if mask_seed is not None: self.mask_seed = int(mask_seed)
+        if debug is not None: self.debug = bool(debug)
+
+    def _is_noise_text(self, s, q_tokens_set=None):
+        if not s: return True
+        if q_tokens_set and s in q_tokens_set:
+            return False
+        if len(s) == 1 and not s.isdigit(): return True
+        if _non_alnum_ratio(s) > self.non_alnum_max: return True
+        if _is_repeated_runs(s): return True
+        if _looks_like_code_garbage(s): return True
+        if _char_diversity_low(s): return True
+        if len(s) < self.min_len_keep and not s.isdigit(): return True
+        return False
+
     @staticmethod
-    def _resize_with_pad(image, target_height: int, target_width: int):
+    def _resize_with_pad(image, target_height, target_width):
         original_width, original_height = image.size
         scale = min(target_width / original_width, target_height / original_height)
         new_width = int(original_width * scale)
         new_height = int(original_height * scale)
+
         image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
         new_image = Image.new("RGB", (target_width, target_height), (128, 128, 128))
+
         paste_x = (target_width - new_width) // 2
         paste_y = (target_height - new_height) // 2
+
         new_image.paste(image, (paste_x, paste_y))
+
         return new_image, (new_width, new_height), (paste_x, paste_y)
 
     @staticmethod
     def _adjust_boxes(boxes, active_size, padding, target_size):
         if boxes is None or len(boxes) == 0:
             return boxes
+
         new_w, new_h = active_size
         pad_x, pad_y = padding
         target_w, target_h = target_size
-        new_boxes = (
-            boxes.clone()
-            if isinstance(boxes, torch.Tensor)
-            else torch.tensor(boxes, dtype=torch.float)
-        )
+
+        new_boxes = boxes.clone() if isinstance(boxes, torch.Tensor) else torch.tensor(boxes, dtype=torch.float)
+
         new_boxes[:, [0, 2]] = new_boxes[:, [0, 2]] * new_w
         new_boxes[:, [1, 3]] = new_boxes[:, [1, 3]] * new_h
+
         new_boxes[:, [0, 2]] += pad_x
         new_boxes[:, [1, 3]] += pad_y
+
         new_boxes[:, [0, 2]] = new_boxes[:, [0, 2]] / target_w
         new_boxes[:, [1, 3]] = new_boxes[:, [1, 3]] / target_h
+
         new_boxes = new_boxes.clamp(0.0, 1.0)
+
         return new_boxes
 
     @staticmethod
-    def _box_iou(b1, b2) -> float:
+    def _box_iou(b1, b2):
         inter_x1 = max(b1[0], b2[0])
         inter_y1 = max(b1[1], b2[1])
         inter_x2 = min(b1[2], b2[2])
         inter_y2 = min(b1[3], b2[3])
+
         inter_area = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
         b1_area = (b1[2] - b1[0]) * (b1[3] - b1[1])
         b2_area = (b2[2] - b2[0]) * (b2[3] - b2[1])
+
         union = b1_area + b2_area - inter_area
         return inter_area / max(union, 1e-6)
 
-    # ── Public interface ──────────────────────────────────────────────────────
-
-    def set_mode(
-        self,
-        pretrain: bool,
-        mask_prob: Optional[float] = None,
-        mask_seed: Optional[int] = None,
-        debug: Optional[bool] = None,
-    ):
-        self.pretrain = bool(pretrain)
-        # Update txt_max_len to match the new mode
-        if not hasattr(self, "_txt_max_len_pretrain"):
-            self._txt_max_len_pretrain = 128
-        self.txt_max_len = (
-            self._txt_max_len_pretrain
-            if self.pretrain
-            else int(getattr(self.cfg, "text_max_input_length", 32))
-        )
-        if mask_prob is not None:
-            self.mask_prob = float(mask_prob)
-        if mask_seed is not None:
-            self.mask_seed = int(mask_seed)
-        if debug is not None:
-            self.debug = bool(debug)
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _is_noise_text(self, s: str, q_tokens_set=None) -> bool:
-        if not s:
-            return True
-        # Question-aware: always keep tokens that appear in the question
-        if q_tokens_set and s in q_tokens_set:
-            return False
-        if len(s) == 1 and not s.isdigit():
-            if q_tokens_set and s in q_tokens_set:
-                return False
-            if s.lower() in {"a", "b", "c", "d", "k", "l", "m", "s"}:
-                return False
-            return True
-        if _non_alnum_ratio(s) > self.non_alnum_max:
-            return True
-        if _is_repeated_runs(s):
-            return True
-        if _looks_like_code_garbage(s):
-            return True
-        if _char_diversity_low(s):
-            return True
-        if len(s) < self.min_len_keep and not s.isdigit():
-            return True
-        return False
-
-    def _filter_texts(self, texts, det, rec, box, question_str: str = ""):
+    def _filter_texts(self, texts, det, rec, box, question_str=""):
         keep_indices = []
         seen_items = []
-        q_tokens_set = (
-            set(self._tokenize_simple(question_str)) if question_str else set()
-        )
+        q_tokens_set = set(self._tokenize_simple(question_str)) if question_str else set()
+
         num_boxes = det.size(0)
 
         for i, t in enumerate(texts):
-            if i >= num_boxes:
-                continue
+            if i >= num_boxes: continue
+
             s = _normalize_text(t, lowercase=self.lowercase)
-
-            # Drop tokens that would cost too many subword tokens
             token_ids = self.tokenizer.encode(s, add_special_tokens=False)
-            if len(token_ids) > 25:
-                continue
-            if self._is_noise_text(s, q_tokens_set):
-                continue
 
-            # De-duplicate: same (or near-same) text + overlapping bounding box
+            if len(token_ids) > 25: continue
+            if self._is_noise_text(s, q_tokens_set): continue
+
             is_duplicate = False
             curr_box = box[i]
+
             for prev_s, prev_box in seen_items:
-                text_match = (s == prev_s) or (
-                    self._jaccard_tokens(s, prev_s) > 0.9
-                )
-                if text_match and self._box_iou(curr_box, prev_box) > 0.5:
-                    is_duplicate = True
-                    break
-            if is_duplicate:
-                continue
+                text_match = (s == prev_s) or (self._jaccard_tokens(s, prev_s) > 0.9)
+                if text_match:
+                    if self._box_iou(curr_box, prev_box) > 0.5:
+                        is_duplicate = True
+                        break
+
+            if is_duplicate: continue
 
             seen_items.append((s, curr_box))
             keep_indices.append(i)
 
         if not keep_indices:
             device = det.device
-            return (
-                ["<unk>"],
-                torch.zeros(1, det.size(1), dtype=det.dtype, device=device),
-                torch.zeros(1, rec.size(1), dtype=rec.dtype, device=device),
-                torch.zeros(1, 4, dtype=box.dtype, device=device),
-            )
+            return ["<unk>"], \
+                   torch.zeros(1, det.size(1), dtype=det.dtype, device=device), \
+                   torch.zeros(1, rec.size(1), dtype=rec.dtype, device=device), \
+                   torch.zeros(1, 4, dtype=box.dtype, device=device)
 
         idx_tensor = torch.tensor(keep_indices, dtype=torch.long, device=det.device)
-        keep_t = [texts[i] for i in keep_indices]
-        return keep_t, det[idx_tensor], rec[idx_tensor], box[idx_tensor]
 
-    def _random_word(self, tokens, tokenizer, mask_prob: float, gen, pad_id: int):
-        """Apply BERT-style token masking (80% replace / 10% random / 10% keep)."""
-        if mask_prob <= 0.0:
-            return tokens.clone(), torch.full_like(tokens, -1)
+        keep_t = [texts[i] for i in keep_indices]
+        keep_det = det[idx_tensor]
+        keep_rec = rec[idx_tensor]
+        keep_box = box[idx_tensor]
+
+        return keep_t, keep_det, keep_rec, keep_box
+
+    def _random_word(self, tokens, tokenizer, mask_prob, gen, pad_id):
+        if mask_prob <= 0.0: return tokens.clone(), torch.full_like(tokens, -1)
         device = tokens.device
         t = tokens.clone()
-        if t.dim() == 1:
-            B, T, t2 = 1, t.numel(), t.unsqueeze(0)
-        else:
-            B, T, t2 = t.size(0), t.size(1), t
+        if t.dim() == 1: B, T, t2 = 1, t.numel(), t.unsqueeze(0)
+        else: B, T, t2 = t.size(0), t.size(1), t
 
-        rnd = (
-            torch.rand((B, T), device=device, generator=gen)
-            if gen
-            else torch.rand((B, T), device=device)
-        )
-        specials = [
-            x for x in [
-                getattr(tokenizer, "pad_token_id", None),
-                getattr(tokenizer, "eos_token_id", None),
-                getattr(tokenizer, "unk_token_id", None),
-                self.mask_token_id,
-            ]
-            if x is not None
-        ]
+        rnd = torch.rand((B, T), device=device, generator=gen) if gen else torch.rand((B, T), device=device)
+        specials = [x for x in [getattr(tokenizer, "pad_token_id", None), getattr(tokenizer, "eos_token_id", None), getattr(tokenizer, "unk_token_id", None), self.mask_token_id] if x is not None]
         choose = rnd < mask_prob
-        for sid in specials:
-            choose &= t2 != sid
+        for sid in specials: choose &= t2 != sid
 
         labels = torch.where(choose, t2, torch.full_like(t2, -1))
         repl_id = self.mask_token_id
-        replace_mask = choose & (rnd < mask_prob * 0.8)
-        random_mask = choose & (rnd >= mask_prob * 0.8) & (rnd < mask_prob * 0.9)
+        replace_mask = choose & (rnd < (mask_prob * 0.8))
+        random_mask = choose & (rnd >= (mask_prob * 0.8)) & (rnd < (mask_prob * 0.9))
         out = torch.where(replace_mask, torch.full_like(t2, repl_id), t2)
         if random_mask.any():
             voc = int(getattr(tokenizer, "vocab_size", 32000))
-            rnd_ids = (
-                torch.randint(0, voc, (B, T), device=device, generator=gen,
-                              dtype=torch.long)
-                if gen
-                else torch.randint(0, voc, (B, T), device=device, dtype=torch.long)
-            )
+            rnd_ids = torch.randint(0, voc, (B, T), device=device, generator=gen, dtype=torch.long) if gen else torch.randint(0, voc, (B, T), device=device, dtype=torch.long)
             out = torch.where(random_mask, rnd_ids, out)
-        if t.dim() == 1:
-            out, labels = out.squeeze(0), labels.squeeze(0)
+        if t.dim() == 1: out, labels = out.squeeze(0), labels.squeeze(0)
         return out, labels
 
-    def _create_adv_word_adr(self, token: str) -> str:
-        """Create a character-level adversarial variant of *token*."""
+    def _create_adv_word_adr(self, token):
         rng = random.Random()
         chars = list(token)
-        if len(chars) < 2:
-            return token
+        if len(chars) < 2: return token
         if len(chars) < 4:
             ins = rng.choice(self._char_keys)
             pos = rng.randint(1, len(chars))
             chars = chars[:pos] + [ins] + chars[pos:]
         else:
             pos = rng.randint(1, len(chars) - 1)
-            if rng.random() < 0.5:
-                del chars[pos]
-            else:
-                chars[pos] = rng.choice(self._char_keys)
+            if rng.random() < 0.5: del chars[pos]
+            else: chars[pos] = rng.choice(self._char_keys)
         return "".join(chars)
 
-    def _get_initial_consonant(self, text: str) -> str:
+    def _get_initial_consonant(self, text):
         for cons in self.viet_consonants:
-            if text.startswith(cons):
-                return cons
+            if text.startswith(cons): return cons
         return ""
 
     def _is_vietnamese_vowel(self, ch: str) -> bool:
-        if not ch:
-            return False
+        if not ch: return False
         base = _remove_vietnamese_accents(ch.lower())
         return base in {"a", "e", "i", "o", "u", "y"}
 
     def _strip_tone_char(self, ch: str) -> str:
         tone_marks = {"\u0301", "\u0300", "\u0309", "\u0303", "\u0323"}
         base = unicodedata.normalize("NFD", ch)
-        return unicodedata.normalize(
-            "NFC", "".join(c for c in base if c not in tone_marks)
-        )
+        return unicodedata.normalize("NFC", "".join(c for c in base if c not in tone_marks))
 
     def _apply_tone_char(self, ch: str, tone_id: int) -> str:
-        if tone_id == 0:
-            return ch
+        if tone_id == 0: return ch
         tone_map = {1: "\u0301", 2: "\u0300", 4: "\u0309", 5: "\u0303", 3: "\u0323"}
         mark = tone_map.get(tone_id)
-        if mark is None:
-            return ch
+        if mark is None: return ch
         base_wo_tone = self._strip_tone_char(ch)
-        return unicodedata.normalize(
-            "NFC", unicodedata.normalize("NFD", base_wo_tone) + mark
-        )
+        return unicodedata.normalize("NFC", unicodedata.normalize("NFD", base_wo_tone) + mark)
 
     def _generate_tone_shift_candidates(self, token: str) -> List[str]:
-        chars = list(token)
-        vowels_idx, tone_positions, tone_id = [], [], 0
+        chars = list(token); vowels_idx = []; tone_positions = []; tone_id = 0
         for i, ch in enumerate(chars):
             if self._is_vietnamese_vowel(ch):
                 vowels_idx.append(i)
                 t = get_tone_id(ch)
-                if t != 0:
-                    tone_positions.append(i)
-                    tone_id = t
-        if tone_id == 0 or len(vowels_idx) <= 1 or len(tone_positions) != 1:
-            return []
+                if t != 0: tone_positions.append(i); tone_id = t
+        if tone_id == 0 or len(vowels_idx) <= 1 or len(tone_positions) != 1: return []
         tone_pos = tone_positions[0]
         base_chars = chars.copy()
         base_chars[tone_pos] = self._strip_tone_char(base_chars[tone_pos])
         candidates = []
         for idx in vowels_idx:
-            if idx == tone_pos:
-                continue
+            if idx == tone_pos: continue
             new_chars = base_chars.copy()
             new_chars[idx] = self._apply_tone_char(new_chars[idx], tone_id)
             candidates.append("".join(new_chars))
         return candidates
 
     def _generate_tone_change_candidates(self, token: str) -> List[str]:
-        chars = list(token)
-        vowels_idx = [i for i, ch in enumerate(chars) if self._is_vietnamese_vowel(ch)]
-        if not vowels_idx:
-            return []
+        chars = list(token); vowels_idx = []
+        for i, ch in enumerate(chars):
+            if self._is_vietnamese_vowel(ch): vowels_idx.append(i)
+        if not vowels_idx: return []
         current_tone_idx = -1
         for idx in vowels_idx:
-            if get_tone_id(chars[idx]) != 0:
-                current_tone_idx = idx
-                break
-        target_indices = (
-            [current_tone_idx] if current_tone_idx != -1 else vowels_idx
-        )
+            if get_tone_id(chars[idx]) != 0: current_tone_idx = idx; break
+        target_indices = [current_tone_idx] if current_tone_idx != -1 else vowels_idx
+        possible_tones = [0, 1, 2, 3, 4, 5]
         candidates = []
         for idx in target_indices:
             base_char = self._strip_tone_char(chars[idx])
-            for t_id in range(6):
-                if t_id == get_tone_id(chars[idx]):
-                    continue
+            for t_id in possible_tones:
+                if t_id == get_tone_id(chars[idx]): continue
                 new_chars = chars.copy()
                 new_chars[idx] = self._apply_tone_char(base_char, t_id)
                 candidates.append("".join(new_chars))
         return candidates
 
-    def _find_related_word(self, token: str, editlen: int) -> Optional[str]:
+    def _find_related_word(self, token, editlen):
         token = token.lower().strip()
-        if not token or token[0].isdigit() or token[-1].isdigit():
-            return None
-        if token in self.correction_cache:
-            return self.correction_cache[token]
+        if not token or token[0].isdigit() or token[-1].isdigit(): return None
+        if token in self.correction_cache: return self.correction_cache[token]
 
-        # Priority 1: tone-based candidates (zero edit distance in base form)
         candidates = []
         for cand in self._generate_tone_shift_candidates(token):
             rank = self.global_vocab.get(cand)
-            if rank is not None:
-                candidates.append(
-                    {"word": cand, "dist": 0, "type": 0, "source": rank, "tone": 0}
-                )
+            if rank is not None: candidates.append({"word": cand, "dist": 0, "type": 0, "source": rank, "tone": 0})
         for cand in self._generate_tone_change_candidates(token):
             rank = self.global_vocab.get(cand)
-            if rank is not None:
-                candidates.append(
-                    {"word": cand, "dist": 0, "type": 0, "source": rank, "tone": 0}
-                )
+            if rank is not None: candidates.append({"word": cand, "dist": 0, "type": 0, "source": rank, "tone": 0})
+
         if candidates:
             candidates.sort(key=lambda x: (x["type"], x["source"], -x["tone"]))
             best = candidates[0]["word"]
             self.correction_cache[token] = best
             return best
 
-        # Priority 2: Levenshtein edit-distance candidates
         token_base = _remove_vietnamese_accents(token)
         token_cons = self._get_initial_consonant(token)
         potential_cands = set(self.global_base_map.get(token_base, []))
         if not potential_cands:
-            for w, rank in self.global_vocab.items():
-                if abs(len(w) - len(token)) > editlen:
-                    continue
-                if rank > 0 and token_cons != self._get_initial_consonant(w):
-                    continue
+             for w, rank in self.global_vocab.items():
+                if abs(len(w) - len(token)) > editlen: continue
+                if rank > 0 and token_cons != self._get_initial_consonant(w): continue
                 potential_cands.add((w, rank))
 
         for d_target in range(1, editlen + 1):
             valid_cands = []
             for w, src_rank in potential_cands:
-                if abs(len(w) - len(token)) > d_target:
-                    continue
+                if abs(len(w) - len(token)) > d_target: continue
                 d = editdistance.eval(token, w)
                 if d == d_target:
                     curr_type = 1 if len(w) == len(token) else 2
-                    valid_cands.append(
-                        {
-                            "word": w,
-                            "dist": d,
-                            "type": curr_type,
-                            "source": src_rank,
-                            "tone": get_word_tone_score(w),
-                        }
-                    )
+                    valid_cands.append({"word": w, "dist": d, "type": curr_type, "source": src_rank, "tone": get_word_tone_score(w)})
             if valid_cands:
-                valid_cands.sort(
-                    key=lambda x: (x["type"], x["source"], -x["tone"])
-                )
+                valid_cands.sort(key=lambda x: (x["type"], x["source"], -x["tone"]))
                 best = valid_cands[0]["word"]
                 self.correction_cache[token] = best
                 return best
         return None
 
-    def _findRelatedOCR_adr(
-        self,
-        ocr_tokens: List[str],
-        ocr_max_num: int,
-        adv_probability: float,
-        label_list: List[float],
-        editlen: int,
-    ):
-        """Build augmented OCR view and soft-label similarity matrices for TWC.
-
-        Label assignment (TWA paper §3.2)
-        ───────────────────────────────────
-        Two augmentation cases are handled:
-
-        NOISE  — token is in-vocabulary (correct word) and is deliberately
-                 corrupted into a misspelled form.
-                 • o2r[i,i] = label_list[1]  (correct→noisy:  partial match)
-                 • r2o[i,i] = label_list[0]  (noisy→correct:  partial match)
-                 Symmetric with label_list=[0.9,0.9].
-
-        CORRECT — token is NOT in vocabulary (OCR error) and is mapped to the
-                  nearest dictionary entry.
-                  • o2r[i,i] = label_list[0]  (OCR error→dict word)
-                  • r2o[i,i] = label_list[1]  (dict word→OCR error)
-                  Both directions are partial (< 1.0) because neither form is
-                  "ground truth" — the true word lies between them.
-
-        Returns
-        -------
-        padded  : List[str]      original tokens, padded to *ocr_max_num*
-        related : List[str]      augmented tokens, padded to *ocr_max_num*
-        o2r     : Tensor [N, N]  original→related soft labels
-        r2o     : Tensor [N, N]  related→original soft labels
-        actions : List[str]|None debug action log (only when self.debug=True)
-        """
-        o2r = (
-            torch.ones(ocr_max_num, ocr_max_num, dtype=torch.float)
-            * self.contrastive_ignore
-        )
-        r2o = (
-            torch.ones(ocr_max_num, ocr_max_num, dtype=torch.float)
-            * self.contrastive_ignore
-        )
+    def _findRelatedOCR_adr(self, ocr_tokens, ocr_max_num, adv_probability, label_list, editlen):
+        o2r = torch.ones(ocr_max_num, ocr_max_num, dtype=torch.float) * self.contrastive_ignore
+        r2o = torch.ones(ocr_max_num, ocr_max_num, dtype=torch.float) * self.contrastive_ignore
         toks = ocr_tokens[:ocr_max_num]
         N = min(len(toks), ocr_max_num)
         related, padded, actions = [], [], []
@@ -643,59 +451,34 @@ class ViT5VQADataCollator:
         for i in range(N):
             raw_tok = toks[i]
             norm_tok = _normalize_text(raw_tok, lowercase=True)
-
             if raw_tok == pad_tok or norm_tok in {"<pad>", "</s>"}:
-                rel = pad_tok
-                actions.append("PAD")
-                padded.append(norm_tok)
-                related.append(rel)
-                continue
+                rel = pad_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("PAD")
+                padded.append(norm_tok); related.append(rel); continue
 
             is_special = bool(self.regex_special.search(norm_tok))
             in_vocab = norm_tok in self.global_vocab
             is_number = norm_tok.isdigit()
 
             if is_special or is_number:
-                # URLs, numbers, alphanumeric codes: keep both views identical
-                rel = norm_tok
-                o2r[i, i], r2o[i, i] = 1.0, 1.0
-                actions.append("KEEP_SPECIAL")
-
+                rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP_SPECIAL")
             elif in_vocab:
-                # Token is correct → NOISE augmentation (correct → adversarial)
                 if random.random() < adv_probability and len(norm_tok) > 1:
                     rel = self._create_adv_word_adr(norm_tok)
-                    o2r[i, i] = float(label_list[1])  # correct→noisy
-                    r2o[i, i] = float(label_list[0])  # noisy→correct
+                    o2r[i, i], r2o[i, i] = float(label_list[1]), float(label_list[0])
                     actions.append("NOISE")
                 else:
-                    rel = norm_tok
-                    o2r[i, i], r2o[i, i] = 1.0, 1.0
-                    actions.append("KEEP")
-
+                    rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP")
             else:
-                # Token is likely an OCR error → CORRECT augmentation
                 if random.random() < adv_probability:
                     found = self._find_related_word(norm_tok, editlen)
                     if found:
-                        rel = found
-                        o2r[i, i] = float(label_list[0])  # OCR error→dict word
-                        r2o[i, i] = float(label_list[1])  # dict word→OCR error
-                        actions.append("CORRECT")
+                        rel = found; o2r[i, i], r2o[i, i] = float(label_list[0]), float(label_list[1]); actions.append("CORRECT")
                     else:
-                        rel = norm_tok
-                        o2r[i, i], r2o[i, i] = 1.0, 1.0
-                        actions.append("KEEP_UNKNOWN")
+                        rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP_UNKNOWN")
                 else:
-                    rel = norm_tok
-                    o2r[i, i], r2o[i, i] = 1.0, 1.0
-                    actions.append("KEEP")
+                    rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP")
+            padded.append(norm_tok); related.append(rel)
 
-            padded.append(norm_tok)
-            related.append(rel)
-
-        # Cross-pair labels: duplicate tokens share the same alignment score;
-        # different tokens get 0 (explicit negative signal for contrastive loss).
         for i in range(len(related)):
             for j in range(i + 1, len(related)):
                 if padded[i].lower() == padded[j].lower():
@@ -705,169 +488,98 @@ class ViT5VQADataCollator:
                     o2r[i, j], o2r[j, i] = 0.0, 0.0
                     r2o[i, j], r2o[j, i] = 0.0, 0.0
 
-        # Pad sequences to ocr_max_num
         while len(padded) < ocr_max_num:
-            padded.append(pad_tok)
-            related.append(pad_tok)
-            if self.debug:
-                actions.append("PAD")
-
-        if self.debug:
-            return padded, related, o2r, r2o, actions
+            padded.append(pad_tok); related.append(pad_tok)
+            if self.debug: actions.append("PAD")
+        if self.debug: return padded, related, o2r, r2o, actions
         return padded, related, o2r, r2o, None
 
-    def _findRelatedOCR_plain(
-        self,
-        ocr_tokens: List[str],
-        ocr_max_num: int,
-        adv_probability: float,
-        editlen: int,
-    ):
+    def _findRelatedOCR_plain(self, ocr_tokens, ocr_max_num, adv_probability, editlen):
         toks = ocr_tokens[:ocr_max_num]
         N = min(len(toks), ocr_max_num)
         related, padded = [], []
-
         for i in range(N):
             tok = toks[i].lower().strip()
             padded.append(tok)
             is_special = bool(self.regex_special.search(tok))
             in_vocab = tok in self.global_vocab
             is_number = tok.isdigit()
-
-            if is_special or in_vocab or is_number:
-                rel = tok
-            elif tok and (tok[0].isdigit() or tok[-1].isdigit()):
-                rel = tok
-            elif random.random() < adv_probability and len(tok) > 1:
-                found = self._find_related_word(tok, editlen)
-                rel = found if found else tok
+            if is_special or in_vocab or is_number: rel = tok
             else:
-                rel = tok
+                if tok and (tok[0].isdigit() or tok[-1].isdigit()): rel = tok
+                else:
+                    if random.random() < adv_probability and len(tok) > 1:
+                        found = self._find_related_word(tok, editlen)
+                        rel = found if found else tok
+                    else: rel = tok
             related.append(rel)
-
         while len(padded) < ocr_max_num:
-            padded.append(self.tokenizer.pad_token)
-            related.append(self.tokenizer.pad_token)
+            padded.append(self.tokenizer.pad_token); related.append(self.tokenizer.pad_token)
         return padded, related
 
-    def _add_cons_ocr_info(self, ocr_tokens: List[str], ocr_max_num: int):
+    def _add_cons_ocr_info(self, ocr_tokens, ocr_max_num):
         C = self.char_max_num
         char_mask = torch.zeros(ocr_max_num, C, dtype=torch.float)
         char_ids = torch.zeros(ocr_max_num, C, dtype=torch.long)
         all_word_ids, token_lengths = [], []
-        specials = {
-            x for x in [
-                getattr(self.tokenizer, "pad_token", None),
-                getattr(self.tokenizer, "eos_token", None),
-            ]
-            if x
-        }
+        specials = {x for x in [getattr(self.tokenizer, "pad_token", None), getattr(self.tokenizer, "eos_token", None)] if x}
         unk_id = int(getattr(self.tokenizer, "unk_token_id", 2) or 2)
 
         N = min(len(ocr_tokens), ocr_max_num)
         for i in range(N):
             tok = ocr_tokens[i]
-            if tok in specials or _normalize_text(tok, lowercase=True) in {
-                "<pad>", "</s>"
-            }:
-                all_word_ids.append(self.pad_id)
-                token_lengths.append(1)
-                continue
+            if tok in specials or _normalize_text(tok, lowercase=True) in {"<pad>", "</s>"}:
+                all_word_ids.append(self.pad_id); token_lengths.append(1); continue
 
-            ids = self.tokenizer.encode(
-                _normalize_text(tok, lowercase=True), add_special_tokens=False
-            )
-            if ids:
-                all_word_ids.extend(ids)
-                token_lengths.append(len(ids))
-            else:
-                all_word_ids.append(unk_id)
-                token_lengths.append(1)
+            ids = self.tokenizer.encode(_normalize_text(tok, lowercase=True), add_special_tokens=False)
+            if len(ids) > 0: all_word_ids.extend(ids); token_lengths.append(len(ids))
+            else: all_word_ids.append(unk_id); token_lengths.append(1)
 
             norm = _normalize_text(tok, lowercase=True)
             Lc = min(len(norm), C)
             for c_i in range(Lc):
-                # FIX 4: use explicit fallback index 0 (<unk>) instead of
-                # self.char_set.get("<unk>", 1) which mapped unknowns to 'b'.
-                c_idx = self.char_set.get(norm[c_i], _CHAR_UNK_IDX)
-                char_ids[i, c_i] = c_idx
-                char_mask[i, c_i] = 1.0
+                c_idx = self.char_set.get(norm[c_i], self.char_set.get("<unk>", 1))
+                char_ids[i, c_i] = c_idx; char_mask[i, c_i] = 1.0
 
-        return (
-            char_ids,
-            char_mask,
-            torch.tensor(all_word_ids, dtype=torch.long),
-            torch.tensor(token_lengths, dtype=torch.long),
-        )
+        return char_ids, char_mask, torch.tensor(all_word_ids, dtype=torch.long), torch.tensor(token_lengths, dtype=torch.long)
 
-    def _prepare_ocr(self, ocr_raw: dict, max_len_in_batch=None, question: str = ""):
-        """Filter, trim, and pad OCR features for one sample.
-
-        Parameters
-        ----------
-        ocr_raw          : raw dict from ocr_encoder
-        max_len_in_batch : dynamic pad target for this batch
-        question         : question string for question-aware OCR filtering
-                           (must always be provided so _filter_texts can keep
-                           tokens that appear in the question)
-        """
+    def _prepare_ocr(self, ocr_raw, max_len_in_batch=None, question=""):
         det = ocr_raw["det_features"]
         rec = ocr_raw["rec_features"]
         box = ocr_raw["boxes"]
         texts = ocr_raw.get("texts", [])
 
-        # Question-aware filtering + noise removal + IoU-based dedup
-        texts_f, det_f, rec_f, box_f = self._filter_texts(
-            texts, det, rec, box, question_str=question
-        )
+        texts_f, det_f, rec_f, box_f = self._filter_texts(texts, det, rec, box, question_str=question)
 
-        # Hard cap at seq_max
         if det_f.size(0) > self.seq_max:
-            det_f = det_f[: self.seq_max]
-            rec_f = rec_f[: self.seq_max]
-            box_f = box_f[: self.seq_max]
-            texts_f = texts_f[: self.seq_max]
+            det_f = det_f[:self.seq_max]; rec_f = rec_f[:self.seq_max]; box_f = box_f[:self.seq_max]; texts_f = texts_f[:self.seq_max]
 
-        # Dynamic padding within the batch
         target_len = max_len_in_batch if max_len_in_batch is not None else self.seq_max
         target_len = max(target_len, det_f.size(0))
 
         Lw = det_f.size(0)
-        device = det_f.device
-        word_mask = torch.ones(Lw, dtype=torch.long, device=device)
+        word_mask = torch.ones(Lw, dtype=torch.long, device=det_f.device)
 
         if Lw < target_len:
             pad_len = target_len - Lw
-            det_f = torch.cat(
-                [det_f, torch.zeros(pad_len, det_f.size(1), dtype=det_f.dtype,
-                                    device=device)], dim=0
-            )
-            rec_f = torch.cat(
-                [rec_f, torch.zeros(pad_len, rec_f.size(1), dtype=rec_f.dtype,
-                                    device=device)], dim=0
-            )
-            box_f = torch.cat(
-                [box_f, torch.zeros(pad_len, 4, dtype=box_f.dtype, device=device)],
-                dim=0,
-            )
-            word_mask = torch.cat(
-                [word_mask, torch.zeros(pad_len, dtype=torch.long, device=device)],
-                dim=0,
-            )
+            device = det_f.device
+            det_pad = torch.zeros(pad_len, det_f.size(1), dtype=det_f.dtype, device=device)
+            rec_pad = torch.zeros(pad_len, rec_f.size(1), dtype=rec_f.dtype, device=device)
+            box_pad = torch.zeros(pad_len, 4, dtype=box_f.dtype, device=device)
+
+            det_f = torch.cat([det_f, det_pad], dim=0)
+            rec_f = torch.cat([rec_f, rec_pad], dim=0)
+            box_f = torch.cat([box_f, box_pad], dim=0)
+            word_mask = torch.cat([word_mask, torch.zeros(pad_len, dtype=torch.long, device=device)], dim=0)
+
             pad_tok = self.tokenizer.pad_token or "<pad>"
             texts_f = texts_f + [pad_tok] * pad_len
 
         return {
-            "det_features": det_f,
-            "rec_features": rec_f,
-            "boxes": box_f,
-            "word_mask": word_mask,
-            "width": ocr_raw["width"],
-            "height": ocr_raw["height"],
+            "det_features": det_f, "rec_features": rec_f, "boxes": box_f,
+            "word_mask": word_mask, "width": ocr_raw["width"], "height": ocr_raw["height"],
             "texts": texts_f,
         }, texts_f
-
-    # ── Main collate call ─────────────────────────────────────────────────────
 
     def __call__(self, batch):
         paths = [b["image_path"] for b in batch]
@@ -946,7 +658,7 @@ class ViT5VQADataCollator:
             for i in range(B):
                 src_idx = pollute_indices[i]
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
+                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len, question=qs[i])
 
                 # Nối câu hỏi và OCR lại
                 combined_texts.append(f"{qs[i]} {' '.join(raw_texts)}".strip())
@@ -974,7 +686,7 @@ class ViT5VQADataCollator:
             for i in range(B):
                 src_idx = pollute_indices[i]
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
+                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len, question=qs[i])
                 norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
 
                 if use_ocr_aug:
