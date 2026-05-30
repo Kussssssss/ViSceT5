@@ -157,3 +157,6 @@ checkpoints/
 *.json
 !metadata.json
 !plugin.json
+
+# Notebooks
+*.ipynb
