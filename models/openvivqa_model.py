@@ -816,16 +816,17 @@ class OpenViVQAModel(PreTrainedModel):
                 twa_ocr_char_mask, token_mask_for_ocr, device
             )
 
-        N_word = ocr_fused_feat.size(1)
+        L_tok = word_ids_for_ocr.size(1)
+        if ocr_fused_feat.size(1) != L_tok:
+            ocr_fused_feat = _pad_or_crop_lastdim(ocr_fused_feat, L_tok, pad_value=0.0)
+        if token_mask_for_ocr.size(1) != L_tok:
+            token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
 
-        if mask_ocr.size(1) != N_word:
-            mask_ocr = _pad_or_crop_lastdim_int(
-                mask_ocr,
-                N_word,
-                pad_value=0,
-            )
-        
-        mask_ocr = mask_ocr.long()
+        attn_summary = _ensure_1_token(vs_out.get("attn_summary", None), B, D, device, self.target_dtype)
+        crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
+        crop_mask = vs_out.get("crop_mask", torch.zeros(B, 0, device=device, dtype=torch.long))
+
+        # CONCAT CHUỖI VÀO ENCODER: CHỈ CÓ 1 KHỐI ocr_fused_feat
         fused_seq = torch.cat(
             [
                 txt_emb_for_enc,
@@ -839,14 +840,11 @@ class OpenViVQAModel(PreTrainedModel):
 
         mask_txt = txt_attn_mask_for_enc.long()
         mask_img = img_pack["img_attn_mask"].long()
+        mask_ocr = token_mask_for_ocr.long()
         mask_crop = crop_mask.long()
-        mask_attn = torch.ones(
-            B,
-            attn_summary.size(1),
-            device=device,
-            dtype=torch.long,
-        )
-        
+        mask_attn = torch.ones(B, attn_summary.size(1), device=device, dtype=torch.long)
+
+        # GHÉP ATTENTION MASK KHỚP HOÀN TOÀN VỚI FUSED_SEQ
         fused_mask = torch.cat(
             [
                 mask_txt,
