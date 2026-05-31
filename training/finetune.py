@@ -51,10 +51,28 @@ def main():
     out_dir = os.path.join(data_args.data_dir, "processed")
     hub = DatasetHubLoader(raw_dir, out_dir)
     
-    try:
+    import yaml
+    config_path = f"configs/data/{data_args.dataset_name}.yaml"
+    if os.path.exists(config_path):
+        with open(config_path, 'r', encoding='utf-8') as f:
+            ds_cfg = yaml.safe_load(f)
+        hub.register_dataset(
+            dataset_name=ds_cfg['dataset_name'],
+            task_type="VQA",
+            image_zip_id=ds_cfg['image'].get('drive_id'),
+            image_dir_override='',
+            ocr_zip_id=ds_cfg['ocr'].get('drive_id'),
+            ocr_dir_override='',
+            splits={
+                "train":      {"id": ds_cfg['dataset']['train'].get('drive_id') or ds_cfg['dataset']['train'].get('dir'), "url": None},
+                "validation": {"id": ds_cfg['dataset']['validation'].get('drive_id') or ds_cfg['dataset']['validation'].get('dir'), "url": None},
+                "test":       {"id": ds_cfg['dataset']['test'].get('drive_id') or ds_cfg['dataset']['test'].get('dir'), "url": None},
+            }
+        )
         hub.prepare(data_args.dataset_name)
-    except KeyError:
-        print("⚠️ Dataset not registered in Hub, assuming files are manually ready.")
+    else:
+        print(f"⚠️ Dataset config not found at {config_path}. Assuming it's already registered or manually ready.")
+
     
     try:
         dfs = hub.load_task(data_args.dataset_name)
