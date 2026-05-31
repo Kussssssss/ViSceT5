@@ -10,7 +10,7 @@ ablation_use_ocr: true
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
-model_name_or_path: "./output/pretrain_ckpt_base"  # Hoặc thư mục output của bước pretrain
+model_name_or_path: null  # Hoặc thư mục output của bước pretrain (nếu finetune wo pretrain thì để null)
 resume_from_checkpoint: null  # Đường dẫn local tới thư mục checkpoint (vd: "./output/finetune/checkpoint-500") để resume.
 resume_checkpoint_id: ""      # Google Drive ID của file zip chứa checkpoint finetune để resume.
 
