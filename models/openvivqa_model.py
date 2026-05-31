@@ -487,7 +487,6 @@ class OpenViVQAModel(PreTrainedModel):
                 ocr_text_tok[i].unsqueeze(0),
                 char_feat_tok_i.unsqueeze(0)
             )
-            sal_input_i, _ = self.spatial_embedding(sal_input_i, [sal_info_tok], mask=tok_mask_all_i.unsqueeze(0))
 
             ocr_box_feat_tok_list.append(sal_input_i.squeeze(0))
 
@@ -800,9 +799,15 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_box_mask_for_ocr = ocr_mask_box.to(device).long() if ocr_mask_box is not None else None
 
         if use_ocr:
-            ocr_fused_feat, mask_ocr = self._encode_ocr_features(
-                ocr_info, word_ids_for_ocr, ocr_map, char_ids_for_ocr, 
-                char_mask_for_ocr, token_mask_for_ocr, ocr_box_mask_for_ocr, device
+            ocr_fused_feat = self._encode_ocr_features(
+                ocr_info,
+                word_ids_for_ocr,
+                ocr_map,
+                char_ids_for_ocr,
+                char_mask_for_ocr,
+                token_mask_for_ocr,
+                ocr_box_mask_for_ocr,
+                device,
             )
         else:
             # Baseline: Dùng Linear thay vì Spatial/Group Attention
