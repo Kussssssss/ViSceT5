@@ -11,8 +11,8 @@ ablation_use_ocr: true
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
 model_name_or_path: null  # Hoặc thư mục output của bước pretrain (nếu finetune wo pretrain thì để null)
-resume_from_checkpoint: null  # Đường dẫn local tới thư mục checkpoint (vd: "./output/finetune/checkpoint-500") để resume.
-resume_checkpoint_id: ""      # Google Drive ID của file zip chứa checkpoint finetune để resume.
+resume_from_checkpoint: null
+resume_checkpoint_id: ""
 
 seed: 42
 num_train_epochs: 5
@@ -23,15 +23,21 @@ learning_rate: 0.00003
 weight_decay: 0.1
 warmup_ratio: 0.1
 lr_scheduler_type: "cosine"
+
 logging_steps: 100
 eval_strategy: "epoch"
 save_strategy: "epoch"
 save_total_limit: 4
+
 metric_for_best_model: "loss"
 greater_is_better: false
 load_best_model_at_end: true
 remove_unused_columns: false
 predict_with_generate: true
+
+label_smoothing_factor: 0.1
+optim: "adamw_torch"
 dataloader_num_workers: 4
 dataloader_pin_memory: true
+disable_tqdm: false
 fp16: false
