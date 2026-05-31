@@ -12,7 +12,6 @@ output_dir: "./output/pretrain"
 logging_dir: "./output/pretrain/logs"
 resume_from_checkpoint: null  # Đường dẫn local tới thư mục checkpoint (vd: "./output/pretrain/checkpoint-500"). Bỏ trống (null) nếu không dùng.
 resume_checkpoint_id: ""      # Google Drive ID của file zip chứa checkpoint nếu bạn muốn tải từ mây về để resume.
-pretrain_weights_id: ""       # Google Drive ID của pretrain weights ban đầu.
 
 seed: 42
 num_train_epochs: 10

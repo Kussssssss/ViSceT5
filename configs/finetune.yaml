@@ -3,6 +3,7 @@ data_dir: "./datasets"
 vocab_path: "configs/data/term_vocab.txt"
 viet_vocab_path: "configs/data/viet_vocab.jsonl"
 
+loss_ablation_mode: "all"
 ablation_use_qaclip: true
 ablation_use_vs: true
 ablation_use_ocr: true

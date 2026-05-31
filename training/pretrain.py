@@ -69,19 +69,13 @@ def main():
     ocr_config = OCREncoderConfig()
     vision_ocr = Vision_Encode_Ocr_Feature(ocr_config)
     
-    # 3. Handle Weights / Checkpoint Downloads
-    PRETRAIN_CKPT_DIR = os.path.join(training_args.output_dir, "pretrain_ckpt_base")
-    if training_args.pretrain_weights_id:
-        download_and_extract_checkpoint(training_args.pretrain_weights_id, PRETRAIN_CKPT_DIR)
-        
+    # 3. Handle Checkpoint Downloads
     if training_args.resume_checkpoint_id:
         resume_dir = os.path.join(training_args.output_dir, "resume_ckpt")
         download_and_extract_checkpoint(training_args.resume_checkpoint_id, resume_dir)
         training_args.resume_from_checkpoint = resume_dir
 
-    ckpt_to_load = training_args.model_name_or_path
-    if not ckpt_to_load and os.path.exists(PRETRAIN_CKPT_DIR) and os.listdir(PRETRAIN_CKPT_DIR):
-        ckpt_to_load = PRETRAIN_CKPT_DIR
+    ckpt_to_load = model_args.model_name_or_path
 
     # 4. Tokenizer & Model
     if ckpt_to_load:

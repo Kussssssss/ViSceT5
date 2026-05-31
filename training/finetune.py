@@ -100,12 +100,17 @@ def main():
             model.load_state_dict(new_state_dict, strict=False)
 
     # Apply Finetune config overrides
+    mode = model_args.loss_ablation_mode
+    use_ocr_aug = mode in ["all", "only_twc_ocr_aug"]
+
     model.pretrain = False
     model.config.pretrain = False
+    model.config.pretrain_ablation_mode = mode
     model.config.ablation_use_qaclip = model_args.ablation_use_qaclip
     model.config.ablation_use_vs = model_args.ablation_use_vs
     model.config.ablation_use_ocr = model_args.ablation_use_ocr
     model.config.use_twc = False  # TWC is disabled during finetuning
+    model.config.use_ocr_aug_finetune = use_ocr_aug
     model.to(DEVICE)
     
     if hasattr(model, "visual_search") and hasattr(model.visual_search, "vit_processor"):
@@ -137,6 +142,8 @@ def main():
     )
     if hasattr(data_collator, "set_mode"):
         data_collator.set_mode(pretrain=False, mask_prob=0.0)
+    data_collator.pretrain_ablation_mode = mode
+    data_collator.use_ocr_aug_finetune = use_ocr_aug
         
     compute_metrics_fn = build_compute_metrics_finetune(tokenizer)
 

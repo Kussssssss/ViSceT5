@@ -40,7 +40,6 @@ try:
         gc.collect()
         torch.cuda.empty_cache()
 
-    clear_output()
     print("✅ Model loaded successfully on " + str(model.device))
     print_trainable_params(model)
 
