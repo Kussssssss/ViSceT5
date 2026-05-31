@@ -5,18 +5,25 @@ print_trainable_params(), safe_download_weights().
 
 import time
 import gc
-from collections import defaultdict
 import torch
 import torch.nn as nn
+from collections import defaultdict
 from huggingface_hub import snapshot_download
 
-import time
-import gc
-import torch
-import torch.nn as nn
-from collections import defaultdict
-from huggingface_hub import snapshot_download
-from IPython.display import clear_output
+def safe_download_weights(repos, max_retries=3, delay=5):
+    for repo in repos:
+        print(f"📥 Downloading weights for {repo}...")
+        for attempt in range(max_retries):
+            try:
+                snapshot_download(repo_id=repo, local_files_only=False)
+                print(f"✅ Successfully downloaded {repo}")
+                break
+            except Exception as e:
+                print(f"⚠️ Attempt {attempt+1}/{max_retries} failed for {repo}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(delay)
+                else:
+                    raise RuntimeError(f"❌ Failed to download {repo} after {max_retries} attempts.")
 
 def print_trainable_params(model: nn.Module, by_top_level: bool = True) -> None:
     total = sum(p.numel() for p in model.parameters())
