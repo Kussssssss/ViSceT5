@@ -268,40 +268,48 @@ class DatasetHubLoader:
         if spec["image_dir_override"] and os.path.isdir(spec["image_dir_override"]):
             image_dir = _find_leaf_dir(spec["image_dir_override"], _is_img)
         else:
-            raw_dir_img = _ensure_dir(os.path.join(self.raw_root, f"{dataset_name}_img"))
-            zip_path_img = spec.get("image_zip_path")
-
-            if zip_path_img is None:
-                if not spec["image_zip_id"]:
-                    raise ValueError("image_zip_id or image_zip_path is required when image_dir_override is not provided.")
-                zip_path_img = os.path.join(raw_dir_img, spec["image_zip_name"])
-                _maybe_download(spec["image_zip_id"], None, zip_path_img)
-
             image_root = os.path.join(out_dir, spec["image_subdir_name"])
-            _extract_zip(zip_path_img, image_root)
-            image_dir = _find_leaf_dir(image_root, _is_img)
+            
+            if os.path.isdir(image_root) and _count_in_dir(_find_leaf_dir(image_root, _is_img), _is_img) > 0:
+                image_dir = _find_leaf_dir(image_root, _is_img)
+            else:
+                raw_dir_img = _ensure_dir(os.path.join(self.raw_root, f"{dataset_name}_img"))
+                zip_path_img = spec.get("image_zip_path")
 
-            if self.cleanup and spec.get("image_zip_path") is None:
-                _safe_remove(zip_path_img)
-                _safe_rmtree(raw_dir_img)
+                if zip_path_img is None:
+                    if not spec["image_zip_id"]:
+                        raise ValueError("image_zip_id or image_zip_path is required when image_dir_override is not provided.")
+                    zip_path_img = os.path.join(raw_dir_img, spec["image_zip_name"])
+                    _maybe_download(spec["image_zip_id"], None, zip_path_img)
+
+                _extract_zip(zip_path_img, image_root)
+                image_dir = _find_leaf_dir(image_root, _is_img)
+
+                if self.cleanup and spec.get("image_zip_path") is None:
+                    _safe_remove(zip_path_img)
+                    _safe_rmtree(raw_dir_img)
 
         if spec["ocr_dir_override"] and os.path.isdir(spec["ocr_dir_override"]):
             ocr_dir = _find_leaf_dir(spec["ocr_dir_override"], _is_ocr)
         else:
-            if spec.get("ocr_zip_path") or spec.get("ocr_zip_id"):
-                raw_dir_ocr = _ensure_dir(os.path.join(self.raw_root, f"{dataset_name}_ocr"))
-                zip_path_ocr = spec.get("ocr_zip_path")
-                if zip_path_ocr is None:
-                    zip_path_ocr = os.path.join(raw_dir_ocr, spec["ocr_zip_name"])
-                    _maybe_download(spec["ocr_zip_id"], None, zip_path_ocr)
-
-                ocr_root = os.path.join(out_dir, spec["ocr_subdir_name"])
-                _extract_zip(zip_path_ocr, ocr_root)
+            ocr_root = os.path.join(out_dir, spec["ocr_subdir_name"])
+            
+            if os.path.isdir(ocr_root) and _count_in_dir(_find_leaf_dir(ocr_root, _is_ocr), _is_ocr) > 0:
                 ocr_dir = _find_leaf_dir(ocr_root, _is_ocr)
+            else:
+                if spec.get("ocr_zip_path") or spec.get("ocr_zip_id"):
+                    raw_dir_ocr = _ensure_dir(os.path.join(self.raw_root, f"{dataset_name}_ocr"))
+                    zip_path_ocr = spec.get("ocr_zip_path")
+                    if zip_path_ocr is None:
+                        zip_path_ocr = os.path.join(raw_dir_ocr, spec["ocr_zip_name"])
+                        _maybe_download(spec["ocr_zip_id"], None, zip_path_ocr)
 
-                if self.cleanup and spec.get("ocr_zip_path") is None:
-                    _safe_remove(zip_path_ocr)
-                    _safe_rmtree(raw_dir_ocr)
+                    _extract_zip(zip_path_ocr, ocr_root)
+                    ocr_dir = _find_leaf_dir(ocr_root, _is_ocr)
+
+                    if self.cleanup and spec.get("ocr_zip_path") is None:
+                        _safe_remove(zip_path_ocr)
+                        _safe_rmtree(raw_dir_ocr)
 
         self.paths[dataset_name] = {"out_dir": out_dir, "annotations": ann_out, "image_dir": image_dir, "ocr_dir": ocr_dir}
         return self.paths[dataset_name]
