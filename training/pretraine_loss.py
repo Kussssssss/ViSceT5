@@ -134,7 +134,7 @@ class ViT5PretrainLoss(nn.Module):
 
             total_loss = contrastive_loss + (0.0 * mlm_loss) + (0.0 * pollute_loss)
 
-        elif mode in ["no_twc_ocr_aug", "no_twc", "w/o_twc", "without_twc"]:
+        elif mode in ["no_twc_ocr_aug", "no_twc", "w/o_twc", "without_twc", "only_itm_mlm"]:
             total_loss = mlm_loss + pollute_loss
 
         else:
