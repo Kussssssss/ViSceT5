@@ -31,7 +31,10 @@ from utils.io_utils import download_and_extract_checkpoint
 
 def main():
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    if len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
+        model_args, data_args, training_args = parser.parse_yaml_file(os.path.abspath(sys.argv[1]))
+    else:
+        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
     set_seed(training_args.seed)
     random.seed(training_args.seed)
