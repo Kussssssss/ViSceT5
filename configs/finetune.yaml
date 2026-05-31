@@ -15,7 +15,7 @@ resume_from_checkpoint: null  # Đường dẫn local tới thư mục checkpoin
 resume_checkpoint_id: ""      # Google Drive ID của file zip chứa checkpoint finetune để resume.
 
 seed: 42
-num_train_epochs: 10
+num_train_epochs: 5
 per_device_train_batch_size: 4
 per_device_eval_batch_size: 4
 gradient_accumulation_steps: 2
