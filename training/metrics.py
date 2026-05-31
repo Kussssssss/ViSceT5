@@ -154,7 +154,9 @@ def build_compute_metrics_finetune(tokenizer_for_metrics):
     return compute_metrics
 
 class TaskSpecificTrainer(Seq2SeqTrainer):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, pretrain_loss_fn=None, pretrain_acc_fn=None, **kwargs):
+        self.pretrain_loss_fn = pretrain_loss_fn
+        self.pretrain_acc_fn = pretrain_acc_fn
         super().__init__(*args, **kwargs)
         self._running_loss = 0.0
         self._running_acc = 0.0
@@ -166,7 +168,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             return
 
         with torch.no_grad():
-            batch_acc = pretrain_acc_fn.calculate(inputs, outputs)
+            batch_acc = self.pretrain_acc_fn.calculate(inputs, outputs)
             batch_acc_val = batch_acc.item()
             loss_val = loss.item()
 
@@ -197,14 +199,14 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         outputs = model(**inputs)
 
         if getattr(model, "pretrain", False):
-            loss = pretrain_loss_fn(inputs, outputs)
+            loss = self.pretrain_loss_fn(inputs, outputs)
             self._log_pretrain_metrics(loss, inputs, outputs)
 
             if globals().get("DEBUG_TRAIN", False) and (self.state.global_step % 500 == 0):
                  if self.state.global_step != self._last_log_step:
                     self._last_log_step = self.state.global_step
                     with torch.no_grad():
-                        acc_val = pretrain_acc_fn.calculate(inputs, outputs).item()
+                        acc_val = self.pretrain_acc_fn.calculate(inputs, outputs).item()
                         print(f"Debug Step {self.state.global_step}: Loss={loss.item():.4f}, Acc={acc_val:.4f}")
         else:
             loss = outputs.get("loss")
@@ -230,8 +232,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             # 1) PRETRAIN BRANCH
             if getattr(model, "pretrain", False):
                 outputs = model(**inputs)
-                loss = pretrain_loss_fn(inputs, outputs)
-                acc_tensor = pretrain_acc_fn.calculate(inputs, outputs)
+                loss = self.pretrain_loss_fn(inputs, outputs)
+                acc_tensor = self.pretrain_acc_fn.calculate(inputs, outputs)
 
                 if prediction_loss_only:
                     return (loss.detach(), None, None)

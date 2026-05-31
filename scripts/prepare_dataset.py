@@ -5,12 +5,11 @@ from data.dataset_hub import DatasetHubLoader
 import pandas as pd
 import os
 import argparse
-import yaml # THÊM THƯ VIỆN YAML
-from IPython.display import display, Image, HTML
+import yaml
 
 def main(args):
-    RAW_DATASET_DIR = OUTPUT_PATH + "/raw"
-    OUT_DIR = OUTPUT_PATH + "/datasets"
+    RAW_DATASET_DIR = os.path.join(args.data_dir, "raw")
+    OUT_DIR = os.path.join(args.data_dir, "processed")
 
     hub = DatasetHubLoader(RAW_DATASET_DIR, OUT_DIR)
 
@@ -69,10 +68,11 @@ def main(args):
     print(f"   - Columns:            {list(final_train_df.columns)}")
 
     print("\nSample Rows (Mixed):")
-    display(final_train_df.head(5))
+    print(final_train_df.head(5))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare Dataset")
     parser.add_argument("--config", type=str, default="configs/data/ViTextVQA.yaml", help="Path to config file")
+    parser.add_argument("--data_dir", type=str, default="./datasets", help="Path to store downloaded data")
     args = parser.parse_args()
     main(args)

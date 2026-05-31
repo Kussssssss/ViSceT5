@@ -86,10 +86,19 @@ python scripts/prepare_dataset.py
 python scripts/init_model.py
 ```
 
-### 4. Finetune
+### 4. Pretrain
+To run pretraining efficiently with a YAML configuration:
 ```bash
-python training/finetune.py
+python training/pretrain.py configs/pretrain.yaml
 ```
+
+### 5. Finetune
+To run finetuning efficiently (resuming from pretrain if specified):
+```bash
+python training/finetune.py configs/finetune.yaml
+```
+
+**Note**: You can modify `configs/pretrain.yaml` and `configs/finetune.yaml` to set dataset paths, enable/disable module ablations (like `ablation_use_ocr`), and handle resuming by specifying `resume_checkpoint_id` or changing `model_name_or_path`.
 
 ## Key Dependencies
 | Package | Version |

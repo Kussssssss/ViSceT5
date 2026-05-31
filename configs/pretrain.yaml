@@ -1,0 +1,36 @@
+dataset_name: "ViTextVQA"
+data_dir: "./datasets"
+vocab_path: "configs/data/term_vocab.txt"
+viet_vocab_path: "configs/data/viet_vocab.jsonl"
+
+loss_ablation_mode: "all"
+ablation_use_qaclip: true
+ablation_use_vs: true
+ablation_use_ocr: true
+
+output_dir: "./output/pretrain"
+logging_dir: "./output/pretrain/logs"
+resume_from_checkpoint: null  # Đường dẫn local tới thư mục checkpoint (vd: "./output/pretrain/checkpoint-500"). Bỏ trống (null) nếu không dùng.
+resume_checkpoint_id: ""      # Google Drive ID của file zip chứa checkpoint nếu bạn muốn tải từ mây về để resume.
+pretrain_weights_id: ""       # Google Drive ID của pretrain weights ban đầu.
+
+seed: 42
+num_train_epochs: 10
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 8
+learning_rate: 0.0001
+weight_decay: 0.01
+warmup_ratio: 0.1
+lr_scheduler_type: "cosine"
+logging_steps: 100
+eval_strategy: "epoch"
+save_strategy: "epoch"
+save_total_limit: 3
+metric_for_best_model: "loss"
+greater_is_better: false
+load_best_model_at_end: true
+remove_unused_columns: false
+dataloader_num_workers: 4
+dataloader_pin_memory: true
+fp16: false
