@@ -3,6 +3,12 @@ models/modules/ocr_consformer.py
 OCREncoder (Consformer): GroupAttention stacks.
 """
 
+import math
+import copy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
 def clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 

@@ -34,8 +34,8 @@ def main(args):
             print("\n📥 Downloading term_vocab.txt...")
             download_file(term_id, os.path.join(out_vocab_dir, "term_vocab.txt"))
         if viet_id:
-            print("\n📥 Downloading viet_vocab.jsonl...")
-            download_file(viet_id, os.path.join(out_vocab_dir, "viet_vocab.jsonl"))
+            print("\n📥 Downloading viet_vocab.txt...")
+            download_file(viet_id, os.path.join(out_vocab_dir, "viet_vocab.txt"))
 
     NAME_SET1 = config['dataset_name']
 

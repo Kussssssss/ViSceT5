@@ -49,7 +49,7 @@ class DataArguments:
         metadata={"help": "Path to the term vocabulary file."}
     )
     viet_vocab_path: str = field(
-        default="configs/data/viet_vocab.jsonl",
+        default="configs/data/viet_vocab.txt",
         metadata={"help": "Path to the Vietnamese vocabulary file."}
     )
 

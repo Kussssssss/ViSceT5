@@ -135,10 +135,10 @@ class ViT5VQADataCollator:
                         continue
                     try:
                         entry = json.loads(line)
+                        raw = entry.get("text", "")
                     except Exception:
-                        continue
+                        raw = line
 
-                    raw = entry.get("text", "")
                     if not raw:
                         continue
 

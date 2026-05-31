@@ -1,7 +1,7 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
 vocab_path: "configs/data/term_vocab.txt"
-viet_vocab_path: "configs/data/viet_vocab.jsonl"
+viet_vocab_path: "configs/data/viet_vocab.txt"
 
 loss_ablation_mode: "all"
 ablation_use_qaclip: true
