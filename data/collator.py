@@ -2,6 +2,23 @@
 data/collator.py
 ViT5VQADataCollator — full TWC+MLM+ITM data collator.
 """
+from PIL import ImageOps
+import os
+import re
+import json
+import collections
+import hashlib
+import random
+from typing import Any, Dict, List, Optional, Tuple, Set
+
+import torch
+from torch.utils.data import DataLoader, Dataset
+from PIL import Image
+import editdistance
+import pandas as pd
+import unicodedata
+import numpy as np
+
 
 from data.vocab import (
     COMBINED_CHARS, _CHAR_UNK_IDX, TONE_RANK,
@@ -23,7 +40,7 @@ class ViT5VQADataCollator:
         eng_vocab_path,
         dataframe,
         pretrain=True,
-        debug=TEST,
+        debug=False,
     ):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
