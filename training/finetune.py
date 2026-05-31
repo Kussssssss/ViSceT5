@@ -20,7 +20,7 @@ from transformers import (
 
 from configs.arguments import ModelArguments, DataArguments, CustomTrainingArguments
 from configs.model_config import OpenViVQAConfig
-from configs.ocr_config import OCREncoderConfig
+from configs.ocr_config import DEFAULT_OCR_CONFIG
 from models.openvivqa_model import OpenViVQAModel
 from models.modules.ocr_encoder_feature import Vision_Encode_Ocr_Feature
 from data.dataset_hub import DatasetHubLoader
@@ -65,7 +65,7 @@ def main():
     val_dataset = ViT5VQADataset(val_df)
 
     # 2. OCR Encoder
-    ocr_config = OCREncoderConfig()
+    ocr_config = DEFAULT_OCR_CONFIG
     vision_ocr = Vision_Encode_Ocr_Feature(ocr_config)
     
     # 3. Handle Weights Downloads
