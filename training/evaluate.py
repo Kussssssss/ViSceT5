@@ -2,6 +2,9 @@
 # training/evaluate.py
 # Evaluation / prediction pipeline.
 # """
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # import os, gc, json, torch, numpy as np
 # from transformers import (

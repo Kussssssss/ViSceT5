@@ -4,6 +4,10 @@ Download weights and initialize OpenViVQAModel. Run: python scripts/init_model.p
 """
 
 #!/usr/bin/env python
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import gc
 import torch
 from configs.model_config import OpenViVQAConfig
