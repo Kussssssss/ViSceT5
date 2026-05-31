@@ -4,6 +4,7 @@
 set -e
 
 # Java (for pycocoevalcap CIDEr scorer)
+apt-get update -y
 apt-get install -y git-lfs openjdk-17-jdk
 
 export JAVA_HOME="/usr/lib/jvm/java-17-openjdk-amd64"
