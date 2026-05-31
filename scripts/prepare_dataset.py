@@ -16,6 +16,23 @@ def main(args):
     with open(args.config, 'r', encoding='utf-8') as f:
         config = yaml.safe_load(f)
 
+    vocab_cfg_path = os.path.join(os.path.dirname(args.config), "vocab.yaml")
+    if os.path.exists(vocab_cfg_path):
+        with open(vocab_cfg_path, 'r', encoding='utf-8') as f:
+            vocab_cfg = yaml.safe_load(f) or {}
+            
+        term_id = vocab_cfg.get("term_vocab_id", "")
+        viet_id = vocab_cfg.get("viet_vocab_id", "")
+        out_vocab_dir = os.path.dirname(args.config)
+        
+        from utils.io_utils import download_file
+        if term_id:
+            print("\n📥 Downloading term_vocab.txt...")
+            download_file(term_id, os.path.join(out_vocab_dir, "term_vocab.txt"))
+        if viet_id:
+            print("\n📥 Downloading viet_vocab.jsonl...")
+            download_file(viet_id, os.path.join(out_vocab_dir, "viet_vocab.jsonl"))
+
     NAME_SET1 = config['dataset_name']
 
     image_zip_id = config['image']['drive_id']

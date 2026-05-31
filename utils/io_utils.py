@@ -38,3 +38,20 @@ def download_and_extract_checkpoint(drive_id, extract_to):
     except Exception as e:
         print(f"❌ Download failed: {e}")
     return False
+
+def download_file(drive_id, output_path):
+    import gdown
+    if not drive_id: 
+        return False
+        
+    if os.path.exists(output_path):
+        print(f"✅ File already exists at {output_path}. Skipping download.")
+        return True
+
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        gdown.download(id=drive_id, output=output_path, quiet=False)
+        return os.path.exists(output_path)
+    except Exception as e:
+        print(f"❌ Download failed: {e}")
+    return False

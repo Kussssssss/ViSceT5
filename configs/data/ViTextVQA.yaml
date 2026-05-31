@@ -1,8 +1,8 @@
 dataset_name: ViTextVQA
 dataset:
   train:
-    dir: '1fKBlPAA2DmEf1Y1MESIUIuqlUeCBTXjE'
-    drive_id: ''
+    dir: ''
+    drive_id: '1fKBlPAA2DmEf1Y1MESIUIuqlUeCBTXjE'
   validation:
     dir: ''
     drive_id: '18nt6rJQZSf0g6Z7t0skaTuU_Bgc7EHAP'
