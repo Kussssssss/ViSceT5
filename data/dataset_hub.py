@@ -33,7 +33,10 @@ def _maybe_download(src_id: Optional[str], src_url: Optional[str], out_path: str
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return out_path
     if src_id:
-        _download_gdown_id(src_id, out_path, fuzzy=True)
+        if os.path.exists(src_id) and os.path.isfile(src_id):
+            shutil.copy2(src_id, out_path)
+        else:
+            _download_gdown_id(src_id, out_path, fuzzy=True)
     elif src_url:
         _download_url(src_url, out_path)
     else:

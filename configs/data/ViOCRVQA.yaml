@@ -1,17 +1,17 @@
 dataset_name: ViOCRVQA
 dataset:
   train:
-    dir: 1AmUO_fg9qEOP4G70cE48d7Z-cAs_JPZd'
-    drive_id: ''
+    dir: ''
+    drive_id: '1AmUO_fg9qEOP4G70cE48d7Z-cAs_JPZd'
   validation:
     dir: ''
-    drive_id: 1tQ8GLCrYyWFKGCfHrcBGwfFc7u3MPkTY'
+    drive_id: '1tQ8GLCrYyWFKGCfHrcBGwfFc7u3MPkTY'
   test:
     dir: ''
-    drive_id: 1nkF3J3Hzft-YaMhvsciudDXT_E2Xb2m9'
+    drive_id: '1nkF3J3Hzft-YaMhvsciudDXT_E2Xb2m9'
 image:
   dir: ''
-  drive_id: 1rczFOb3eipPEiQdeZWczJXN2LJ2hsogG'
+  drive_id: '1rczFOb3eipPEiQdeZWczJXN2LJ2hsogG'
 ocr:
   dir: ''
-  drive_id: 19-AZZOo4xGCz-GDVram_dLmItqbG0bJG'
+  drive_id: '19-AZZOo4xGCz-GDVram_dLmItqbG0bJG'

@@ -15,7 +15,18 @@ from transformers import (
     AutoConfig,
     HfArgumentParser,
     set_seed,
+    AutoTokenizer,
+    CLIPImageProcessor,
 )
+
+# Project imports
+from configs.base_config import configure_env, OUTPUT_PATH, SEED, VOCAB_PATH, VIET_VOCAB_PATH, ENG_VOCAB_PATH
+from configs.model_config import OpenViVQAConfig
+from configs.ocr_config import DEFAULT_OCR_CONFIG
+from models import OpenViVQAModel
+from models.modules import Vision_Encode_Ocr_Feature
+from data import ViT5VQADataCollator, ViT5VQADataset
+from data.data_loader import train_df, val_df
 
 from configs.arguments import ModelArguments, DataArguments, CustomTrainingArguments
 from configs.model_config import OpenViVQAConfig

@@ -31,3 +31,4 @@ gdown>=4.7.0
 httpx==0.28.1
 requests==2.32.3
 unicodedata2>=15.0.0
+pyyaml>=6.0

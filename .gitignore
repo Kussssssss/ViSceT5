@@ -148,6 +148,7 @@ Desktop.ini
 
 # Custom OpenViVQA data / weights / runs
 outputs/
+output/
 runs/
 checkpoints/
 *.pt

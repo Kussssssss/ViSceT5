@@ -1,0 +1,17 @@
+dataset_name: OpenViVQA
+dataset:
+  train:
+    dir: ''
+    drive_id: '1wdBGAP-uasTvtEEY6ji3lgNbhgbJb6l3'
+  validation:
+    dir: ''
+    drive_id: '1uo-HI_vrT2UGZEDP6NNivw2Dx16Q-Dbr'
+  test:
+    dir: ''
+    drive_id: '10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc'
+image:
+  dir: ''
+  drive_id: '12w-9Nlq2cM3qQY_8k1k2d0n5UqL3z0hH'
+ocr:
+  dir: ''
+  drive_id: '1Jk0Gl04Xlsc1U86XcTaRbsF6EUvHxgFx'

@@ -2,17 +2,28 @@
 scripts/init_model.py
 Download weights and initialize OpenViVQAModel. Run: python scripts/init_model.py
 """
-
 #!/usr/bin/env python
 import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Add project root to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import gc
 import torch
 from configs.model_config import OpenViVQAConfig
 from models.openvivqa_model import OpenViVQAModel
 from utils.model_utils import safe_download_weights, print_trainable_params
+
+try:
+    from IPython.display import clear_output
+except ImportError:
+    def clear_output():
+        pass
 
 repos_to_download = [
     "openai/clip-vit-base-patch16",

@@ -3,6 +3,30 @@ utils/misc.py
 SET_SEED(), _any_device(), show_example(), pick_consistent_indices().
 """
 
+import collections
+import copy
+import random
+import re
+import unicodedata
+from PIL import Image
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import editdistance
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+
+from transformers import AutoTokenizer, set_seed
+from configs.base_config import SEED
+
+# Helper to check display availability
+try:
+    from IPython.display import display
+except ImportError:
+    def display(x):
+        print(x)
+
 def show_example(df, image_path: str, id_=None, img_id=None, qa=True) -> None:
     img_list = df['image_filename'].unique().tolist()
     img_id = img_id if img_id is not None else random.choice(img_list)
@@ -22,29 +46,20 @@ def SET_SEED(seed: int = 42) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.enabled = False
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
 SET_SEED(SEED)
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import editdistance
-import collections
-import random
-import copy
-import numpy as np
-import re, unicodedata
-from PIL import Image
-from transformers import AutoTokenizer
-
 try:
-    tokenizer = AutoTokenizer.from_pretrained(model.config.vit5_name)
-except NameError:
+    from configs.model_config import OpenViVQAConfig
+    config = OpenViVQAConfig()
+    tokenizer = AutoTokenizer.from_pretrained(config.vit5_name)
+except Exception:
     tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
 
 def _any_device(*objs):
@@ -62,9 +77,6 @@ def _any_device(*objs):
                 if d is not None:
                     return d
     return torch.device("cpu")
-
-import numpy as np
-import random
 
 def pick_consistent_indices(num_items: int, k: int, seed: int | None = None):
     k = min(k, num_items)

@@ -11,7 +11,14 @@ import torch
 import pandas as pd
 
 from transformers import logging as hf_logging
-from pandas.errors import SettingWithCopyWarning
+try:
+    from pandas.errors import SettingWithCopyWarning
+except ImportError:
+    try:
+        from pandas.core.common import SettingWithCopyWarning
+    except ImportError:
+        class SettingWithCopyWarning(UserWarning):
+            pass
 
 # ─────────────────────────────────────────────────────────
 # Global seeds & paths
@@ -19,6 +26,11 @@ from pandas.errors import SettingWithCopyWarning
 SEED: int = 42
 STATE: int = 2
 OUTPUT_PATH: str = os.environ.get("OUTPUT_PATH", "./output")
+
+VOCAB_DIR: str = os.path.join(OUTPUT_PATH, "vocabs")
+VOCAB_PATH: str = os.path.join(VOCAB_DIR, "words.txt")
+VIET_VOCAB_PATH: str = os.path.join(VOCAB_DIR, "vietnamese_vocab.txt")
+ENG_VOCAB_PATH: str = os.path.join(VOCAB_DIR, "english_vocab.txt")
 
 
 def configure_env(
