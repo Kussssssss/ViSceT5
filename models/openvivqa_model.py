@@ -177,6 +177,7 @@ class OpenViVQAModel(PreTrainedModel):
         )
         self.ocr_encoder.set_word_embed_proxy(lambda ids: self.vit5.get_input_embeddings()(ids))
         self.semantic_ocr_embedding = SemanticOCREmbedding(ns)
+        self.spatial_embedding = SpatialCirclePosition(ns)
 
         self.char_max_num = int(getattr(config, "char_max_num", 50))
         self.char_num = int(getattr(config, "char_num"))
@@ -486,6 +487,12 @@ class OpenViVQAModel(PreTrainedModel):
                 [sal_info_tok],
                 ocr_text_tok[i].unsqueeze(0),
                 char_feat_tok_i.unsqueeze(0)
+            )
+
+            sal_input_i, _ = self.spatial_embedding(
+                sal_input_i,
+                [sal_info_tok],
+                mask=tok_mask_all_i.unsqueeze(0)
             )
 
             ocr_box_feat_tok_list.append(sal_input_i.squeeze(0))

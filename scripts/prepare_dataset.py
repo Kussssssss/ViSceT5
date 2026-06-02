@@ -18,8 +18,8 @@ from configs.base_config import VOCAB_DIR, VOCAB_PATH, VIET_VOCAB_PATH, ENG_VOCA
 from data.dataset_hub import DatasetHubLoader, _maybe_download
 
 def main(args):
-    RAW_DATASET_DIR = os.path.join(OUTPUT_PATH, "raw")
-    OUT_DIR = os.path.join(OUTPUT_PATH, "datasets")
+    RAW_DATASET_DIR = os.path.join(args.data_dir, "raw")
+    OUT_DIR = os.path.join(args.data_dir, "processed")
 
     # 1. Download Vocabularies if Vocab.yaml exists
     vocab_cfg_path = "configs/data/Vocab.yaml"
