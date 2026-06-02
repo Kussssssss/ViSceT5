@@ -162,12 +162,22 @@ def main(args_list=None):
     pretrain_loss_fn = ViT5PretrainLoss(pretrain_ablation_mode=mode)
     pretrain_acc_fn = GlobalPretrainAccuracy(mode=mode)
 
+    from data.vocab import setup_augmented_vocab
+    print(">>> Setting up augmented vocabulary...")
+    augmented_vocab_path = setup_augmented_vocab(
+        viet_vocab_path=data_args.viet_vocab_path,
+        eng_vocab_path="",
+        dataframe=train_df,
+        pretrain_vocab_path=data_args.vocab_path,
+        output_dir=os.path.join(data_args.data_dir, "processed", "dict")
+    )
+
     data_collator = ViT5VQADataCollator(
         tokenizer=tokenizer,
         image_processor=model.image_processor,
         ocr_encoder=vision_ocr,
         config=model.config,
-        term_vocab_path=data_args.vocab_path,
+        term_vocab_path=augmented_vocab_path,
         viet_vocab_path=data_args.viet_vocab_path,
         eng_vocab_path="",
         dataframe=train_df,

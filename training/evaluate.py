@@ -105,12 +105,22 @@ def main():
         decoder_start_token_id=best_model.config.decoder_start_token_id,
     )
 
+    from data.vocab import setup_augmented_vocab
+    print(">>> Setting up augmented vocabulary...")
+    augmented_vocab_path = setup_augmented_vocab(
+        viet_vocab_path=VIET_VOCAB_PATH,
+        eng_vocab_path="",
+        dataframe=train_df,
+        pretrain_vocab_path=VOCAB_PATH,
+        output_dir="./output/processed/dict"
+    )
+
     data_collator_reload = ViT5VQADataCollator(
         tokenizer=tok_reload,
         image_processor=best_model.image_processor,
         ocr_encoder=vision_ocr,
         config=best_model.config,
-        term_vocab_path=VOCAB_PATH,
+        term_vocab_path=augmented_vocab_path,
         viet_vocab_path=VIET_VOCAB_PATH,
         eng_vocab_path=ENG_VOCAB_PATH,
         dataframe=train_df,
