@@ -1,6 +1,12 @@
-import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
+# Ensure absolute project root is in path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import os
 import gc
@@ -31,8 +37,15 @@ from utils.io_utils import download_and_extract_checkpoint
 
 def main():
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
+    
+    is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0])
+    
     if len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
         model_args, data_args, training_args = parser.parse_yaml_file(os.path.abspath(sys.argv[1]))
+    elif is_jupyter:
+        default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "finetune.yaml"))
+        print(f"[Jupyter/Colab] Environment detected. Loading default config: {default_yaml}")
+        model_args, data_args, training_args = parser.parse_yaml_file(default_yaml)
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
