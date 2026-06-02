@@ -35,19 +35,25 @@ from data.collator import ViT5VQADataCollator
 from training.metrics import TaskSpecificTrainer, build_compute_metrics_finetune
 from utils.io_utils import download_and_extract_checkpoint
 
-def main():
+def main(args_list=None):
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     
-    is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0])
-    
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
-        model_args, data_args, training_args = parser.parse_yaml_file(os.path.abspath(sys.argv[1]))
-    elif is_jupyter:
-        default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "finetune.yaml"))
-        print(f"[Jupyter/Colab] Environment detected. Loading default config: {default_yaml}")
-        model_args, data_args, training_args = parser.parse_yaml_file(default_yaml)
+    if args_list is not None:
+        if len(args_list) == 1 and args_list[0].endswith(".yaml"):
+            model_args, data_args, training_args = parser.parse_yaml_file(os.path.abspath(args_list[0]))
+        else:
+            model_args, data_args, training_args = parser.parse_args_into_dataclasses(args=args_list)
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0])
+        
+        if len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
+            model_args, data_args, training_args = parser.parse_yaml_file(os.path.abspath(sys.argv[1]))
+        elif is_jupyter:
+            default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "finetune.yaml"))
+            print(f"[Jupyter/Colab] Environment detected. Loading default config: {default_yaml}")
+            model_args, data_args, training_args = parser.parse_yaml_file(default_yaml)
+        else:
+            model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
     set_seed(training_args.seed)
     random.seed(training_args.seed)
