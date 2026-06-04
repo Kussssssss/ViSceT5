@@ -2,7 +2,7 @@ vocab_from: ViTextVQA
 
 vietnamese:
   dir: ""
-  drive_id: "1xzr_ZDJfnhxmx08yJJxm5UT-KuToaydo"
+  drive_id: "1znyTRgkv2WK3IXTX47A2K_aNTwxVAxp0"
 
 english:
   dir: ""
@@ -10,4 +10,4 @@ english:
 
 term_vocab:
   dir: ""
-  drive_id: "1znyTRgkv2WK3IXTX47A2K_aNTwxVAxp0"
+  drive_id: "1xzr_ZDJfnhxmx08yJJxm5UT-KuToaydo"
