@@ -1,13 +1,2 @@
-vocab_from: ViTextVQA
-
-vietnamese:
-  dir: ""
-  drive_id: "1znyTRgkv2WK3IXTX47A2K_aNTwxVAxp0"
-
-english:
-  dir: ""
-  drive_id: "14y9Uvq_0aFJLcx2PvilwajnwGvkbgMu9"
-
-term_vocab:
-  dir: ""
-  drive_id: "1xzr_ZDJfnhxmx08yJJxm5UT-KuToaydo"
+term_vocab_id: "1znyTRgkv2WK3IXTX47A2K_aNTwxVAxp0"
+viet_vocab_id: "1xzr_ZDJfnhxmx08yJJxm5UT-KuToaydo"

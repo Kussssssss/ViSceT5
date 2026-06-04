@@ -14,41 +14,11 @@ import pandas as pd
 import yaml
 
 from configs.base_config import configure_env, OUTPUT_PATH, SEED
-from configs.base_config import VOCAB_DIR, VOCAB_PATH, VIET_VOCAB_PATH, ENG_VOCAB_PATH
-from data.dataset_hub import DatasetHubLoader, _maybe_download
+from data.dataset_hub import DatasetHubLoader
 
 def main(args):
     RAW_DATASET_DIR = os.path.join(args.data_dir, "raw")
     OUT_DIR = os.path.join(args.data_dir, "processed")
-
-    # 1. Download Vocabularies if Vocab.yaml exists
-    vocab_cfg_path = "configs/data/Vocab.yaml"
-    if os.path.exists(vocab_cfg_path):
-        print("\n⬇️  Downloading Vocabularies...")
-        with open(vocab_cfg_path, 'r', encoding='utf-8') as f:
-            vocab_config = yaml.safe_load(f)
-        
-        os.makedirs(VOCAB_DIR, exist_ok=True)
-        
-        def prepare_vocab_file(section_key, default_dest):
-            section = vocab_config.get(section_key, {})
-            if not section:
-                return
-            local_dir = section.get('dir', '')
-            drive_id = section.get('drive_id', '')
-            if local_dir and os.path.exists(local_dir):
-                print(f"   -> Using local vocab for {section_key}: {local_dir}")
-                shutil.copy2(local_dir, default_dest)
-            elif drive_id:
-                print(f"   -> Preparing {section_key} from Google Drive ID: {drive_id}")
-                _maybe_download(drive_id, None, default_dest)
-            else:
-                print(f"   ⚠️ No config found for {section_key}, skipping.")
-
-        prepare_vocab_file('term_vocab', VOCAB_PATH)
-        prepare_vocab_file('vietnamese', VIET_VOCAB_PATH)
-        prepare_vocab_file('english', ENG_VOCAB_PATH)
-        print("   ✅ Vocabularies ready.")
 
     # 2. Load dataset config
     with open(args.config, 'r', encoding='utf-8') as f:

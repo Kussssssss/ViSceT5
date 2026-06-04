@@ -14,6 +14,7 @@ import json
 import torch
 import numpy as np
 import random
+import pandas as pd
 from safetensors.torch import load_file
 
 from transformers import (
@@ -66,40 +67,49 @@ def main(args_list=None):
     
     # 1. Prepare Data
     print(f">>> Preparing Dataset: {data_args.dataset_name}")
-    raw_dir = os.path.join(data_args.data_dir, "raw")
-    out_dir = os.path.join(data_args.data_dir, "processed")
-    hub = DatasetHubLoader(raw_dir, out_dir)
+    from configs.base_config import OUTPUT_PATH
+    train_csv = os.path.join(OUTPUT_PATH, "merged_train.csv")
+    val_csv = os.path.join(OUTPUT_PATH, "merged_val.csv")
     
-    import yaml
-    config_path = f"configs/data/{data_args.dataset_name}.yaml"
-    if os.path.exists(config_path):
-        with open(config_path, 'r', encoding='utf-8') as f:
-            ds_cfg = yaml.safe_load(f)
-        hub.register_dataset(
-            dataset_name=ds_cfg['dataset_name'],
-            task_type="VQA",
-            image_zip_id=ds_cfg['image'].get('drive_id'),
-            image_dir_override='',
-            ocr_zip_id=ds_cfg['ocr'].get('drive_id'),
-            ocr_dir_override='',
-            splits={
-                "train":      {"id": ds_cfg['dataset']['train'].get('drive_id') or ds_cfg['dataset']['train'].get('dir'), "url": None},
-                "validation": {"id": ds_cfg['dataset']['validation'].get('drive_id') or ds_cfg['dataset']['validation'].get('dir'), "url": None},
-                "test":       {"id": ds_cfg['dataset']['test'].get('drive_id') or ds_cfg['dataset']['test'].get('dir'), "url": None},
-            }
-        )
-        hub.prepare(data_args.dataset_name)
+    if os.path.exists(train_csv) and os.path.exists(val_csv):
+        print(f"ℹ️ Found prepared CSV cache in {OUTPUT_PATH}. Loading directly...")
+        train_df = pd.read_csv(train_csv)
+        val_df = pd.read_csv(val_csv)
     else:
-        print(f"⚠️ Dataset config not found at {config_path}. Assuming it's already registered or manually ready.")
-
-    
-    try:
-        dfs = hub.load_task(data_args.dataset_name)
-        train_df = dfs["train"]
-        val_df = dfs["validation"]
-    except Exception as e:
-        print(f"❌ Failed to load dataset {data_args.dataset_name} from Hub: {e}")
-        return
+        print(f"ℹ️ CSV cache not found. Preparing via Hub...")
+        raw_dir = os.path.join(data_args.data_dir, "raw")
+        out_dir = os.path.join(data_args.data_dir, "processed")
+        hub = DatasetHubLoader(raw_dir, out_dir)
+        
+        import yaml
+        config_path = f"configs/data/{data_args.dataset_name}.yaml"
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                ds_cfg = yaml.safe_load(f)
+            hub.register_dataset(
+                dataset_name=ds_cfg['dataset_name'],
+                task_type="VQA",
+                image_zip_id=ds_cfg['image'].get('drive_id'),
+                image_dir_override='',
+                ocr_zip_id=ds_cfg['ocr'].get('drive_id'),
+                ocr_dir_override='',
+                splits={
+                    "train":      {"id": ds_cfg['dataset']['train'].get('drive_id') or ds_cfg['dataset']['train'].get('dir'), "url": None},
+                    "validation": {"id": ds_cfg['dataset']['validation'].get('drive_id') or ds_cfg['dataset']['validation'].get('dir'), "url": None},
+                    "test":       {"id": ds_cfg['dataset']['test'].get('drive_id') or ds_cfg['dataset']['test'].get('dir'), "url": None},
+                }
+            )
+            hub.prepare(data_args.dataset_name)
+        else:
+            print(f"⚠️ Dataset config not found at {config_path}. Assuming it's already registered or manually ready.")
+        
+        try:
+            dfs = hub.load_task(data_args.dataset_name)
+            train_df = dfs["train"]
+            val_df = dfs["validation"]
+        except Exception as e:
+            print(f"❌ Failed to load dataset {data_args.dataset_name} from Hub: {e}")
+            return
 
     train_dataset = ViT5VQADataset(train_df)
     val_dataset = ViT5VQADataset(val_df)
@@ -172,22 +182,12 @@ def main(args_list=None):
     )
     
     # 5. Loss, Metrics, Collator
-    from data.vocab import setup_augmented_vocab
-    print(">>> Setting up augmented vocabulary...")
-    augmented_vocab_path = setup_augmented_vocab(
-        viet_vocab_path=data_args.viet_vocab_path,
-        eng_vocab_path="",
-        dataframe=train_df,
-        pretrain_vocab_path=data_args.vocab_path,
-        output_dir=os.path.join(data_args.data_dir, "processed", "dict")
-    )
-
     data_collator = ViT5VQADataCollator(
         tokenizer=tokenizer,
         image_processor=model.image_processor,
         ocr_encoder=vision_ocr,
         config=model.config,
-        term_vocab_path=augmented_vocab_path,
+        term_vocab_path=data_args.vocab_path,
         viet_vocab_path=data_args.viet_vocab_path,
         eng_vocab_path="",
         dataframe=train_df,

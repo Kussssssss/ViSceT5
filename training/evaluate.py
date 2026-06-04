@@ -22,7 +22,7 @@ from transformers import (
 )
 
 # Project imports
-from configs.base_config import configure_env, OUTPUT_PATH, SEED, VOCAB_PATH, VIET_VOCAB_PATH, ENG_VOCAB_PATH
+from configs.base_config import configure_env, OUTPUT_PATH, SEED
 from configs.ocr_config import DEFAULT_OCR_CONFIG
 from models import OpenViVQAModel
 from models.modules import Vision_Encode_Ocr_Feature
@@ -105,24 +105,14 @@ def main():
         decoder_start_token_id=best_model.config.decoder_start_token_id,
     )
 
-    from data.vocab import setup_augmented_vocab
-    print(">>> Setting up augmented vocabulary...")
-    augmented_vocab_path = setup_augmented_vocab(
-        viet_vocab_path=VIET_VOCAB_PATH,
-        eng_vocab_path="",
-        dataframe=train_df,
-        pretrain_vocab_path=VOCAB_PATH,
-        output_dir="./output/processed/dict"
-    )
-
     data_collator_reload = ViT5VQADataCollator(
         tokenizer=tok_reload,
         image_processor=best_model.image_processor,
         ocr_encoder=vision_ocr,
         config=best_model.config,
-        term_vocab_path=augmented_vocab_path,
-        viet_vocab_path=VIET_VOCAB_PATH,
-        eng_vocab_path=ENG_VOCAB_PATH,
+        term_vocab_path="configs/data/term_vocab.txt",
+        viet_vocab_path="configs/data/viet_vocab.txt",
+        eng_vocab_path="",
         dataframe=train_df,
         pretrain=False,
     )
