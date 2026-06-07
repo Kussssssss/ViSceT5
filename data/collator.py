@@ -27,7 +27,7 @@ class ViT5VQADataCollator:
         eng_vocab_path,
         dataframe,
         pretrain=True,
-        debug=TEST,
+        debug=False,
     ):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
