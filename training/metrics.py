@@ -26,186 +26,8 @@ from transformers import (
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
+from training.pretraine_loss import ViT5PretrainLoss, PreTrainMLMAccuracy
 
-def create_batch_labels(batch_labels):
-    if isinstance(batch_labels, torch.Tensor):
-        B, L, _ = batch_labels.shape
-        blocks = [batch_labels[b] for b in range(B)]
-    else:
-        blocks = batch_labels
-
-    result = torch.block_diag(*blocks)          # (B*L, B*L)
-
-    diag = torch.diagonal(result)               # (B*L,)
-    ignore_mask = (diag == -1)
-    if ignore_mask.any():
-        result[ignore_mask, :] = -1.0           # row i
-        result[:, ignore_mask] = -1.0           # col i
-    return result
-
-class ViT5PretrainLoss(nn.Module):
-    def __init__(self, pretrain_ablation_mode=None):
-        super().__init__()
-        self.pretrain_ablation_mode = pretrain_ablation_mode
-
-    def forward(self, sample_list, model_output):
-        if "textcls_scores" not in model_output:
-            return torch.tensor(
-                0.0,
-                device=sample_list.get("tag_pollute", torch.tensor(0)).device,
-                requires_grad=True,
-            )
-
-        tcls = model_output["textcls_scores"].float()              # (B, L, V)
-        targets = sample_list["cmb_text_mask_label"].to(tcls.device).long()
-
-        loss_mask = (targets != -1).float()                        # (B, L)
-
-        pollute = sample_list["tag_pollute"].to(tcls.device).float()
-        if pollute.ndim > 1:
-            pollute = pollute.squeeze(-1)                          # (B,)
-        keep = (1.0 - pollute).unsqueeze(1)                        # (B, 1)
-        final_mask = loss_mask * keep                              # (B, L)
-
-        scores = tcls.permute(0, 2, 1)                             # (B, V, L)
-        mlm_losses = F.cross_entropy(
-            scores, targets, reduction="none", ignore_index=-1
-        )
-
-        masked_losses = mlm_losses * final_mask              # (B, L)
-        denom = final_mask.sum().clamp_min(1.0)              # số token thật sự tính loss
-        mlm_loss = masked_losses.sum() / denom
-
-        p_scores = model_output["pollutecls_scores"].float()
-        p_targets = sample_list["tag_pollute"].to(p_scores.device).float()
-        if p_scores.ndim > 1:
-            p_scores = p_scores.squeeze(-1)
-        if p_targets.ndim > 1:
-            p_targets = p_targets.squeeze(-1)
-
-        pollute_loss = F.binary_cross_entropy_with_logits(
-            p_scores, p_targets, reduction="mean"
-        )
-
-        contrastive_loss = torch.tensor(0.0, device=mlm_loss.device)
-
-        if "contrastive_scores" in model_output:
-            logits_per_image = model_output.get("contrastive_scores", None)
-            o2r_block = model_output.get("o2r_block", None)
-            r2o_block = model_output.get("r2o_block", None)
-
-            if logits_per_image is not None and o2r_block is not None:
-                logits_per_text = logits_per_image.t()
-
-                o2r_block = o2r_block.to(logits_per_image.device)
-                if r2o_block is None:
-                    r2o_block = o2r_block.transpose(0, 1)
-                else:
-                    r2o_block = r2o_block.to(logits_per_image.device)
-
-                mask = (o2r_block != -1)
-
-                if mask.any():
-                    o2r_labels = o2r_block.float()
-                    r2o_labels = r2o_block.float()
-
-                    loss_i = F.binary_cross_entropy_with_logits(
-                        logits_per_image[mask].float(),
-                        o2r_labels[mask],
-                        reduction="mean",
-                    )
-                    loss_t = F.binary_cross_entropy_with_logits(
-                        logits_per_text[mask].float(),
-                        r2o_labels[mask],
-                        reduction="mean",
-                    )
-                    contrastive_loss = (loss_i + loss_t) / 2
-
-                else:
-                    # Fallback: old diagonal labels
-                    print("use old diagonal labels")
-                    N = logits_per_image.size(0)
-                    labels = torch.arange(
-                        0, N, device=logits_per_image.device
-                    )
-                    loss_i = F.cross_entropy(logits_per_image, labels)
-                    loss_t = F.cross_entropy(logits_per_text, labels)
-                    contrastive_loss = (loss_i + loss_t) / 2
-
-        return mlm_loss + pollute_loss + contrastive_loss
-
-class BaseMetric:
-    def __init__(self, name):
-        self.name = name
-
-    def calculate(self, sample_list, model_output):
-        raise NotImplementedError
-
-    def __call__(self, sample_list, model_output):
-        return self.calculate(sample_list, model_output)
-
-
-class PreTrainContraAccuracy(BaseMetric):
-    def __init__(self):
-        super().__init__("pollute_acc")
-
-    def calculate(self, sample_list, model_output):
-        if "pollutecls_scores" not in model_output:
-            return 0.0
-
-        scores = model_output["pollutecls_scores"].detach()
-        targets = sample_list["tag_pollute"].to(scores.device).float().detach()
-
-        if scores.ndim > 1:
-            scores = scores.squeeze(-1)
-        if targets.ndim > 1:
-            targets = targets.squeeze(-1)
-
-        preds = (torch.sigmoid(scores) > 0.5).float()
-        correct = (preds == (targets > 0.5).float()).float()
-        return correct.mean()
-
-
-class PreTrainMLMAccuracy(BaseMetric):
-    def __init__(self):
-        super().__init__("mlm_acc")
-        self.contra_acc = PreTrainContraAccuracy()
-
-    def calculate(self, sample_list, model_output):
-        if "textcls_scores" not in model_output:
-            return 0.0
-
-        logits = model_output["textcls_scores"].detach()  # (B, L, V)
-        targets = sample_list["cmb_text_mask_label"].to(logits.device).detach()
-
-        B, L, V = logits.shape
-        scores_flat = logits.reshape(B * L, V)
-        targets_flat = targets.reshape(B * L)
-
-        base_mask = targets_flat != -1
-
-        pollute = sample_list["tag_pollute"].to(logits.device).float().detach()
-        pollute_expanded = pollute.view(B, 1).expand(B, L).reshape(B * L)
-        keep_mask = (1.0 - pollute_expanded) > 0.5
-
-        valid_indices = base_mask & keep_mask
-
-        if valid_indices.float().sum() == 0:
-            mlm_acc = torch.tensor(0.0, device=logits.device)
-        else:
-            preds = scores_flat[valid_indices].argmax(dim=1)
-            labels = targets_flat[valid_indices]
-            mlm_acc = (preds == labels).float().mean()
-
-        pollute_acc = self.contra_acc.calculate(sample_list, model_output)
-
-        return (mlm_acc + pollute_acc) / 2
-
-class GlobalPretrainAccuracy(PreTrainMLMAccuracy):
-    def __init__(self, mode=None):
-        super().__init__()
-
-# Global instances referenced by TaskSpecificTrainer
 pretrain_loss_fn = ViT5PretrainLoss()
 pretrain_acc_fn = PreTrainMLMAccuracy()
 
@@ -217,7 +39,7 @@ def dbg(*args, **kwargs):
 def _normalize_txt(x: str) -> str:
     if x is None:
         return ""
-    x = unicodedata.normalize("NFC", x)
+    x = unicodedata.normalize("NFKC", x)
     x = x.strip().lower()
     x = " ".join(x.split())
     return x
@@ -261,13 +83,24 @@ def compute_f1_em(preds: List[str], labels: List[str]):
 
 
 def simple_pretrain_aggregator(eval_pred):
-
     preds = eval_pred.predictions
     if isinstance(preds, (tuple, list)):
         preds = preds[0]
-    accuracies = np.asarray(preds, dtype=np.float32).reshape(-1)
-    mean_acc = float(accuracies.mean()) if accuracies.size > 0 else 0.0
-    return {"pretrain_acc": mean_acc}
+    
+    if preds.ndim == 1 or preds.shape[-1] == 1:
+        accuracies = np.asarray(preds, dtype=np.float32).reshape(-1)
+        mean_acc = float(accuracies.mean()) if accuracies.size > 0 else 0.0
+        return {"pretrain_acc": mean_acc}
+    else:
+        mean_vals = np.mean(preds, axis=0)
+        return {
+            "pretrain_acc": float(mean_vals[0]),
+            "acc_mlm_itm": float(mean_vals[1]),
+            "acc_twc": float(mean_vals[2]),
+            "loss_mlm": float(mean_vals[3]),
+            "loss_itm": float(mean_vals[4]),
+            "loss_twc": float(mean_vals[5]),
+        }
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
     bleu_metric = Bleu()
@@ -337,9 +170,9 @@ def build_compute_metrics_finetune(tokenizer_for_metrics):
 
 class TaskSpecificTrainer(Seq2SeqTrainer):
     def __init__(self, *args, pretrain_loss_fn=None, pretrain_acc_fn=None, **kwargs):
+        super().__init__(*args, **kwargs)
         self.pretrain_loss_fn = pretrain_loss_fn
         self.pretrain_acc_fn = pretrain_acc_fn
-        super().__init__(*args, **kwargs)
         self._running_loss = 0.0
         self._running_acc = 0.0
         self._running_cnt = 0
@@ -349,9 +182,14 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         if not globals().get("DEBUG_TRAIN", False):
             return
 
+        acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
+
         with torch.no_grad():
-            batch_acc = self.pretrain_acc_fn.calculate(inputs, outputs)
-            batch_acc_val = batch_acc.item()
+            batch_acc = acc_fn.calculate(inputs, outputs)
+            if isinstance(batch_acc, torch.Tensor):
+                batch_acc_val = batch_acc[0].item() if batch_acc.ndim > 0 else batch_acc.item()
+            else:
+                batch_acc_val = float(batch_acc)
             loss_val = loss.item()
 
         self._running_loss += loss_val
@@ -366,10 +204,20 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             avg_acc = self._running_acc / self._running_cnt
             current_epoch = self.state.epoch or 0.0
 
-            print(
-                f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
-                f"loss={avg_loss:.4f} | acc={avg_acc:.4f}"
-            )
+            if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) >= 6:
+                mlm_itm_a, twc_a = batch_acc[1].item(), batch_acc[2].item()
+                mlm_l, itm_l, twc_l = batch_acc[3].item(), batch_acc[4].item(), batch_acc[5].item()
+                print(
+                    f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
+                    f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
+                    f"Batch Detail -> Acc(M+I):{mlm_itm_a:.3f}, Acc(TWC):{twc_a:.3f} | "
+                    f"Loss(M):{mlm_l:.3f}, Loss(I):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}"
+                )
+            else:
+                print(
+                    f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
+                    f"loss={avg_loss:.4f} | acc={avg_acc:.4f}"
+                )
             self._running_loss = 0.0
             self._running_acc = 0.0
             self._running_cnt = 0
@@ -381,14 +229,20 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         outputs = model(**inputs)
 
         if getattr(model, "pretrain", False):
-            loss = self.pretrain_loss_fn(inputs, outputs)
+            loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
+            acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
+            loss = loss_fn(inputs, outputs)
             self._log_pretrain_metrics(loss, inputs, outputs)
 
             if globals().get("DEBUG_TRAIN", False) and (self.state.global_step % 500 == 0):
                  if self.state.global_step != self._last_log_step:
                     self._last_log_step = self.state.global_step
                     with torch.no_grad():
-                        acc_val = self.pretrain_acc_fn.calculate(inputs, outputs).item()
+                        acc_val = acc_fn.calculate(inputs, outputs)
+                        if isinstance(acc_val, torch.Tensor):
+                            acc_val = acc_val[0].item() if acc_val.ndim > 0 else acc_val.item()
+                        else:
+                            acc_val = float(acc_val)
                         print(f"Debug Step {self.state.global_step}: Loss={loss.item():.4f}, Acc={acc_val:.4f}")
         else:
             loss = outputs.get("loss")
@@ -413,12 +267,17 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
 
             # 1) PRETRAIN BRANCH
             if getattr(model, "pretrain", False):
+                loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
+                acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
                 outputs = model(**inputs)
-                loss = self.pretrain_loss_fn(inputs, outputs)
-                acc_tensor = self.pretrain_acc_fn.calculate(inputs, outputs)
+                loss = loss_fn(inputs, outputs)
+                acc_tensor = acc_fn.calculate(inputs, outputs)
 
                 if prediction_loss_only:
                     return (loss.detach(), None, None)
+
+                if not isinstance(acc_tensor, torch.Tensor):
+                    acc_tensor = torch.tensor(acc_tensor, device=loss.device)
 
                 preds = acc_tensor.unsqueeze(0).detach()
                 labels = inputs.get("tag_pollute")

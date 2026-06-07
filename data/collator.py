@@ -1,25 +1,12 @@
-"""
-data/collator.py
-ViT5VQADataCollator — full TWC+MLM+ITM data collator.
-"""
-from PIL import ImageOps
+import collections
 import os
 import re
 import json
-import collections
-import hashlib
 import random
-from typing import Any, Dict, List, Optional, Tuple, Set
-
-import torch
-from torch.utils.data import DataLoader, Dataset
-from PIL import Image
-import editdistance
-import pandas as pd
 import unicodedata
-import numpy as np
-
-
+import torch
+from PIL import Image
+from typing import List, Dict, Tuple, Optional, Callable, Any
 from data.vocab import (
     COMBINED_CHARS, _CHAR_UNK_IDX, TONE_RANK,
     _normalize_text, _remove_vietnamese_accents,
@@ -675,7 +662,7 @@ class ViT5VQADataCollator:
             for i in range(B):
                 src_idx = pollute_indices[i]
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len, question=qs[i])
+                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
 
                 # Nối câu hỏi và OCR lại
                 combined_texts.append(f"{qs[i]} {' '.join(raw_texts)}".strip())
@@ -703,7 +690,7 @@ class ViT5VQADataCollator:
             for i in range(B):
                 src_idx = pollute_indices[i]
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len, question=qs[i])
+                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
                 norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
 
                 if use_ocr_aug:
