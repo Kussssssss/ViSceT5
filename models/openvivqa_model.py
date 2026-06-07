@@ -813,20 +813,23 @@ class OpenViVQAModel(PreTrainedModel):
             )
         else:
             # Baseline: Dùng Linear thay vì Spatial/Group Attention
+            # NOTE: baseline trả về word-level (N_word), không phải token-level (L_tok)
             ocr_fused_feat, mask_ocr = self._encode_ocr_baseline_features(
-                ocr_info, word_ids_for_ocr, ocr_map, twa_ocr_char, 
-                twa_ocr_char_mask, token_mask_for_ocr, device
+                ocr_info, word_ids_for_ocr, ocr_map, twa_ocr_char,
+                twa_ocr_char_mask, token_mask_for_ocr, ocr_box_mask_for_ocr, device
             )
+            # Cập nhật mask theo word-level từ baseline
+            token_mask_for_ocr = mask_ocr
 
-        L_tok = word_ids_for_ocr.size(1)
-        if ocr_fused_feat.size(1) != L_tok:
-            ocr_fused_feat = _pad_or_crop_lastdim(ocr_fused_feat, L_tok, pad_value=0.0)
-        if token_mask_for_ocr.size(1) != L_tok:
-            token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
+        # Chỉ pad/crop khi dùng full OCR Consformer (token-level)
+        if use_ocr:
+            L_tok = word_ids_for_ocr.size(1)
+            if ocr_fused_feat.size(1) != L_tok:
+                ocr_fused_feat = _pad_or_crop_lastdim(ocr_fused_feat, L_tok, pad_value=0.0)
+            if token_mask_for_ocr.size(1) != L_tok:
+                token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
 
-        attn_summary = _ensure_1_token(vs_out.get("attn_summary", None), B, D, device, self.target_dtype)
-        crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
-        crop_mask = vs_out.get("crop_mask", torch.zeros(B, 0, device=device, dtype=torch.long))
+        # attn_summary, crop_tokens, crop_mask were already assigned in the use_vs block above
 
         # CONCAT CHUỖI VÀO ENCODER: CHỈ CÓ 1 KHỐI ocr_fused_feat
         fused_seq = torch.cat(
