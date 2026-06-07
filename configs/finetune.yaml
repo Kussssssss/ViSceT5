@@ -42,3 +42,6 @@ dataloader_pin_memory: true
 disable_tqdm: false
 fp16: false
 report_to: "none"
+
+generation_max_length: 56
+generation_num_beams: 4
