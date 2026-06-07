@@ -14,6 +14,7 @@ from data.vocab import (
     get_tone_id, get_word_tone_score, _stable_hash_int,
 )
 from data.dataset import ViT5VQADataset
+import editdistance
 
 class ViT5VQADataCollator:
     def __init__(
