@@ -5,7 +5,7 @@ import json
 import random
 import unicodedata
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from typing import List, Dict, Tuple, Optional, Callable, Any
 from data.vocab import (
     COMBINED_CHARS, _CHAR_UNK_IDX, TONE_RANK,
