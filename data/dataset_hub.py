@@ -21,11 +21,8 @@ def _is_ocr(f):
 
 def _download_gdown_id(file_id: str, out_path: str, fuzzy: bool = True):
     import gdown
-    try:
-        gdown.download(id=file_id, output=out_path, quiet=False)
-    except TypeError:
-        url = f"https://drive.google.com/uc?id={file_id}"
-        gdown.download(url=url, output=out_path, quiet=False)
+    url = f"https://drive.google.com/uc?id={file_id}"
+    gdown.download(url=url, output=out_path, quiet=False, fuzzy=fuzzy)
 
 def _download_url(url: str, out_path: str):
     import urllib.request
@@ -36,10 +33,7 @@ def _maybe_download(src_id: Optional[str], src_url: Optional[str], out_path: str
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return out_path
     if src_id:
-        if os.path.exists(src_id) and os.path.isfile(src_id):
-            shutil.copy2(src_id, out_path)
-        else:
-            _download_gdown_id(src_id, out_path, fuzzy=True)
+        _download_gdown_id(src_id, out_path, fuzzy=True)
     elif src_url:
         _download_url(src_url, out_path)
     else:

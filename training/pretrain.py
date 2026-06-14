@@ -39,25 +39,50 @@ from training.pretraine_loss import ViT5PretrainLoss, GlobalPretrainAccuracy
 from training.metrics import TaskSpecificTrainer, simple_pretrain_aggregator
 from utils.io_utils import download_and_extract_checkpoint
 
+def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
+    import yaml
+    args = args_list if args_list is not None else sys.argv[1:]
+    is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or (len(sys.argv) > 0 and ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0]))
+    
+    if len(args) == 0 and is_jupyter and default_yaml is not None:
+        print(f"[Jupyter/Colab] Environment detected. Using default config: {default_yaml}")
+        args = [default_yaml]
+        
+    if len(args) >= 1 and args[0].endswith(".yaml"):
+        yaml_file = os.path.abspath(args[0])
+        print(f"Loading configuration from YAML: {yaml_file}")
+        with open(yaml_file, "r", encoding="utf-8") as f:
+            yaml_dict = yaml.safe_load(f) or {}
+            
+        cli_args = args[1:]
+        if len(cli_args) > 0:
+            print(f"Applying CLI overrides: {cli_args}")
+            option_to_dest = {}
+            for action in parser._actions:
+                for option_string in action.option_strings:
+                    option_to_dest[option_string] = action.dest
+            
+            explicit_dests = set()
+            for arg in cli_args:
+                if arg.startswith("-"):
+                    opt = arg.split("=")[0]
+                    if opt in option_to_dest:
+                        explicit_dests.add(option_to_dest[opt])
+                    elif opt.startswith("--no-") and opt.replace("--no-", "--") in option_to_dest:
+                        explicit_dests.add(option_to_dest[opt.replace("--no-", "--")])
+            
+            parsed_namespace = parser.parse_args(args=cli_args)
+            for dest in explicit_dests:
+                yaml_dict[dest] = getattr(parsed_namespace, dest)
+                
+        return parser.parse_dict(yaml_dict)
+    else:
+        return parser.parse_args_into_dataclasses(args=args)
+
 def main(args_list=None):
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
-    
-    if args_list is not None:
-        if len(args_list) == 1 and args_list[0].endswith(".yaml"):
-            model_args, data_args, training_args = parser.parse_yaml_file(os.path.abspath(args_list[0]))
-        else:
-            model_args, data_args, training_args = parser.parse_args_into_dataclasses(args=args_list)
-    else:
-        is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0])
-        
-        if len(sys.argv) == 2 and sys.argv[1].endswith(".yaml"):
-            model_args, data_args, training_args = parser.parse_yaml_file(os.path.abspath(sys.argv[1]))
-        elif is_jupyter:
-            default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "pretrain.yaml"))
-            print(f"[Jupyter/Colab] Environment detected. Loading default config: {default_yaml}")
-            model_args, data_args, training_args = parser.parse_yaml_file(default_yaml)
-        else:
-            model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "pretrain.yaml"))
+    model_args, data_args, training_args = parse_args_with_yaml_and_cli(parser, args_list, default_yaml)
     
     set_seed(training_args.seed)
     random.seed(training_args.seed)
@@ -114,6 +139,16 @@ def main(args_list=None):
             print(f"❌ Failed to load dataset {data_args.dataset_name} from Hub: {e}")
             print("Please run scripts/prepare_dataset.py first.")
             return
+
+    if training_args.smoke_test:
+        print("🚨 RUNNING IN SMOKE TEST MODE: Truncating dataset and reducing training steps.")
+        train_df = train_df.head(8)
+        val_df = val_df.head(4)
+        training_args.max_steps = 3
+        training_args.num_train_epochs = 1.0
+        training_args.logging_steps = 1
+        training_args.eval_steps = 2
+        training_args.save_steps = 3
 
     train_dataset = ViT5VQADataset(train_df)
     val_dataset = ViT5VQADataset(val_df)
