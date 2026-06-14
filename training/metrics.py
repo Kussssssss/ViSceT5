@@ -178,6 +178,35 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         self._running_cnt = 0
         self._last_log_step = -1
 
+    def log(self, logs: Dict[str, float]) -> None:
+        super().log(logs)
+        if self.args.output_dir:
+            import json
+            import os
+            try:
+                os.makedirs(self.args.output_dir, exist_ok=True)
+                # Save structured JSON lines
+                log_file = os.path.join(self.args.output_dir, "train_metrics.jsonl")
+                log_entry = {**logs, "step": self.state.global_step, "epoch": self.state.epoch}
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(log_entry) + "\n")
+
+                # Save clean, human-readable summary logs
+                summary_file = os.path.join(self.args.output_dir, "train_metrics_summary.log")
+                items = [f"Step: {self.state.global_step}", f"Epoch: {self.state.epoch:.3f}"]
+                for k, v in logs.items():
+                    if k in ("step", "epoch"):
+                        continue
+                    if isinstance(v, float):
+                        items.append(f"{k}: {v:.6f}")
+                    else:
+                        items.append(f"{k}: {v}")
+                summary_line = " | ".join(items)
+                with open(summary_file, "a", encoding="utf-8") as f:
+                    f.write(summary_line + "\n")
+            except Exception:
+                pass
+
     def _log_pretrain_metrics(self, loss, inputs, outputs):
         if not globals().get("DEBUG_TRAIN", False):
             return
