@@ -41,12 +41,14 @@ from utils.io_utils import download_and_extract_checkpoint
 
 def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     import yaml
-    args = args_list if args_list is not None else sys.argv[1:]
     is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or (len(sys.argv) > 0 and ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0]))
-    
-    if len(args) == 0 and is_jupyter and default_yaml is not None:
+    if args_list is not None:
+        args = args_list
+    elif is_jupyter:
         print(f"[Jupyter/Colab] Environment detected. Using default config: {default_yaml}")
-        args = [default_yaml]
+        args = [default_yaml] if default_yaml is not None else []
+    else:
+        args = sys.argv[1:]
         
     if len(args) >= 1 and args[0].endswith(".yaml"):
         yaml_file = os.path.abspath(args[0])
