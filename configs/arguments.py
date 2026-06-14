@@ -66,3 +66,7 @@ class CustomTrainingArguments(Seq2SeqTrainingArguments):
         default=None,
         metadata={"help": "Google Drive ID of pretrain weights to download."}
     )
+    smoke_test: bool = field(
+        default=False,
+        metadata={"help": "Run a quick check with tiny dataset and minimal steps to verify the pipeline."}
+    )
