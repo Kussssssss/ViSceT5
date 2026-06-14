@@ -71,7 +71,19 @@ def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
                     elif opt.startswith("--no-") and opt.replace("--no-", "--") in option_to_dest:
                         explicit_dests.add(option_to_dest[opt.replace("--no-", "--")])
             
-            parsed_namespace = parser.parse_args(args=cli_args)
+            # Temporarily disable action.required to avoid argparse complaining about missing required options
+            original_required = {}
+            for action in parser._actions:
+                original_required[action] = action.required
+                action.required = False
+            
+            try:
+                parsed_namespace = parser.parse_args(args=cli_args)
+            finally:
+                # Restore original required attributes
+                for action, req in original_required.items():
+                    action.required = req
+                    
             for dest in explicit_dests:
                 yaml_dict[dest] = getattr(parsed_namespace, dest)
                 
