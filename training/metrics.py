@@ -185,13 +185,11 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             import os
             try:
                 os.makedirs(self.args.output_dir, exist_ok=True)
-                # Save structured JSON lines
                 log_file = os.path.join(self.args.output_dir, "train_metrics.jsonl")
                 log_entry = {**logs, "step": self.state.global_step, "epoch": self.state.epoch}
                 with open(log_file, "a", encoding="utf-8") as f:
                     f.write(json.dumps(log_entry) + "\n")
 
-                # Save clean, human-readable summary logs
                 summary_file = os.path.join(self.args.output_dir, "train_metrics_summary.log")
                 items = [f"Step: {self.state.global_step}", f"Epoch: {self.state.epoch:.3f}"]
                 for k, v in logs.items():
