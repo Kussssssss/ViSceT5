@@ -22,7 +22,7 @@ def _is_ocr(f):
 def _download_gdown_id(file_id: str, out_path: str, fuzzy: bool = True):
     import gdown
     url = f"https://drive.google.com/uc?id={file_id}"
-    gdown.download(url=url, output=out_path, quiet=False, fuzzy=fuzzy)
+    gdown.download(url=url, output=out_path, quiet=False)
 
 def _download_url(url: str, out_path: str):
     import urllib.request
