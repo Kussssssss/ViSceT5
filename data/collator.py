@@ -597,6 +597,8 @@ class ViT5VQADataCollator:
         pil_images = []
         for p in paths:
             img = Image.open(p)
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                img = img.convert("RGBA")
             img = ImageOps.exif_transpose(img)
             pil_images.append(img.convert("RGB"))
 
