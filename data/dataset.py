@@ -44,7 +44,3 @@ class ViT5VQADataset(Dataset):
             ),
             "uid": img_path,
         }
-
-
-# ─── Collator ─────────────────────────────────────────────────────────────────
-

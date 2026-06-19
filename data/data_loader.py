@@ -3,17 +3,10 @@ data/data_loader.py
 load_dataset_final() — load or build train/val/test DataFrames from CSV cache.
 """
 
-import sys
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8')
-
 import pandas as pd
 import torch
 import os
 import json
-from configs.base_config import OUTPUT_PATH
 
 VOCAB_DIR = OUTPUT_PATH + "/vocab"
 os.makedirs(VOCAB_DIR, exist_ok=True)
@@ -23,13 +16,13 @@ def load_dataset_final():
 
     if 'final_train_df' not in globals():
         print("WARNING: Could not find 'final_train_df' in memory.")
-        print("   Trying to find CSV cache...")
+        print("Trying to find CSV cache...")
 
         try:
             t_df = pd.read_csv(OUTPUT_PATH+"/merged_train.csv")
             v_df = pd.read_csv(OUTPUT_PATH+"/merged_val.csv")
             te_df = pd.read_csv(OUTPUT_PATH+"/merged_test.csv")
-            print("   Restored data from CSV cache.")
+            print("Restored data from CSV cache.")
             return t_df, v_df, te_df
         except FileNotFoundError:
             raise RuntimeError("Error: You haven't run the 'Merge datasets' step (DatasetHubLoader). Go back to the previous step.")

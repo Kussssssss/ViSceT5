@@ -10,7 +10,7 @@ ablation_use_ocr: true
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
-model_name_or_path: null  # Hoặc thư mục output của bước pretrain (nếu finetune wo pretrain thì để null)
+model_name_or_path: null # Hoặc thư mục output của bước pretrain (nếu finetune wo pretrain thì để null)
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
 
