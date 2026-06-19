@@ -130,7 +130,6 @@ class OpenViVQAModel(PreTrainedModel):
             instruction_dim=d_text,
             integration_point="late",
             freeze_clip=True,
-            attn_implementation="eager",
         )
 
         # Khởi tạo Bộ tiền xử lý ảnh

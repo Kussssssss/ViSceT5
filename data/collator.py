@@ -1,12 +1,25 @@
-import collections
+"""
+data/collator.py
+ViT5VQADataCollator — full TWC+MLM+ITM data collator.
+"""
+from PIL import ImageOps
 import os
 import re
 import json
+import collections
+import hashlib
 import random
-import unicodedata
+from typing import Any, Dict, List, Optional, Tuple, Set
+
 import torch
-from PIL import Image, ImageOps
-from typing import List, Dict, Tuple, Optional, Callable, Any
+from torch.utils.data import DataLoader, Dataset
+from PIL import Image
+import editdistance
+import pandas as pd
+import unicodedata
+import numpy as np
+
+
 from data.vocab import (
     COMBINED_CHARS, _CHAR_UNK_IDX, TONE_RANK,
     _normalize_text, _remove_vietnamese_accents,
@@ -14,7 +27,6 @@ from data.vocab import (
     get_tone_id, get_word_tone_score, _stable_hash_int,
 )
 from data.dataset import ViT5VQADataset
-import editdistance
 
 class ViT5VQADataCollator:
     def __init__(

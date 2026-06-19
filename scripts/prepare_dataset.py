@@ -1,16 +1,11 @@
 #!/usr/bin/env python
 import sys
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8')
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8')
-
-import argparse
 import os
-# Add project root to sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import shutil
 import pandas as pd
+import argparse
 import yaml
 
 from configs.base_config import configure_env, OUTPUT_PATH, SEED
@@ -46,6 +41,7 @@ def main(args):
     # Resolve image source
     image_dir = config['image'].get('dir', '')
     image_id = config['image'].get('drive_id', '')
+
     if image_dir and os.path.isdir(image_dir):
         image_dir_override = image_dir
         image_zip_id = None
@@ -100,7 +96,7 @@ def main(args):
     def merge_and_shuffle(df_list, split_name):
         if not df_list: return pd.DataFrame()
         combined = pd.concat(df_list, ignore_index=True)
-        combined = combined.sample(frac=1, random_state=SEED).reset_index(drop=True)
+        combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
         print(f"   -> Prepared [{split_name.upper()}]: Total {len(combined)} samples.")
         return combined
 

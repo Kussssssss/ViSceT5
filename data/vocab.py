@@ -71,7 +71,7 @@ def _stable_hash_int(s: str) -> int:
 
 
 def _normalize_text(s: str, lowercase: bool = True) -> str:
-    s = unicodedata.normalize("NFKC", str(s))
+    s = unicodedata.normalize("NFC", str(s))
     s = s.strip(" .,:;!?\"'")
     s = re.sub(r"\s+", " ", s).strip()
     return s.lower() if lowercase else s
