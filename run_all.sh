@@ -13,7 +13,7 @@ else
 fi
 
 if [ ! -d "/workspace/myenv" ]; then
-    python3 -m venv /workspace/myenv
+    python3 -m venv --system-site-packages /workspace/myenv
 fi
 
 source /workspace/myenv/bin/activate
