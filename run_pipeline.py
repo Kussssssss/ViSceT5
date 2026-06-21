@@ -54,7 +54,10 @@ def run():
                 # Cài đặt CLI vastai
                 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vastai"], check=True)
                 
-                instance_id = container_label.split("-")[-1]
+                import re
+                match = re.search(r"(\d+)(?:\D*)$", container_label)
+                instance_id = match.group(1) if match else "".join(re.findall(r"\d+", container_label))
+                
                 print(f"Stopping instance ID: {instance_id}...")
                 subprocess.run([
                     "vastai", "stop", "instance", instance_id, 
