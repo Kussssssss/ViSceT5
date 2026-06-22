@@ -43,6 +43,31 @@ def run():
             print(f"❌ Error during training: {e}")
             raise e
 
+        # 3.5. Tự động upload checkpoint lên Hugging Face Hub (nếu được cấu hình)
+        try:
+            hf_token = os.environ.get("HF_TOKEN", "")
+            hf_repo = os.environ.get("HF_REPO", "")
+            
+            if hf_token and hf_repo:
+                print("\n>>> [Step 3.5] Uploading checkpoints to Hugging Face Hub...")
+                from huggingface_hub import HfApi
+                api = HfApi(token=hf_token)
+                print(f"Creating repository '{hf_repo}' if it doesn't exist...")
+                api.create_repo(repo_id=hf_repo, repo_type="model", exist_ok=True)
+                
+                output_dir = "./output/finetune"
+                print(f"Uploading directory '{output_dir}' to '{hf_repo}'...")
+                api.upload_folder(
+                    folder_path=output_dir,
+                    repo_id=hf_repo,
+                    repo_type="model",
+                )
+                print(">>> Hugging Face upload successful.")
+            else:
+                print("\nℹ️ HF_TOKEN or HF_REPO environment variables not found. Skipping Hugging Face upload.")
+        except Exception as e:
+            print(f"\n❌ Error uploading to Hugging Face: {e}")
+
     finally:
         # 4. Tự động dừng máy ảo Vast.ai để tránh tốn phí GPU
         try:
