@@ -36,15 +36,10 @@ def run():
         try:
             sys.argv = ["finetune.py", "configs/finetune.yaml"]
             
-            # Nếu bật MOCK_TEST, ghi đè các tham số của Hugging Face Trainer để chạy test cực nhanh (2 steps)
+            # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
             if os.environ.get("MOCK_TEST", "").lower() == "true":
-                print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Đè cấu hình: max_steps=2, logging_steps=1.")
-                sys.argv.extend([
-                    "--max_steps", "2",
-                    "--logging_steps", "1",
-                    "--eval_strategy", "no",
-                    "--save_strategy", "no"
-                ])
+                print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
+                sys.argv.extend(["--smoke_test", "True"])
                 
             from training import finetune
             importlib.reload(finetune)
