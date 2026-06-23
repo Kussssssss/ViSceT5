@@ -35,6 +35,17 @@ def run():
         print("\n>>> [Step 3] Starting Finetune Training...")
         try:
             sys.argv = ["finetune.py", "configs/finetune.yaml"]
+            
+            # Nếu bật MOCK_TEST, ghi đè các tham số của Hugging Face Trainer để chạy test cực nhanh (2 steps)
+            if os.environ.get("MOCK_TEST", "").lower() == "true":
+                print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Đè cấu hình: max_steps=2, logging_steps=1.")
+                sys.argv.extend([
+                    "--max_steps", "2",
+                    "--logging_steps", "1",
+                    "--eval_strategy", "no",
+                    "--save_strategy", "no"
+                ])
+                
             from training import finetune
             importlib.reload(finetune)
             finetune.main()
@@ -56,6 +67,15 @@ def run():
                 api.create_repo(repo_id=hf_repo, repo_type="model", exist_ok=True)
                 
                 output_dir = "./output/finetune"
+                os.makedirs(output_dir, exist_ok=True)
+                # Ghi thông tin meta chạy để thư mục không bao giờ rỗng khi upload test
+                with open(os.path.join(output_dir, "run_info.json"), "w", encoding="utf-8") as f:
+                    import json
+                    json.dump({
+                        "mock_test": os.environ.get("MOCK_TEST", "").lower() == "true",
+                        "status": "completed"
+                    }, f, indent=4)
+                
                 print(f"Uploading directory '{output_dir}' to '{hf_repo}'...")
                 api.upload_folder(
                     folder_path=output_dir,
