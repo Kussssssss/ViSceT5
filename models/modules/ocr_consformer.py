@@ -2,8 +2,9 @@
 models/modules/ocr_consformer.py
 OCREncoder (Consformer): GroupAttention stacks.
 """
-import copy
+
 import math
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,7 +83,7 @@ class GroupAttention(nn.Module):
         neibor_attn = prior_f + (1.0 - prior_f) * neibor_attn
         tri = torch.triu(torch.ones(L, L, device=device, dtype=torch.bool), diagonal=0).unsqueeze(0).unsqueeze(0)
         tri_f = tri.to(torch.float32)
-        t = torch.log(neibor_attn + 1e-6).matmul(tri_f)
+        t = torch.log(neibor_attn + 1e-9).matmul(tri_f)
         g_attn = tri_f.matmul(t).exp()
         eye = torch.eye(L, device=device, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
         g_attn = g_attn + g_attn.transpose(-2, -1) + neibor_attn.masked_fill(~eye, 1e-4)

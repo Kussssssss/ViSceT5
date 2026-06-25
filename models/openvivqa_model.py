@@ -43,11 +43,9 @@ def _char_embedding(char_embedding, char_position_embedding, _ocr_char, ocr_char
     else: raise RuntimeError("dim mismatch in _char_embedding")
 
     ocr_char_emb = ocr_char_emb + pos_emb
-    mask = ocr_char_mask.to(dtype=ocr_char_emb.dtype).unsqueeze(-1)
-    ocr_char_emb = ocr_char_emb * mask
-    if mean: 
-        denom = mask.sum(dim=-2).clamp_min(1.0)
-        ocr_char_emb = ocr_char_emb.sum(dim=-2) / denom
+    ocr_char_emb = ocr_char_emb * ocr_char_mask.unsqueeze(-1)
+    if mean:
+        ocr_char_emb = ocr_char_emb.mean(dim=-2)
     return ocr_char_emb
 
 def _pad_or_crop_lastdim(x: torch.Tensor, target_len: int, pad_value: float = 0.0) -> torch.Tensor:
@@ -182,10 +180,10 @@ class OpenViVQAModel(PreTrainedModel):
         self.char_num = int(getattr(config, "char_num"))
         self.char_position_embedding = nn.Embedding(self.char_max_num, self.d_model)
         self.char_embedding = nn.Embedding(self.char_num, self.d_model)
-        self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=1e-6)
+        self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=1e-12)
 
         # Mạng Baseline cho OCR (Bản Lite - Dùng khi tắt OCR Module)
-        self.ocr_lite_text_ln = T5LayerNorm(self.d_model, eps=1e-6)
+        self.ocr_lite_text_ln = T5LayerNorm(self.d_model, eps=1e-12)
         self.ocr_lite_text_proj = nn.Linear(self.d_model, self.d_model)
         self.ocr_lite_text_ff = nn.Sequential(
             nn.Linear(self.d_model, self.d_model), nn.GELU(), nn.Linear(self.d_model, self.d_model),
@@ -204,7 +202,7 @@ class OpenViVQAModel(PreTrainedModel):
         ).lower().strip()
         self.use_twc = bool(getattr(self.config, "use_twc", True))
 
-        self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-6).to(torch.float32)
+        self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-12).to(torch.float32)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.generation_config = GenerationConfig(
@@ -947,17 +945,17 @@ class OpenViVQAModel(PreTrainedModel):
                         ones = torch.ones_like(idx, dtype=word_counts.dtype, device=device)
                         word_counts[b].scatter_add_(0, idx, ones)
 
-                    word_counts = word_counts.unsqueeze(-1)
-                    word_counts_inv = torch.where(word_counts > 0, 1.0 / word_counts, torch.zeros_like(word_counts))
-                    word_vectors = word_vectors * word_counts_inv
+                    word_counts = word_counts.unsqueeze(-1).clamp_min(1e-9)
+                    word_vectors = word_vectors / word_counts
 
                     half = N_word // 2
                     ocr_feat = word_vectors[:, :half, :]
                     rel_feat = word_vectors[:, half:, :]
 
                     def _safe_l2(x, dim=-1, eps=1e-6):
-                        n = torch.sqrt(torch.sum(x**2, dim=dim, keepdim=True) + eps)
-                        return x / n
+                        n = x.norm(dim=dim, keepdim=True).clamp_min(eps)
+                        x = x / n
+                        return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
 
                     ocr_feat = _safe_l2(ocr_feat, dim=-1)
                     rel_feat = _safe_l2(rel_feat, dim=-1)
@@ -982,6 +980,19 @@ class OpenViVQAModel(PreTrainedModel):
                         out_dict["r2o_block"] = torch.block_diag(*blocks_r)
                     else:
                         out_dict["r2o_block"] = None
+
+                    # FILTER OUT INVALID WORDS FROM CONTRASTIVE LOSS TO PREVENT GRADIENT EXPLOSION
+                    counts_ocr = word_counts[:, :half, 0]  # (Bc, half)
+                    counts_rel = word_counts[:, half:, 0]  # (Bc, half)
+                    valid_ocr_flat = (counts_ocr > 0.5).reshape(-1)  # (Bc * half,)
+                    valid_rel_flat = (counts_rel > 0.5).reshape(-1)  # (Bc * half,)
+
+                    out_dict["o2r_block"][~valid_ocr_flat, :] = -1.0
+                    out_dict["o2r_block"][:, ~valid_rel_flat] = -1.0
+
+                    if out_dict["r2o_block"] is not None:
+                        out_dict["r2o_block"][~valid_rel_flat, :] = -1.0
+                        out_dict["r2o_block"][:, ~valid_ocr_flat] = -1.0
 
             if return_visual_search_debug:
                 out_dict["vs_debug"] = vs_out
