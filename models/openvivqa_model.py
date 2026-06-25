@@ -182,10 +182,10 @@ class OpenViVQAModel(PreTrainedModel):
         self.char_num = int(getattr(config, "char_num"))
         self.char_position_embedding = nn.Embedding(self.char_max_num, self.d_model)
         self.char_embedding = nn.Embedding(self.char_num, self.d_model)
-        self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=1e-12)
+        self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=1e-6)
 
         # Mạng Baseline cho OCR (Bản Lite - Dùng khi tắt OCR Module)
-        self.ocr_lite_text_ln = T5LayerNorm(self.d_model, eps=1e-12)
+        self.ocr_lite_text_ln = T5LayerNorm(self.d_model, eps=1e-6)
         self.ocr_lite_text_proj = nn.Linear(self.d_model, self.d_model)
         self.ocr_lite_text_ff = nn.Sequential(
             nn.Linear(self.d_model, self.d_model), nn.GELU(), nn.Linear(self.d_model, self.d_model),
@@ -204,7 +204,7 @@ class OpenViVQAModel(PreTrainedModel):
         ).lower().strip()
         self.use_twc = bool(getattr(self.config, "use_twc", True))
 
-        self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-12).to(torch.float32)
+        self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-6).to(torch.float32)
 
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.generation_config = GenerationConfig(
@@ -831,6 +831,12 @@ class OpenViVQAModel(PreTrainedModel):
 
         # attn_summary, crop_tokens, crop_mask were already assigned in the use_vs block above
 
+        if torch.isnan(txt_emb_for_enc).any(): print("🚨 [FORWARD CHECK] txt_emb_for_enc has NaN")
+        if torch.isnan(img_pack["img_tokens"]).any(): print("🚨 [FORWARD CHECK] img_tokens has NaN")
+        if torch.isnan(ocr_fused_feat).any(): print("🚨 [FORWARD CHECK] ocr_fused_feat has NaN")
+        if torch.isnan(crop_tokens).any(): print("🚨 [FORWARD CHECK] crop_tokens has NaN")
+        if torch.isnan(attn_summary).any(): print("🚨 [FORWARD CHECK] attn_summary has NaN")
+
         # CONCAT CHUỖI VÀO ENCODER: CHỈ CÓ 1 KHỐI ocr_fused_feat
         fused_seq = torch.cat(
             [
@@ -875,6 +881,7 @@ class OpenViVQAModel(PreTrainedModel):
                 if k not in ("img_tokens", "img_attn_mask", "patch_scores"): del img_pack[k]
 
         enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=fused_mask, return_dict=True)
+        if torch.isnan(enc_out.last_hidden_state).any(): print("🚨 [FORWARD CHECK] enc_out.last_hidden_state has NaN")
 
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
 
@@ -890,6 +897,7 @@ class OpenViVQAModel(PreTrainedModel):
                 output_hidden_states=True,
                 return_dict=True,
             )
+            if torch.isnan(outputs.logits).any(): print("🚨 [FORWARD CHECK] vit5 output logits has NaN")
             out_dict["textcls_scores"] = outputs.logits
             out_dict["mlm_loss"] = outputs.loss
 
