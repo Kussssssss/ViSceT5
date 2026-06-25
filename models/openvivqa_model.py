@@ -946,10 +946,9 @@ class OpenViVQAModel(PreTrainedModel):
                     ocr_feat = word_vectors[:, :half, :]
                     rel_feat = word_vectors[:, half:, :]
 
-                    def _safe_l2(x, dim=-1, eps=1e-6):
-                        n = x.norm(dim=dim, keepdim=True).clamp_min(eps)
-                        x = x / n
-                        return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+                    def _safe_l2(x, dim=-1, eps=1e-12):
+                        n = torch.sqrt(torch.sum(x**2, dim=dim, keepdim=True) + eps)
+                        return x / n
 
                     ocr_feat = _safe_l2(ocr_feat, dim=-1)
                     rel_feat = _safe_l2(rel_feat, dim=-1)
