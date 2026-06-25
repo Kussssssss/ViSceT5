@@ -3,14 +3,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# @title
 def create_batch_labels(batch_labels):
     if isinstance(batch_labels, torch.Tensor):
-        B, L, _ = batch_labels.shape
-        blocks = [batch_labels[b] for b in range(B)]
+        if batch_labels.dim() == 2:
+            result = batch_labels.clone()
+        elif batch_labels.dim() == 3:
+            B, L, _ = batch_labels.shape
+            blocks = [batch_labels[b] for b in range(B)]
+            result = torch.block_diag(*blocks)          # (B*L, B*L)
+        else:
+            raise ValueError(f"Unsupported batch_labels dim: {batch_labels.dim()}")
     else:
         blocks = batch_labels
-
-    result = torch.block_diag(*blocks)          # (B*L, B*L)
+        result = torch.block_diag(*blocks)          # (B*L, B*L)
 
     diag = torch.diagonal(result)               # (B*L,)
     ignore_mask = (diag == -1)
@@ -83,11 +89,13 @@ class ViT5PretrainLoss(nn.Module):
             logits_per_text = logits_per_image.t()
 
             o2r_block = o2r_block.to(logits_per_image.device)
+            o2r_block = create_batch_labels(o2r_block)
 
             if r2o_block is None:
                 r2o_block = o2r_block.transpose(0, 1)
             else:
                 r2o_block = r2o_block.to(logits_per_image.device)
+                r2o_block = create_batch_labels(r2o_block)
 
             mask = o2r_block != -1
 
@@ -134,7 +142,7 @@ class ViT5PretrainLoss(nn.Module):
 
             total_loss = contrastive_loss + (0.0 * mlm_loss) + (0.0 * pollute_loss)
 
-        elif mode in ["no_twc_ocr_aug", "no_twc", "w/o_twc", "without_twc", "only_itm_mlm"]:
+        elif mode in ["no_twc_ocr_aug", "no_twc", "w/o_twc", "without_twc"]:
             total_loss = mlm_loss + pollute_loss
 
         else:
