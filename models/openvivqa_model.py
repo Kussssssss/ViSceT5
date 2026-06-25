@@ -981,19 +981,6 @@ class OpenViVQAModel(PreTrainedModel):
                     else:
                         out_dict["r2o_block"] = None
 
-                    # FILTER OUT INVALID WORDS FROM CONTRASTIVE LOSS TO PREVENT GRADIENT EXPLOSION
-                    counts_ocr = word_counts[:, :half, 0]  # (Bc, half)
-                    counts_rel = word_counts[:, half:, 0]  # (Bc, half)
-                    valid_ocr_flat = (counts_ocr > 0.5).reshape(-1)  # (Bc * half,)
-                    valid_rel_flat = (counts_rel > 0.5).reshape(-1)  # (Bc * half,)
-
-                    out_dict["o2r_block"][~valid_ocr_flat, :] = -1.0
-                    out_dict["o2r_block"][:, ~valid_rel_flat] = -1.0
-
-                    if out_dict["r2o_block"] is not None:
-                        out_dict["r2o_block"][~valid_rel_flat, :] = -1.0
-                        out_dict["r2o_block"][:, ~valid_ocr_flat] = -1.0
-
             if return_visual_search_debug:
                 out_dict["vs_debug"] = vs_out
                 out_dict["clip_input_ids"] = q_ids_for_clip.detach().cpu()

@@ -81,8 +81,9 @@ class MMCLIPAttention(CLIPAttention):
         value_states = value_states.view(*proj_shape)
         src_len = key_states.size(1)
 
-        attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-        attn_weights = attn_weights.to(torch.float32)
+        query_states_f32 = query_states.to(torch.float32)
+        key_states_f32 = key_states.to(torch.float32)
+        attn_weights = torch.bmm(query_states_f32, key_states_f32.transpose(1, 2))
 
         attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
 
@@ -110,7 +111,9 @@ class MMCLIPAttention(CLIPAttention):
 
         attn_probs = F.dropout(attn_weights, p=self.dropout, training=self.training)
 
-        attn_output = torch.bmm(attn_probs, value_states)
+        value_states_f32 = value_states.to(torch.float32)
+        attn_output = torch.bmm(attn_probs, value_states_f32)
+        attn_output = attn_output.to(hidden_states.dtype)
 
         attn_output = attn_output.view(bsz, self.num_heads, q_len, self.head_dim)
         attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, embed_dim)
