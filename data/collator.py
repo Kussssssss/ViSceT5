@@ -469,7 +469,7 @@ class ViT5VQADataCollator:
             raw_tok = toks[i]
             norm_tok = _normalize_text(raw_tok, lowercase=True)
             if raw_tok == pad_tok or norm_tok in {"<pad>", "</s>"}:
-                rel = pad_tok; o2r[i, i], r2o[i, i] = -1.0, -1.0; actions.append("PAD")
+                rel = pad_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("PAD")
                 padded.append(norm_tok); related.append(rel); continue
 
             is_special = bool(self.regex_special.search(norm_tok))
@@ -496,31 +496,18 @@ class ViT5VQADataCollator:
                     rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP")
             padded.append(norm_tok); related.append(rel)
 
+        for i in range(len(related)):
+            for j in range(i + 1, len(related)):
+                if padded[i].lower() == padded[j].lower():
+                    o2r[i, j], o2r[j, i] = o2r[j, j], o2r[i, i]
+                    r2o[i, j], r2o[j, i] = r2o[j, j], r2o[i, i]
+                else:
+                    o2r[i, j], o2r[j, i] = 0.0, 0.0
+                    r2o[i, j], r2o[j, i] = 0.0, 0.0
+
         while len(padded) < ocr_max_num:
             padded.append(pad_tok); related.append(pad_tok)
             if self.debug: actions.append("PAD")
-
-        for i in range(ocr_max_num):
-            is_pad_i = (padded[i] == pad_tok or padded[i] in {"<pad>", "</s>"})
-            if is_pad_i:
-                o2r[i, :] = -1.0
-                o2r[:, i] = -1.0
-                r2o[i, :] = -1.0
-                r2o[:, i] = -1.0
-                continue
-
-            for j in range(i + 1, ocr_max_num):
-                is_pad_j = (padded[j] == pad_tok or padded[j] in {"<pad>", "</s>"})
-                if is_pad_j:
-                    o2r[i, j] = -1.0; o2r[j, i] = -1.0
-                    r2o[i, j] = -1.0; r2o[j, i] = -1.0
-                elif padded[i].lower() == padded[j].lower():
-                    o2r[i, j] = o2r[j, j]; o2r[j, i] = o2r[i, i]
-                    r2o[i, j] = r2o[j, j]; r2o[j, i] = r2o[i, i]
-                else:
-                    o2r[i, j] = 0.0; o2r[j, i] = 0.0
-                    r2o[i, j] = 0.0; r2o[j, i] = 0.0
-
         if self.debug: return padded, related, o2r, r2o, actions
         return padded, related, o2r, r2o, None
 
