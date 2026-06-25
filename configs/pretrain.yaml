@@ -42,4 +42,5 @@ dataloader_num_workers: 4
 dataloader_pin_memory: true
 disable_tqdm: false
 fp16: false
+bf16: false
 report_to: "none"
