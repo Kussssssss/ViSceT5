@@ -178,6 +178,36 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         self._running_cnt = 0
         self._last_log_step = -1
 
+    def training_step(self, model, inputs):
+        nan_params_before = []
+        for name, param in model.named_parameters():
+            if torch.isnan(param).any():
+                nan_params_before.append(name)
+        if nan_params_before:
+            print(f"🚨 [Trainer Check] BEFORE training_step, NaN weights detected in parameters: {nan_params_before[:15]}")
+
+        loss = super().training_step(model, inputs)
+
+        if torch.isnan(loss).any():
+            print(f"🚨 [Trainer Check] Loss is NaN at step {self.state.global_step}!")
+
+        nan_grads = []
+        for name, param in model.named_parameters():
+            if param.grad is not None and torch.isnan(param.grad).any():
+                nan_grads.append(name)
+        if nan_grads:
+            print(f"🚨 [Trainer Check] NaN gradients detected in step {self.state.global_step}:")
+            for name in nan_grads[:20]:
+                print(f"   - {name}")
+            for k, v in inputs.items():
+                if isinstance(v, torch.Tensor):
+                    print(f"   Input '{k}': shape={v.shape}, nan={torch.isnan(v).any().item()}")
+                elif isinstance(v, list):
+                    print(f"   Input '{k}': list of len {len(v)}")
+
+        return loss
+
+
     def log(self, logs: Dict[str, float]) -> None:
         super().log(logs)
         if self.args.output_dir:
