@@ -32,22 +32,41 @@ def run():
             print(f"❌ Error initializing model: {e}")
             raise e
 
-        print("\n>>> [Step 3] Starting Finetune Training...")
-        try:
-            sys.argv = ["finetune.py", "configs/finetune.yaml"]
-            
-            # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
-            if os.environ.get("MOCK_TEST", "").lower() == "true":
-                print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
-                sys.argv.extend(["--smoke_test", "True"])
+        stage = os.environ.get("STAGE", "finetune").lower()
+        if stage == "pretrain":
+            print("\n>>> [Step 3] Starting Pretrain Training...")
+            try:
+                sys.argv = ["pretrain.py", "configs/pretrain.yaml"]
                 
-            from training import finetune
-            importlib.reload(finetune)
-            finetune.main()
-            print(">>> Training finished successfully.")
-        except Exception as e:
-            print(f"❌ Error during training: {e}")
-            raise e
+                # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
+                if os.environ.get("MOCK_TEST", "").lower() == "true":
+                    print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
+                    sys.argv.extend(["--smoke_test", "True"])
+                    
+                from training import pretrain
+                importlib.reload(pretrain)
+                pretrain.main()
+                print(">>> Pretrain finished successfully.")
+            except Exception as e:
+                print(f"❌ Error during pretraining: {e}")
+                raise e
+        else:
+            print("\n>>> [Step 3] Starting Finetune Training...")
+            try:
+                sys.argv = ["finetune.py", "configs/finetune.yaml"]
+                
+                # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
+                if os.environ.get("MOCK_TEST", "").lower() == "true":
+                    print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
+                    sys.argv.extend(["--smoke_test", "True"])
+                    
+                from training import finetune
+                importlib.reload(finetune)
+                finetune.main()
+                print(">>> Training finished successfully.")
+            except Exception as e:
+                print(f"❌ Error during training: {e}")
+                raise e
 
         # 3.5. Tự động upload checkpoint lên Hugging Face Hub (nếu được cấu hình)
         try:
@@ -61,12 +80,13 @@ def run():
                 print(f"Creating repository '{hf_repo}' if it doesn't exist...")
                 api.create_repo(repo_id=hf_repo, repo_type="model", exist_ok=True)
                 
-                output_dir = "./output/finetune"
+                output_dir = "./output/pretrain" if stage == "pretrain" else "./output/finetune"
                 os.makedirs(output_dir, exist_ok=True)
                 # Ghi thông tin meta chạy để thư mục không bao giờ rỗng khi upload test
                 with open(os.path.join(output_dir, "run_info.json"), "w", encoding="utf-8") as f:
                     import json
                     json.dump({
+                        "stage": stage,
                         "mock_test": os.environ.get("MOCK_TEST", "").lower() == "true",
                         "status": "completed"
                     }, f, indent=4)
