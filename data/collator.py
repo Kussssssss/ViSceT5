@@ -469,7 +469,7 @@ class ViT5VQADataCollator:
             raw_tok = toks[i]
             norm_tok = _normalize_text(raw_tok, lowercase=True)
             if raw_tok == pad_tok or norm_tok in {"<pad>", "</s>"}:
-                rel = pad_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("PAD")
+                rel = pad_tok; o2r[i, i], r2o[i, i] = self.contrastive_ignore, self.contrastive_ignore; actions.append("PAD")
                 padded.append(norm_tok); related.append(rel); continue
 
             is_special = bool(self.regex_special.search(norm_tok))
