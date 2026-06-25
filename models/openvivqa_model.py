@@ -939,8 +939,9 @@ class OpenViVQAModel(PreTrainedModel):
                         ones = torch.ones_like(idx, dtype=word_counts.dtype, device=device)
                         word_counts[b].scatter_add_(0, idx, ones)
 
-                    word_counts = word_counts.unsqueeze(-1).clamp_min(1e-9)
-                    word_vectors = word_vectors / word_counts
+                    word_counts = word_counts.unsqueeze(-1)
+                    word_counts_inv = torch.where(word_counts > 0, 1.0 / word_counts, torch.zeros_like(word_counts))
+                    word_vectors = word_vectors * word_counts_inv
 
                     half = N_word // 2
                     ocr_feat = word_vectors[:, :half, :]
