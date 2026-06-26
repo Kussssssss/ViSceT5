@@ -110,13 +110,13 @@ class ViT5PretrainLoss(nn.Module):
                     valid_o2r = o2r_labels[mask]
                     n_pos_o2r = (valid_o2r > 0.5).float().sum().clamp_min(1.0)
                     n_neg_o2r = (valid_o2r == 0.0).float().sum().clamp_min(1.0)
-                    # Giới hạn max 50 để tránh gradient explosion
-                    pw_o2r = float((n_neg_o2r / n_pos_o2r).clamp(1.0, 50.0).item())
+                    # Cap at 20: balanced gradient without dominating MLM/ITM signal
+                    pw_o2r = float((n_neg_o2r / n_pos_o2r).clamp(1.0, 20.0).item())
 
                     valid_r2o = r2o_labels[mask]
                     n_pos_r2o = (valid_r2o > 0.5).float().sum().clamp_min(1.0)
                     n_neg_r2o = (valid_r2o == 0.0).float().sum().clamp_min(1.0)
-                    pw_r2o = float((n_neg_r2o / n_pos_r2o).clamp(1.0, 50.0).item())
+                    pw_r2o = float((n_neg_r2o / n_pos_r2o).clamp(1.0, 20.0).item())
 
                 loss_i = F.binary_cross_entropy_with_logits(
                     logits_per_image[mask].float(),

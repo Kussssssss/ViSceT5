@@ -897,7 +897,54 @@ class OpenViVQAModel(PreTrainedModel):
             for k in list(img_pack.keys()):
                 if k not in ("img_tokens", "img_attn_mask", "patch_scores"): del img_pack[k]
 
-        enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=fused_mask, return_dict=True)
+        # TWC: Block cross-half OCR attention so original and related halves cannot
+        # trivially align via shared self-attention ("pepsi" attending to "pesi").
+        # Both halves still attend to text and image tokens — only OCR↔OCR cross-half
+        # attention is blocked. T5 encoder accepts 3D [B,S,S] mask (→ [B,1,S,S]).
+        _enc_mask = fused_mask  # default: standard 1D mask
+        _use_twc = bool(getattr(self.config, "use_twc", getattr(self, "use_twc", True)))
+        if self.pretrain and use_ocr and _use_twc and o2r_labels is not None:
+            _L_txt = txt_emb_for_enc.size(1)
+            _L_img = img_pack["img_tokens"].size(1)
+            _L_ocr = ocr_fused_feat.size(1)
+            # N_word = 2*current_max_len (always even); half_word = current_max_len.
+            # Using ocr_map (word-index per token) is correct because flat_ids_a and
+            # flat_ids_b can have different subword-token lengths per sample, making
+            # _L_ocr//2 wrong as a split point. ocr_map gives per-sample, per-token
+            # membership: word index < half_word → original; >= half_word → related.
+            _N_word = int(twa_ocr_char.size(1))
+            _half_word = _N_word // 2
+            if _N_word > 0 and _N_word % 2 == 0 and _L_ocr > 0:
+                _off_ocr = _L_txt + _L_img
+                _B, _S = fused_mask.shape
+                # Expand 1D → 2D: pos i attends to j iff fused_mask[b,j]=1
+                _enc_mask = fused_mask.unsqueeze(1).expand(_B, _S, _S).contiguous().float()
+
+                # Align ocr_map to _L_ocr (should match; resize is a safety fallback)
+                _om = ocr_map
+                if _om.size(1) != _L_ocr:
+                    _d = _L_ocr - _om.size(1)
+                    if _d > 0:
+                        _om = torch.cat([_om, _om.new_full((_B, _d), -1)], dim=1)
+                    else:
+                        _om = _om[:, :_L_ocr]
+
+                orig_tok = (_om >= 0) & (_om < _half_word)        # [B, L_ocr]
+                rel_tok  = (_om >= _half_word) & (_om < _N_word)  # [B, L_ocr]
+
+                # Embed into full sequence space [B, S]
+                orig_full = torch.zeros(_B, _S, device=device, dtype=_enc_mask.dtype)
+                rel_full  = torch.zeros(_B, _S, device=device, dtype=_enc_mask.dtype)
+                orig_full[:, _off_ocr:_off_ocr + _L_ocr] = orig_tok.to(_enc_mask.dtype)
+                rel_full[:,  _off_ocr:_off_ocr + _L_ocr] = rel_tok.to(_enc_mask.dtype)
+
+                # cross_block[b,i,j]=1 iff (i orig ∧ j rel) or (i rel ∧ j orig)
+                cross_block = (
+                    orig_full.unsqueeze(2) * rel_full.unsqueeze(1) +
+                    rel_full.unsqueeze(2) * orig_full.unsqueeze(1)
+                ).clamp_(0.0, 1.0)
+                _enc_mask = _enc_mask * (1.0 - cross_block)
+        enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=_enc_mask, return_dict=True)
         if torch.isnan(enc_out.last_hidden_state).any(): print("🚨 [FORWARD CHECK] enc_out.last_hidden_state has NaN")
 
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
