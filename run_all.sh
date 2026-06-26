@@ -1,11 +1,6 @@
 #!/bin/bash
 set -e
 
-export HF_TOKEN="YOUR_HF_TOKEN"
-export HF_REPO="Kus669/ViSceT5-pretrain"
-export MOCK_TEST="true"
-export STAGE="pretrain"
-
 apt-get update && apt-get install -y python3-venv git
 cd /workspace
 
