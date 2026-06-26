@@ -122,7 +122,28 @@ Nếu muốn huấn luyện Finetune ngay từ đầu (bỏ qua Pretrain), bạn
 python training/finetune.py configs/finetune.yaml
 ```
 
-### 5. Resume Huấn Luyện (Tiếp tục khi bị gián đoạn)
+### 5. Tự động hóa và Cấu hình Biến môi trường (Vast.ai)
+
+Nếu bạn chạy trên các Server Cloud như Vast.ai, bạn có thể sử dụng file [run_all.sh](file:///c:/Users/Admin/Workspace/openvivqa/run_all.sh) để tự động hóa hoàn toàn quá trình tải thư viện, dựng môi trường ảo, và chạy huấn luyện.
+
+#### Các biến môi trường cần cấu hình trong `run_all.sh`:
+*   `HF_TOKEN`: Token tài khoản Hugging Face của bạn (cần quyền **Write**) để tự động tải checkpoint lên Hub.
+*   `HF_REPO`: Đường dẫn repo của Hugging Face Hub (ví dụ: `Kus669/ViSceT5-pretrain`).
+*   `STAGE`: Giai đoạn huấn luyện. Chọn `"pretrain"` hoặc `"finetune"`.
+*   `MOCK_TEST`: Thiết lập `"true"` để chạy thử nhanh (Smoke Test với 8 dòng dữ liệu và 3 steps) nhằm kiểm tra lỗi đường ống dẫn, hoặc `"false"` để chạy thật.
+
+#### Cách chạy:
+1. Mở file [run_all.sh](file:///c:/Users/Admin/Workspace/openvivqa/run_all.sh) và cập nhật token thật vào biến `export HF_TOKEN="YOUR_HF_TOKEN"`.
+2. Cấp quyền thực thi và khởi chạy file script dưới nền:
+   ```bash
+   bash run_all.sh
+   ```
+3. Script sẽ chạy ngầm và xuất toàn bộ nhật ký huấn luyện ra file `train_execution.log`. Để theo dõi tiến trình chạy trực tiếp, sử dụng lệnh:
+   ```bash
+   tail -f train_execution.log
+   ```
+
+### 6. Resume Huấn Luyện (Tiếp tục khi bị gián đoạn)
 Trong cả `pretrain.yaml` và `finetune.yaml`, bạn có thể dùng một trong hai cách để tiếp tục train nếu server bị sập:
 - `resume_from_checkpoint: "./output/pretrain/checkpoint-1000"` (Trỏ thẳng vào ổ đĩa cục bộ).
 - `resume_checkpoint_id: "ID_TRÊN_DRIVE"` (Nếu checkpoint nằm trên Google Drive dạng zip, hệ thống sẽ tự tải, giải nén và resume chuẩn xác số epoch/step).
