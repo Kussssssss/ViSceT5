@@ -103,15 +103,32 @@ class ViT5PretrainLoss(nn.Module):
                 o2r_labels = o2r_block.float()
                 r2o_labels = r2o_block.float()
 
+                # ── FIX: Dynamic pos_weight để cân bằng class imbalance ──────────────
+                # Label matrix có ~99.9% negatives (label=0.0). Nếu không có pos_weight,
+                # gradient hoàn toàn bị dominated bởi negatives khiến loss tầm thường.
+                with torch.no_grad():
+                    valid_o2r = o2r_labels[mask]
+                    n_pos_o2r = (valid_o2r > 0.5).float().sum().clamp_min(1.0)
+                    n_neg_o2r = (valid_o2r == 0.0).float().sum().clamp_min(1.0)
+                    # Giới hạn max 50 để tránh gradient explosion
+                    pw_o2r = float((n_neg_o2r / n_pos_o2r).clamp(1.0, 50.0).item())
+
+                    valid_r2o = r2o_labels[mask]
+                    n_pos_r2o = (valid_r2o > 0.5).float().sum().clamp_min(1.0)
+                    n_neg_r2o = (valid_r2o == 0.0).float().sum().clamp_min(1.0)
+                    pw_r2o = float((n_neg_r2o / n_pos_r2o).clamp(1.0, 50.0).item())
+
                 loss_i = F.binary_cross_entropy_with_logits(
                     logits_per_image[mask].float(),
                     o2r_labels[mask],
+                    pos_weight=torch.tensor([pw_o2r], device=logits_per_image.device, dtype=torch.float),
                     reduction="mean",
                 )
 
                 loss_t = F.binary_cross_entropy_with_logits(
                     logits_per_text[mask].float(),
                     r2o_labels[mask],
+                    pos_weight=torch.tensor([pw_r2o], device=logits_per_text.device, dtype=torch.float),
                     reduction="mean",
                 )
 
@@ -208,6 +225,21 @@ class PreTrainMLMAccuracy(BaseMetric):
         return (preds == labels).float().mean().item()
 
 class PreTrainTWCAccuracy(BaseMetric):
+    """
+    FIX: Balanced TWC Accuracy = (Positive Recall + Negative Recall) / 2
+
+    Tại sao fix:
+    - Ma trận label [BN×BN] có ~99.9% negative cells (label=0.0) và ~0.1% positive.
+    - Metric cũ tính accuracy trên TẤT CẢ cells → trivially ~99.7% khi model
+      chỉ học push tất cả logits xuống âm (predict negative cho mọi pair).
+    - Metric mới đo riêng:
+        * pos_recall: % positive pairs (label>0.5) được predict đúng (logit>0)
+        * neg_recall: % negative pairs (label=0) được predict đúng (logit<=0)
+      và báo trung bình macro → không bị dominated bởi lớp negative.
+    - Để tránh noise từ việc sample ngẫu nhiên, neg_recall được tính trên
+      tập negative với kích thước min(4*n_pos, n_neg) để balanced nhưng
+      có đủ negative signal.
+    """
     def __init__(self):
         super().__init__("twc_acc")
 
@@ -215,21 +247,48 @@ class PreTrainTWCAccuracy(BaseMetric):
         if "contrastive_scores" not in model_output or model_output["contrastive_scores"] is None:
             return 0.0
 
-        logits_per_image = model_output["contrastive_scores"].detach()
+        logits_per_image = model_output["contrastive_scores"].detach()  # [BN, BN]
         o2r_block = model_output.get("o2r_block", None)
 
         if o2r_block is None:
             return 0.0
 
-        mask = o2r_block != -1
-        if not mask.any():
-            return 0.0
+        # o2r_block đã là [BN, BN] block-diag từ model output
+        # Tách riêng positive và strict-negative cells
+        pos_mask = (o2r_block > 0.5)                # label > 0.5 → positive pair
+        neg_mask = (o2r_block == 0.0)               # label == 0 → negative pair (strict)
+        # Bỏ qua cells có label = -1 (padding) và label ∈ (0, 0.5] (mềm)
 
-        # Trong Contrastive Loss, nếu logit > 0 tức là mô hình đoán Positive Pair
-        preds = (logits_per_image[mask] > 0.0).float()
-        targets = (o2r_block[mask] > 0.5).float()
+        # ── Positive Recall ────────────────────────────────────────────────────
+        # "Trong tất cả positive pairs, có bao nhiêu % được predict là positive?"
+        if pos_mask.any():
+            pos_logits = logits_per_image[pos_mask]
+            pos_recall = (pos_logits > 0.0).float().mean().item()
+        else:
+            pos_recall = 0.0
 
-        return (preds == targets).float().mean().item()
+        # ── Negative Recall (subsampled) ───────────────────────────────────────
+        # "Trong các negative pairs được chọn, có bao nhiêu % được predict đúng?"
+        # Subsample để tránh bias và giữ tỷ lệ pos:neg ≈ 1:4 (đủ để ổn định)
+        if neg_mask.any():
+            n_pos = int(pos_mask.sum().item())
+            n_neg_target = min(n_pos * 4, int(neg_mask.sum().item()))
+            n_neg_target = max(n_neg_target, 1)
+
+            neg_indices = neg_mask.nonzero(as_tuple=False)   # [K, 2]
+            if neg_indices.size(0) > n_neg_target:
+                perm = torch.randperm(neg_indices.size(0), device=logits_per_image.device)
+                neg_indices = neg_indices[perm[:n_neg_target]]
+
+            sampled_neg_logits = logits_per_image[neg_indices[:, 0], neg_indices[:, 1]]
+            neg_recall = (sampled_neg_logits <= 0.0).float().mean().item()
+        else:
+            neg_recall = 1.0  # Không có negative → perfect trivially
+
+        # Balanced accuracy: macro average của pos_recall và neg_recall
+        balanced_acc = (pos_recall + neg_recall) / 2.0
+        return balanced_acc
+
 
 # HÀM METRIC TỔNG - TỰ ĐỘNG ĐIỀU HƯỚNG THEO ABLATION MODE
 class GlobalPretrainAccuracy(BaseMetric):
