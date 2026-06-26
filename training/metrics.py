@@ -26,10 +26,16 @@ from transformers import (
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
-from training.pretraine_loss import ViT5PretrainLoss, PreTrainMLMAccuracy
+from training.pretraine_loss import (
+    ViT5PretrainLoss,
+    PreTrainMLMAccuracy,
+    PreTrainContraAccuracy,
+    PreTrainTWCAccuracy,
+    GlobalPretrainAccuracy,
+)
 
 pretrain_loss_fn = ViT5PretrainLoss()
-pretrain_acc_fn = PreTrainMLMAccuracy()
+pretrain_acc_fn = GlobalPretrainAccuracy(mode="all")
 
 def dbg(*args, **kwargs):
 

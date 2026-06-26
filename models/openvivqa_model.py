@@ -204,6 +204,25 @@ class OpenViVQAModel(PreTrainedModel):
 
         self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-12).to(torch.float32)
 
+        # ── TWC Projection Heads ────────────────────────────────────────────────
+        # Theo TWA paper: dùng projection head riêng biệt cho OCR-gốc và OCR-related
+        # để tránh trivial solution khi cả hai có shared context trong encoder.
+        # Mỗi head là 2-layer MLP với LayerNorm (theo chuẩn SimCLR/MoCo projection head).
+        # Output dim = d_model // 2 để contrastive space nhỏ hơn representation space.
+        twc_proj_dim = max(self.d_model // 2, 256)
+        self.twc_proj_ocr = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            T5LayerNorm(self.d_model, eps=1e-12),
+            nn.GELU(),
+            nn.Linear(self.d_model, twc_proj_dim),
+        )
+        self.twc_proj_rel = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            T5LayerNorm(self.d_model, eps=1e-12),
+            nn.GELU(),
+            nn.Linear(self.d_model, twc_proj_dim),
+        )
+
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.generation_config = GenerationConfig(
             max_new_tokens=int(getattr(config, "generation_max_new_tokens", 27)),
@@ -909,7 +928,10 @@ class OpenViVQAModel(PreTrainedModel):
 
             use_twc = bool(getattr(self.config, "use_twc", getattr(self, "use_twc", True)))
 
-            # SỬA LỖI INDEXERROR: ĐỊNH VỊ CHÍNH XÁC PHÂN ĐOẠN OCR TRONG LAST HIDDEN STATE
+            # ── TWC: Tách biệt OCR-gốc và OCR-related, encode qua projection heads riêng ──
+            # TWA paper (Fig 3): OCR_original và OCR_related được so sánh trong không gian
+            # contrastive riêng biệt. Projection heads ngăn model dùng thông tin shared
+            # context để trivially match cặp (i,i) — phải học biểu diễn thực sự.
             if use_twc and use_ocr and o2r_labels is not None:
                 enc_hid = enc_out.last_hidden_state
                 L_txt = txt_emb_for_enc.size(1)
@@ -917,9 +939,9 @@ class OpenViVQAModel(PreTrainedModel):
                 L_ocr = ocr_fused_feat.size(1)
 
                 off_img = L_txt
-                off_ocr = off_img + L_img # Vị trí bắt đầu chính xác của ocr_fused_feat
+                off_ocr = off_img + L_img  # Vị trí bắt đầu chính xác của ocr_fused_feat
 
-                # Cắt chuẩn xác tensor đại diện cho OCR (chiều dài là L_ocr khớp hoàn toàn với valid_map_mask)
+                # Cắt đúng tensor encoder output tương ứng với chuỗi OCR
                 ocr_enc_out = enc_hid[:, off_ocr: off_ocr + L_ocr, :]
 
                 valid_map_mask = (ocr_map >= 0) & (token_mask_for_ocr > 0)
@@ -929,48 +951,69 @@ class OpenViVQAModel(PreTrainedModel):
                     N_word = int(twa_ocr_char.size(1))
 
                     if N_word % 2 != 0:
-                        raise RuntimeError(f"TWC requires OCR original + OCR augmented pairs, but N_word={N_word} is odd.")
+                        raise RuntimeError(
+                            f"TWC requires OCR original + OCR augmented pairs, "
+                            f"but N_word={N_word} is odd."
+                        )
 
+                    half = N_word // 2  # first half = original, second half = related
+
+                    # Pool token-level encoder outputs về word-level
                     word_vectors = torch.zeros(Bc, N_word, D0, device=device, dtype=ocr_enc_out.dtype)
-                    word_counts = torch.zeros(Bc, N_word, device=device, dtype=ocr_enc_out.dtype)
+                    word_counts  = torch.zeros(Bc, N_word, device=device, dtype=ocr_enc_out.dtype)
 
                     for b in range(Bc):
                         vmask_b = valid_map_mask[b]
-                        if not vmask_b.any(): continue
-
-                        src = ocr_enc_out[b][vmask_b] # ĐÃ KHỚP SHAPE [196] với [196, 768]
+                        if not vmask_b.any():
+                            continue
+                        src = ocr_enc_out[b][vmask_b]
                         idx = ocr_map[b][vmask_b].clamp(0, max(N_word - 1, 0))
-
                         word_vectors[b].scatter_add_(0, idx.unsqueeze(-1).expand_as(src), src)
                         ones = torch.ones_like(idx, dtype=word_counts.dtype, device=device)
                         word_counts[b].scatter_add_(0, idx, ones)
 
-                    word_counts = word_counts.unsqueeze(-1).clamp_min(1e-9)
+                    word_counts  = word_counts.unsqueeze(-1).clamp_min(1e-9)
                     word_vectors = word_vectors / word_counts
 
-                    half = N_word // 2
-                    ocr_feat = word_vectors[:, :half, :]
-                    rel_feat = word_vectors[:, half:, :]
+                    # Tách thành 2 nhánh: original và related
+                    ocr_word_feat = word_vectors[:, :half, :]   # [B, half, D]
+                    rel_word_feat = word_vectors[:, half:, :]   # [B, half, D]
 
+                    # ── Projection heads riêng biệt ────────────────────────────
+                    # Qua projection head khác nhau → feature space tách biệt,
+                    # tránh model trivially dùng position/context identity để match.
+                    # Gradient flow qua cả 2 heads → cả 2 nhánh đều được optimize.
+                    ocr_proj = self.twc_proj_ocr(
+                        ocr_word_feat.reshape(Bc * half, D0).float()
+                    ).to(self.target_dtype)  # [B*half, proj_dim]
+
+                    rel_proj = self.twc_proj_rel(
+                        rel_word_feat.reshape(Bc * half, D0).float()
+                    ).to(self.target_dtype)  # [B*half, proj_dim]
+
+                    # L2 normalize trong projection space
                     def _safe_l2(x, dim=-1, eps=1e-6):
                         n = x.norm(dim=dim, keepdim=True).clamp_min(eps)
-                        x = x / n
-                        return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+                        return torch.nan_to_num(x / n, nan=0.0, posinf=0.0, neginf=0.0)
 
-                    ocr_feat = _safe_l2(ocr_feat, dim=-1)
-                    rel_feat = _safe_l2(rel_feat, dim=-1)
+                    ocr_flat = _safe_l2(ocr_proj, dim=-1)  # [B*half, proj_dim]
+                    rel_flat = _safe_l2(rel_proj, dim=-1)  # [B*half, proj_dim]
 
-                    Bn, W, Dn = ocr_feat.shape
-                    ocr_flat = ocr_feat.reshape(Bn * W, Dn)
-                    rel_flat = rel_feat.reshape(Bn * W, Dn)
+                    # Logit scale được clamp để tránh divergence (theo CLIP paper)
+                    logit_scale = self.logit_scale.clamp(
+                        min=np.log(1 / 100), max=np.log(100)
+                    ).exp()
 
-                    logit_scale = self.logit_scale.clamp(min=np.log(1 / 100), max=np.log(100)).exp()
-
+                    # [B*half, B*half] — ma trận similarity giữa tất cả
+                    # original tokens và tất cả related tokens trong batch
                     contrastive_scores = logit_scale * (ocr_flat @ rel_flat.t())
-                    contrastive_scores = torch.nan_to_num(contrastive_scores, nan=0.0, posinf=1e4, neginf=-1e4)
+                    contrastive_scores = torch.nan_to_num(
+                        contrastive_scores, nan=0.0, posinf=1e4, neginf=-1e4
+                    )
 
                     out_dict["contrastive_scores"] = contrastive_scores
 
+                    # Label matrix: [B, half, half] → block_diag [B*half, B*half]
                     B_lab, _, _ = o2r_labels.shape
                     blocks = [o2r_labels[b].to(device) for b in range(B_lab)]
                     out_dict["o2r_block"] = torch.block_diag(*blocks)

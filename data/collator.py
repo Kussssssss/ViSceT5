@@ -458,6 +458,23 @@ class ViT5VQADataCollator:
         return None
 
     def _findRelatedOCR_adr(self, ocr_tokens, ocr_max_num, adv_probability, label_list, editlen):
+        """
+        FIX: Xây dựng label matrix theo đúng TWA paper.
+
+        Vấn đề cũ: Với adv_probability=0.35, ~65% token không augmented →
+        related = original → label=1.0 (identical pair). Khi encode qua shared
+        context, feature của original và related gần như giống hệt → model trivially
+        predict positive cho cặp (i,i) mà không học được gì thực sự.
+
+        Fix: Khi "KEEP" (không augment), vẫn áp dụng noise yếu (thay 1 ký tự)
+        với probability thấp (0.3) để đảm bảo related luôn khác original ở
+        mức độ nhất định. Label cho cặp này = 1.0 (vẫn là positive) nhưng
+        feature sẽ không identical. Điều này buộc model phải học alignment
+        thực sự thay vì exploit identical representation.
+
+        Với is_special/is_number: giữ identical (label=1.0) vì OCR engine
+        thường không mắc lỗi với số/URL.
+        """
         o2r = torch.ones(ocr_max_num, ocr_max_num, dtype=torch.float) * self.contrastive_ignore
         r2o = torch.ones(ocr_max_num, ocr_max_num, dtype=torch.float) * self.contrastive_ignore
         toks = ocr_tokens[:ocr_max_num]
@@ -469,39 +486,99 @@ class ViT5VQADataCollator:
             raw_tok = toks[i]
             norm_tok = _normalize_text(raw_tok, lowercase=True)
             if raw_tok == pad_tok or norm_tok in {"<pad>", "</s>"}:
-                rel = pad_tok; o2r[i, i], r2o[i, i] = self.contrastive_ignore, self.contrastive_ignore; actions.append("PAD")
-                padded.append(norm_tok); related.append(rel); continue
+                rel = pad_tok
+                o2r[i, i], r2o[i, i] = self.contrastive_ignore, self.contrastive_ignore
+                actions.append("PAD")
+                padded.append(norm_tok); related.append(rel)
+                continue
 
             is_special = bool(self.regex_special.search(norm_tok))
             in_vocab = norm_tok in self.global_vocab
             is_number = norm_tok.isdigit()
 
             if is_special or is_number:
-                rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP_SPECIAL")
+                # URL/số: không augment, identical pair với label=1.0
+                rel = norm_tok
+                o2r[i, i], r2o[i, i] = 1.0, 1.0
+                actions.append("KEEP_SPECIAL")
             elif in_vocab:
                 if random.random() < adv_probability and len(norm_tok) > 1:
-                    rel = self._create_adv_word_adr(norm_tok)
+                    # Chế độ NOISE: tạo phiên bản bị lỗi của từ đúng
+                    # o2r nhỏ hơn (0.5~0.9): OCR token gốc → related token (noised)
+                    # r2o lớn hơn (0.8~0.9): Related (noised) → OCR gốc
+                    adv = self._create_adv_word_adr(norm_tok)
+                    if adv == norm_tok:
+                        # Nếu augment thất bại, thử lại
+                        adv = self._create_adv_word_adr(norm_tok)
+                    rel = adv
                     o2r[i, i], r2o[i, i] = float(label_list[1]), float(label_list[0])
                     actions.append("NOISE")
                 else:
-                    rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP")
+                    # Chế độ KEEP: áp dụng noise yếu để tránh identical self-match
+                    # Label = 1.0 (rất giống) nhưng feature không giống hệt
+                    if len(norm_tok) > 1 and random.random() < 0.3:
+                        adv = self._create_adv_word_adr(norm_tok)
+                        rel = adv if adv != norm_tok else norm_tok
+                    else:
+                        rel = norm_tok
+                    o2r[i, i], r2o[i, i] = 1.0, 1.0
+                    actions.append("KEEP")
             else:
                 if random.random() < adv_probability:
                     found = self._find_related_word(norm_tok, editlen)
-                    if found:
-                        rel = found; o2r[i, i], r2o[i, i] = float(label_list[0]), float(label_list[1]); actions.append("CORRECT")
+                    if found and found.lower() != norm_tok.lower():
+                        # Chế độ CORRECT: OCR lỗi → từ đúng tìm được
+                        # o2r lớn hơn: OCR lỗi "tương đồng" với related (từ đúng)
+                        # r2o nhỏ hơn: Related (từ đúng) → OCR lỗi
+                        rel = found
+                        o2r[i, i], r2o[i, i] = float(label_list[0]), float(label_list[1])
+                        actions.append("CORRECT")
                     else:
-                        rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP_UNKNOWN")
+                        # Không tìm được từ liên quan: giữ nguyên với noise yếu
+                        if len(norm_tok) > 1 and random.random() < 0.3:
+                            adv = self._create_adv_word_adr(norm_tok)
+                            rel = adv if adv != norm_tok else norm_tok
+                        else:
+                            rel = norm_tok
+                        o2r[i, i], r2o[i, i] = 1.0, 1.0
+                        actions.append("KEEP_UNKNOWN")
                 else:
-                    rel = norm_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("KEEP")
-            padded.append(norm_tok); related.append(rel)
+                    # Không augment: áp dụng noise yếu
+                    if len(norm_tok) > 1 and random.random() < 0.3:
+                        adv = self._create_adv_word_adr(norm_tok)
+                        rel = adv if adv != norm_tok else norm_tok
+                    else:
+                        rel = norm_tok
+                    o2r[i, i], r2o[i, i] = 1.0, 1.0
+                    actions.append("KEEP")
+            # ROOT CAUSE FIX: If rel == original after all branches (except KEEP_SPECIAL/number),
+            # the pair is trivially identical — encoder produces nearly same features regardless
+            # of training. Ignoring these forces the model to learn real OCR error alignment
+            # instead of exploiting self-similarity.
+            if rel == norm_tok and not (is_special or is_number):
+                o2r[i, i], r2o[i, i] = self.contrastive_ignore, self.contrastive_ignore
+                if self.debug and actions:
+                    actions[-1] = actions[-1] + "_IDENTICAL_IGNORED"
+            padded.append(norm_tok)
+            related.append(rel)
 
+        # ── Off-diagonal: xác định similarity giữa các cặp token khác nhau ────
+        # Nếu token i và j có cùng text → kế thừa label từ diagonal của token kia
+        # Nếu khác text → label=0.0 (negative pair)
+        # PAD tokens (diagonal = -1): row/col của chúng đã được set -1 từ trước,
+        # off-diagonal cũng để -1 (ignore hoàn toàn)
         for i in range(len(related)):
             for j in range(i + 1, len(related)):
+                # Skip nếu một trong hai là PAD (label diagonal = -1)
+                if o2r[i, i] == self.contrastive_ignore or o2r[j, j] == self.contrastive_ignore:
+                    # Để giá trị khởi tạo -1 (ignore)
+                    continue
                 if padded[i].lower() == padded[j].lower():
+                    # Cùng text → positive pair với label kế thừa từ diagonal
                     o2r[i, j], o2r[j, i] = o2r[j, j], o2r[i, i]
                     r2o[i, j], r2o[j, i] = r2o[j, j], r2o[i, i]
                 else:
+                    # Khác text → negative pair
                     o2r[i, j], o2r[j, i] = 0.0, 0.0
                     r2o[i, j], r2o[j, i] = 0.0, 0.0
 
