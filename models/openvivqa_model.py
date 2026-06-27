@@ -379,7 +379,25 @@ class OpenViVQAModel(PreTrainedModel):
         if ocr_to_word_map.size(1) != L_tok:
             ocr_to_word_map = _pad_or_crop_lastdim_int(ocr_to_word_map, L_tok, pad_value=-1)
 
-        ocr_text_tok, _ = self.ocr_encoder(ocr_token_ids, token_mask)
+        # TWC isolation: block original↔related cross-half attention inside ConsFormer.
+        # Without this, original tokens attend to related tokens in self_attn (mask_1d
+        # only blocks PAD). The ViT5 3D block runs AFTER ConsFormer so it's too late.
+        # Build 2D mask [B, L_tok, L_tok] that keeps within-half and blocks cross-half.
+        N_word = int(char_ids.size(1))
+        half_word = N_word // 2
+        cons_mask_2d = None
+        if N_word > 0 and N_word % 2 == 0:
+            _B, _L = ocr_token_ids.shape
+            _om = ocr_to_word_map[:, :_L]  # [B, L_tok]
+            _valid = token_mask.bool()      # [B, L_tok]
+            orig_tok_c = (_om >= 0) & (_om < half_word) & _valid   # [B, L_tok]
+            rel_tok_c  = (_om >= half_word) & (_om < N_word) & _valid
+            cross = (orig_tok_c.unsqueeze(2) & rel_tok_c.unsqueeze(1) |
+                     rel_tok_c.unsqueeze(2) & orig_tok_c.unsqueeze(1))  # [B, L, L]
+            base = _valid.unsqueeze(2) & _valid.unsqueeze(1)            # [B, L, L]
+            cons_mask_2d = (base & ~cross).long()
+
+        ocr_text_tok, _ = self.ocr_encoder(ocr_token_ids, token_mask, cons_mask_2d)
         ocr_text_tok = ocr_text_tok.to(self.target_dtype)
 
         B, L_tok2, D = ocr_text_tok.size()
