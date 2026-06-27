@@ -99,7 +99,7 @@ def simple_pretrain_aggregator(eval_pred):
         return {"pretrain_acc": mean_acc}
     else:
         mean_vals = np.mean(preds, axis=0)
-        return {
+        result = {
             "pretrain_acc": float(mean_vals[0]),
             "acc_mlm_itm": float(mean_vals[1]),
             "acc_twc": float(mean_vals[2]),
@@ -107,6 +107,10 @@ def simple_pretrain_aggregator(eval_pred):
             "loss_itm": float(mean_vals[4]),
             "loss_twc": float(mean_vals[5]),
         }
+        if mean_vals.shape[0] >= 8:
+            result["twc_pos_recall"] = float(mean_vals[6])
+            result["twc_neg_recall"] = float(mean_vals[7])
+        return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
     bleu_metric = Bleu()

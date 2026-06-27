@@ -287,7 +287,7 @@ class PreTrainTWCAccuracy(BaseMetric):
 
         # Balanced accuracy: macro average của pos_recall và neg_recall
         balanced_acc = (pos_recall + neg_recall) / 2.0
-        return balanced_acc
+        return balanced_acc, pos_recall, neg_recall
 
 
 # HÀM METRIC TỔNG - TỰ ĐỘNG ĐIỀU HƯỚNG THEO ABLATION MODE
@@ -303,7 +303,11 @@ class GlobalPretrainAccuracy(BaseMetric):
         # 1. Lấy Acc
         mlm_acc = self.mlm_fn.calculate(sample_list, model_output)
         itm_acc = self.itm_fn.calculate(sample_list, model_output)
-        twc_acc = self.twc_fn.calculate(sample_list, model_output)
+        twc_result = self.twc_fn.calculate(sample_list, model_output)
+        if isinstance(twc_result, tuple):
+            twc_acc, twc_pos_recall, twc_neg_recall = twc_result
+        else:
+            twc_acc, twc_pos_recall, twc_neg_recall = twc_result, 0.0, 0.0
 
         # 2. Lấy Loss (đã nhét vào từ bước 1)
         loss_mlm = model_output.get("loss_mlm", torch.tensor(0.0)).item()
@@ -318,9 +322,13 @@ class GlobalPretrainAccuracy(BaseMetric):
         else:
             total_acc = (mlm_acc + itm_acc + twc_acc) / 3.0
 
-        # TRẢ VỀ 1 TENSOR CHỨA 6 GIÁ TRỊ ĐỂ TRAINER THU THẬP
+        # TRẢ VỀ 1 TENSOR CHỨA 8 GIÁ TRỊ ĐỂ TRAINER THU THẬP
+        # [0] total_acc  [1] mlm_itm_acc  [2] twc_acc  [3] loss_mlm
+        # [4] loss_itm   [5] loss_twc     [6] twc_pos_recall  [7] twc_neg_recall
         device = model_output["textcls_scores"].device
         return torch.tensor(
-            [total_acc, (mlm_acc + itm_acc)/2.0, twc_acc, loss_mlm, loss_itm, loss_twc],
+            [total_acc, (mlm_acc + itm_acc)/2.0, twc_acc,
+             loss_mlm, loss_itm, loss_twc,
+             twc_pos_recall, twc_neg_recall],
             device=device
         )
