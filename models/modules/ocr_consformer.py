@@ -117,9 +117,9 @@ class OCREncoderLayer(nn.Module):
         self.feed_forward = PositionwiseFeedForward(d_model, d_ff)
         self.sublayer     = clones(SublayerConnection(d_model, dropout), 2)
 
-    def forward(self, x, mask_1d, nb_mask_2d, group_prob):
+    def forward(self, x, attn_mask, nb_mask_2d, group_prob):
         group_prob, break_prob = self.group_attn(x, nb_mask_2d, group_prob)
-        x = self.sublayer[0](x, lambda t: self.self_attn(t, t, t, group_prob, mask_1d))
+        x = self.sublayer[0](x, lambda t: self.self_attn(t, t, t, group_prob, attn_mask))
         return self.sublayer[1](x, self.feed_forward), group_prob, break_prob
 
 
@@ -138,7 +138,8 @@ class OCREncoder(nn.Module):
     def set_word_embed_proxy(self, proxy_callable):
         self._word_embed_proxy = proxy_callable
 
-    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor):
+    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor,
+                mask_2d: torch.Tensor = None):
         if self._word_embed_proxy is not None:
             x = self._word_embed_proxy(inputs)
         elif self._legacy_embed is not None:
@@ -146,11 +147,16 @@ class OCREncoder(nn.Module):
         else:
             raise RuntimeError("OCREncoder: No word embedding proxy set.")
         dtype_in = x.dtype
+        # neighbor mask for GroupAttention always uses 1D valid mask
         nb_mask_2d = build_neighbor_mask(mask_1d)
+        # For ScaledDotProductAttention: use 2D mask when provided so that
+        # cross-half (original ↔ related) attention is blocked at the ConsFormer
+        # level, not just at the downstream ViT5 encoder level.
+        attn_mask = mask_2d if mask_2d is not None else mask_1d
         break_probs = []
         group_prob = 0.0
         for layer in self.layers:
-            x, group_prob, break_prob = layer(x, mask_1d, nb_mask_2d, group_prob)
+            x, group_prob, break_prob = layer(x, attn_mask, nb_mask_2d, group_prob)
             break_probs.append(break_prob)
         x = self.norm(x).to(dtype_in)
         break_probs = torch.stack(break_probs, dim=1)
