@@ -1021,6 +1021,9 @@ class OpenViVQAModel(PreTrainedModel):
 
                     word_counts  = word_counts.unsqueeze(-1).clamp_min(1e-9)
                     word_vectors = word_vectors / word_counts
+                    # Guard: encoder can produce inf/NaN (e.g. from weight overflow).
+                    # Must clean HERE before the division creates NaN-gradient paths.
+                    word_vectors = torch.nan_to_num(word_vectors, nan=0.0, posinf=0.0, neginf=0.0)
 
                     # Tách thành 2 nhánh: original và related
                     ocr_word_feat = word_vectors[:, :half, :]   # [B, half, D]
@@ -1038,10 +1041,14 @@ class OpenViVQAModel(PreTrainedModel):
                         rel_word_feat.reshape(Bc * half, D0).float()
                     ).to(self.target_dtype)  # [B*half, proj_dim]
 
-                    # L2 normalize trong projection space
+                    # L2 normalize trong projection space.
+                    # nan_to_num BEFORE norm: if x has inf, norm(x)=inf, then
+                    # backward computes dL/dx = dL/dz * (1/inf) = 0*inf = NaN (IEEE 754).
+                    # Cleaning x first prevents that NaN-gradient path entirely.
                     def _safe_l2(x, dim=-1, eps=1e-6):
+                        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
                         n = x.norm(dim=dim, keepdim=True).clamp_min(eps)
-                        return torch.nan_to_num(x / n, nan=0.0, posinf=0.0, neginf=0.0)
+                        return x / n
 
                     ocr_flat = _safe_l2(ocr_proj, dim=-1)  # [B*half, proj_dim]
                     rel_flat = _safe_l2(rel_proj, dim=-1)  # [B*half, proj_dim]

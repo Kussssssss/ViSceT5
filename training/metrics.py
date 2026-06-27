@@ -189,33 +189,46 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         self._last_log_step = -1
 
     def training_step(self, model, inputs):
-        nan_params_before = []
+        bad_params_before = []
         for name, param in model.named_parameters():
-            if torch.isnan(param).any():
-                nan_params_before.append(name)
-        if nan_params_before:
-            print(f"🚨 [Trainer Check] BEFORE training_step, NaN weights detected in parameters: {nan_params_before[:15]}")
+            if torch.isnan(param).any() or torch.isinf(param).any():
+                bad_params_before.append(name)
+        if bad_params_before:
+            print(f"🚨 [Trainer Check] BEFORE step {self.state.global_step}, NaN/inf weights: {bad_params_before[:15]}")
 
         loss = super().training_step(model, inputs)
 
-        if torch.isnan(loss).any():
-            print(f"🚨 [Trainer Check] Loss is NaN at step {self.state.global_step}!")
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"🚨 [Trainer Check] Loss is NaN/inf at step {self.state.global_step}: {loss.item()}")
 
-        nan_grads = []
+        bad_grads = []
         for name, param in model.named_parameters():
-            if param.grad is not None and torch.isnan(param.grad).any():
-                nan_grads.append(name)
-        if nan_grads:
-            print(f"🚨 [Trainer Check] NaN gradients detected in step {self.state.global_step}:")
-            for name in nan_grads[:20]:
+            if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
+                bad_grads.append(name)
+        if bad_grads:
+            print(f"🚨 [Trainer Check] NaN/inf gradients at step {self.state.global_step} ({len(bad_grads)} params):")
+            for name in bad_grads[:20]:
                 print(f"   - {name}")
             for k, v in inputs.items():
                 if isinstance(v, torch.Tensor):
-                    print(f"   Input '{k}': shape={v.shape}, nan={torch.isnan(v).any().item()}")
+                    print(f"   Input '{k}': shape={v.shape}, nan={torch.isnan(v).any().item()}, inf={torch.isinf(v).any().item()}")
                 elif isinstance(v, list):
                     print(f"   Input '{k}': list of len {len(v)}")
 
         return loss
+
+    def _clip_grad_norm(self):
+        # Zero out any NaN/inf gradients BEFORE clip_grad_norm_ touches them.
+        # clip_grad_norm_ with total_norm=inf computes clip_coef=0, then
+        # inf_grad * 0 = NaN (IEEE 754), corrupting weights permanently.
+        n_zeroed = 0
+        for param in self.model.parameters():
+            if param.grad is not None and not torch.isfinite(param.grad).all():
+                param.grad.zero_()
+                n_zeroed += 1
+        if n_zeroed:
+            print(f"⚠️  [GradClip] Zeroed {n_zeroed} params with NaN/inf grad at step {self.state.global_step}")
+        return super()._clip_grad_norm()
 
 
     def log(self, logs: Dict[str, float]) -> None:
