@@ -205,24 +205,8 @@ class OpenViVQAModel(PreTrainedModel):
         self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-12).to(torch.float32)
 
         # ── TWC Projection Heads ────────────────────────────────────────────────
-        # Theo TWA paper: dùng projection head riêng biệt cho OCR-gốc và OCR-related
-        # để tránh trivial solution khi cả hai có shared context trong encoder.
-        # Mỗi head là 2-layer MLP với LayerNorm (theo chuẩn SimCLR/MoCo projection head).
-        # Output dim = d_model // 2 để contrastive space nhỏ hơn representation space.
-        twc_proj_dim = max(self.d_model // 2, 256)
-        self.twc_proj_ocr = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model),
-            T5LayerNorm(self.d_model, eps=1e-12),
-            nn.GELU(),
-            nn.Linear(self.d_model, twc_proj_dim),
-        )
-        self.twc_proj_rel = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model),
-            T5LayerNorm(self.d_model, eps=1e-12),
-            nn.GELU(),
-            nn.Linear(self.d_model, twc_proj_dim),
-        )
-
+        # TWC (theo notebook gốc / TWA paper): similarity tính trực tiếp trên
+        # word-feature đã L2-normalize từ encoder — KHÔNG dùng projection head riêng.
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.generation_config = GenerationConfig(
             max_new_tokens=int(getattr(config, "generation_max_new_tokens", 27)),
@@ -379,25 +363,9 @@ class OpenViVQAModel(PreTrainedModel):
         if ocr_to_word_map.size(1) != L_tok:
             ocr_to_word_map = _pad_or_crop_lastdim_int(ocr_to_word_map, L_tok, pad_value=-1)
 
-        # TWC isolation: block original↔related cross-half attention inside ConsFormer.
-        # Without this, original tokens attend to related tokens in self_attn (mask_1d
-        # only blocks PAD). The ViT5 3D block runs AFTER ConsFormer so it's too late.
-        # Build 2D mask [B, L_tok, L_tok] that keeps within-half and blocks cross-half.
-        N_word = int(char_ids.size(1))
-        half_word = N_word // 2
-        cons_mask_2d = None
-        if N_word > 0 and N_word % 2 == 0:
-            _B, _L = ocr_token_ids.shape
-            _om = ocr_to_word_map[:, :_L]  # [B, L_tok]
-            _valid = token_mask.bool()      # [B, L_tok]
-            orig_tok_c = (_om >= 0) & (_om < half_word) & _valid   # [B, L_tok]
-            rel_tok_c  = (_om >= half_word) & (_om < N_word) & _valid
-            cross = (orig_tok_c.unsqueeze(2) & rel_tok_c.unsqueeze(1) |
-                     rel_tok_c.unsqueeze(2) & orig_tok_c.unsqueeze(1))  # [B, L, L]
-            base = _valid.unsqueeze(2) & _valid.unsqueeze(1)            # [B, L, L]
-            cons_mask_2d = (base & ~cross).long()
-
-        ocr_text_tok, _ = self.ocr_encoder(ocr_token_ids, token_mask, cons_mask_2d)
+        # Notebook gốc / TWA paper: original và related token được encode CÙNG NHAU
+        # với full attention (z_ocr = [z_T; z_W] qua transformer). KHÔNG chặn cross-half.
+        ocr_text_tok, _ = self.ocr_encoder(ocr_token_ids, token_mask)
         ocr_text_tok = ocr_text_tok.to(self.target_dtype)
 
         B, L_tok2, D = ocr_text_tok.size()
@@ -915,54 +883,9 @@ class OpenViVQAModel(PreTrainedModel):
             for k in list(img_pack.keys()):
                 if k not in ("img_tokens", "img_attn_mask", "patch_scores"): del img_pack[k]
 
-        # TWC: Block cross-half OCR attention so original and related halves cannot
-        # trivially align via shared self-attention ("pepsi" attending to "pesi").
-        # Both halves still attend to text and image tokens — only OCR↔OCR cross-half
-        # attention is blocked. T5 encoder accepts 3D [B,S,S] mask (→ [B,1,S,S]).
-        _enc_mask = fused_mask  # default: standard 1D mask
-        _use_twc = bool(getattr(self.config, "use_twc", getattr(self, "use_twc", True)))
-        if self.pretrain and use_ocr and _use_twc and o2r_labels is not None:
-            _L_txt = txt_emb_for_enc.size(1)
-            _L_img = img_pack["img_tokens"].size(1)
-            _L_ocr = ocr_fused_feat.size(1)
-            # N_word = 2*current_max_len (always even); half_word = current_max_len.
-            # Using ocr_map (word-index per token) is correct because flat_ids_a and
-            # flat_ids_b can have different subword-token lengths per sample, making
-            # _L_ocr//2 wrong as a split point. ocr_map gives per-sample, per-token
-            # membership: word index < half_word → original; >= half_word → related.
-            _N_word = int(twa_ocr_char.size(1))
-            _half_word = _N_word // 2
-            if _N_word > 0 and _N_word % 2 == 0 and _L_ocr > 0:
-                _off_ocr = _L_txt + _L_img
-                _B, _S = fused_mask.shape
-                # Expand 1D → 2D: pos i attends to j iff fused_mask[b,j]=1
-                _enc_mask = fused_mask.unsqueeze(1).expand(_B, _S, _S).contiguous().float()
-
-                # Align ocr_map to _L_ocr (should match; resize is a safety fallback)
-                _om = ocr_map
-                if _om.size(1) != _L_ocr:
-                    _d = _L_ocr - _om.size(1)
-                    if _d > 0:
-                        _om = torch.cat([_om, _om.new_full((_B, _d), -1)], dim=1)
-                    else:
-                        _om = _om[:, :_L_ocr]
-
-                orig_tok = (_om >= 0) & (_om < _half_word)        # [B, L_ocr]
-                rel_tok  = (_om >= _half_word) & (_om < _N_word)  # [B, L_ocr]
-
-                # Embed into full sequence space [B, S]
-                orig_full = torch.zeros(_B, _S, device=device, dtype=_enc_mask.dtype)
-                rel_full  = torch.zeros(_B, _S, device=device, dtype=_enc_mask.dtype)
-                orig_full[:, _off_ocr:_off_ocr + _L_ocr] = orig_tok.to(_enc_mask.dtype)
-                rel_full[:,  _off_ocr:_off_ocr + _L_ocr] = rel_tok.to(_enc_mask.dtype)
-
-                # cross_block[b,i,j]=1 iff (i orig ∧ j rel) or (i rel ∧ j orig)
-                cross_block = (
-                    orig_full.unsqueeze(2) * rel_full.unsqueeze(1) +
-                    rel_full.unsqueeze(2) * orig_full.unsqueeze(1)
-                ).clamp_(0.0, 1.0)
-                _enc_mask = _enc_mask * (1.0 - cross_block)
-        enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=_enc_mask, return_dict=True)
+        # Notebook gốc / TWA paper: dùng mask 1D chuẩn — original và related token
+        # được encode cùng nhau với full attention (KHÔNG chặn cross-half).
+        enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=fused_mask, return_dict=True)
         if torch.isnan(enc_out.last_hidden_state).any(): print("🚨 [FORWARD CHECK] enc_out.last_hidden_state has NaN")
 
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
@@ -1047,31 +970,25 @@ class OpenViVQAModel(PreTrainedModel):
                     ocr_word_feat = word_vectors[:, :half, :]   # [B, half, D]
                     rel_word_feat = word_vectors[:, half:, :]   # [B, half, D]
 
-                    # ── Projection heads riêng biệt ────────────────────────────
-                    # Qua projection head khác nhau → feature space tách biệt,
-                    # tránh model trivially dùng position/context identity để match.
-                    # Gradient flow qua cả 2 heads → cả 2 nhánh đều được optimize.
-                    ocr_proj = self.twc_proj_ocr(
-                        ocr_word_feat.reshape(Bc * half, D0).float()
-                    ).to(self.target_dtype)  # [B*half, proj_dim]
-
-                    rel_proj = self.twc_proj_rel(
-                        rel_word_feat.reshape(Bc * half, D0).float()
-                    ).to(self.target_dtype)  # [B*half, proj_dim]
-
-                    # L2 normalize trong projection space.
-                    # nan_to_num BEFORE norm: if x has inf, norm(x)=inf, then
-                    # backward computes dL/dx = dL/dz * (1/inf) = 0*inf = NaN (IEEE 754).
-                    # Cleaning x first prevents that NaN-gradient path entirely.
+                    # Notebook gốc / TWA paper: L2-normalize word-feature trực tiếp
+                    # từ encoder rồi tính cosine similarity (KHÔNG qua projection head).
+                    # nan_to_num BEFORE norm: nếu x có inf, norm(x)=inf → backward
+                    # dL/dx = dL/dz*(1/inf) = 0*inf = NaN (IEEE 754). Làm sạch x trước
+                    # để chặn đường gradient NaN này.
                     def _safe_l2(x, dim=-1, eps=1e-6):
                         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
                         n = x.norm(dim=dim, keepdim=True).clamp_min(eps)
                         return x / n
 
-                    ocr_flat = _safe_l2(ocr_proj, dim=-1)  # [B*half, proj_dim]
-                    rel_flat = _safe_l2(rel_proj, dim=-1)  # [B*half, proj_dim]
+                    ocr_feat = _safe_l2(ocr_word_feat, dim=-1)  # [B, half, D]
+                    rel_feat = _safe_l2(rel_word_feat, dim=-1)  # [B, half, D]
 
-                    # Logit scale được clamp để tránh divergence (theo CLIP paper)
+                    Bn, W, Dn = ocr_feat.shape
+                    ocr_flat = ocr_feat.reshape(Bn * W, Dn)  # [B*half, D]
+                    rel_flat = rel_feat.reshape(Bn * W, Dn)  # [B*half, D]
+
+                    # Logit scale (learnable temperature τ, theo CLIP/TWA Eq.4), clamp
+                    # để tránh divergence.
                     logit_scale = self.logit_scale.clamp(
                         min=np.log(1 / 100), max=np.log(100)
                     ).exp()

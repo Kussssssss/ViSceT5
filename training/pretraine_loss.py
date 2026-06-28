@@ -103,32 +103,18 @@ class ViT5PretrainLoss(nn.Module):
                 o2r_labels = o2r_block.float()
                 r2o_labels = r2o_block.float()
 
-                # ── FIX: Dynamic pos_weight để cân bằng class imbalance ──────────────
-                # Label matrix có ~99.9% negatives (label=0.0). Nếu không có pos_weight,
-                # gradient hoàn toàn bị dominated bởi negatives khiến loss tầm thường.
-                with torch.no_grad():
-                    valid_o2r = o2r_labels[mask]
-                    n_pos_o2r = (valid_o2r > 0.5).float().sum().clamp_min(1.0)
-                    n_neg_o2r = (valid_o2r == 0.0).float().sum().clamp_min(1.0)
-                    # Cap at 20: balanced gradient without dominating MLM/ITM signal
-                    pw_o2r = float((n_neg_o2r / n_pos_o2r).clamp(1.0, 20.0).item())
-
-                    valid_r2o = r2o_labels[mask]
-                    n_pos_r2o = (valid_r2o > 0.5).float().sum().clamp_min(1.0)
-                    n_neg_r2o = (valid_r2o == 0.0).float().sum().clamp_min(1.0)
-                    pw_r2o = float((n_neg_r2o / n_pos_r2o).clamp(1.0, 20.0).item())
-
+                # Notebook gốc / TWA paper (Eq.6): BCE thường giữa soft-label và logit,
+                # KHÔNG pos_weight. Cặp identical (label=1.0) được giữ làm positive nên
+                # tỷ lệ pos/neg đã cân bằng hơn, không cần bù trọng số.
                 loss_i = F.binary_cross_entropy_with_logits(
                     logits_per_image[mask].float(),
                     o2r_labels[mask],
-                    pos_weight=torch.tensor([pw_o2r], device=logits_per_image.device, dtype=torch.float),
                     reduction="mean",
                 )
 
                 loss_t = F.binary_cross_entropy_with_logits(
                     logits_per_text[mask].float(),
                     r2o_labels[mask],
-                    pos_weight=torch.tensor([pw_r2o], device=logits_per_text.device, dtype=torch.float),
                     reduction="mean",
                 )
 
