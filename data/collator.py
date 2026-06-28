@@ -135,10 +135,10 @@ class ViT5VQADataCollator:
                         continue
                     try:
                         entry = json.loads(line)
-                        raw = entry.get("text", "")
                     except Exception:
-                        raw = line
+                        continue
 
+                    raw = entry.get("text", "")
                     if not raw:
                         continue
 
@@ -686,7 +686,7 @@ class ViT5VQADataCollator:
             for i in range(B):
                 src_idx = pollute_indices[i]
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len, question=qs[i])
+                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
 
                 # Nối câu hỏi và OCR lại
                 combined_texts.append(f"{qs[i]} {' '.join(raw_texts)}".strip())
@@ -714,7 +714,7 @@ class ViT5VQADataCollator:
             for i in range(B):
                 src_idx = pollute_indices[i]
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len, question=qs[i])
+                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
                 norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
 
                 if use_ocr_aug:

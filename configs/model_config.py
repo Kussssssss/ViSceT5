@@ -59,7 +59,7 @@ class OpenViVQAConfig(PretrainedConfig):
         contrastive_label_list: List[float] = [0.9, 0.9],
         editlen: int = 2,
         term_vocab_path: str = "/kaggle/input/term-vietnamese-vocab/words.txt",
-        adv_probability_pretrain: float = 0.6,
+        adv_probability_pretrain: float = 0.35,
         adv_probability_finetune: float = 1.0,
         generation_max_new_tokens: int = 56,
         generation_num_beams: int = 4,
