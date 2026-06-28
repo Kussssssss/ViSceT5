@@ -106,10 +106,24 @@ class ViT5PretrainLoss(nn.Module):
             if mask.any():
                 o2r_labels = o2r_block.float()
                 r2o_labels = r2o_block.float()
+                o2r_m, r2o_m = o2r_labels[mask], r2o_labels[mask]
+
+                # Option (b): dynamic pos_weight on top of TWA's BCE to counter the
+                # extreme imbalance (positives ~0.4% of valid cells). pos_weight =
+                # n_neg/n_pos makes the positive and negative terms contribute
+                # comparably, preventing the all-negative collapse of plain BCE.
+                # (Not in TWA's released code; standard imbalance fix for BCE.)
+                def _pos_weight(lbl):
+                    n_pos = (lbl > 0.5).sum().clamp_min(1.0)
+                    n_neg = (lbl == 0.0).sum().clamp_min(1.0)
+                    return (n_neg / n_pos).clamp(1.0, 1000.0)
+
                 loss_i = F.binary_cross_entropy_with_logits(
-                    logits_per_image[mask].float(), o2r_labels[mask], reduction="mean")
+                    logits_per_image[mask].float(), o2r_m,
+                    pos_weight=_pos_weight(o2r_m), reduction="mean")
                 loss_t = F.binary_cross_entropy_with_logits(
-                    logits_per_text[mask].float(), r2o_labels[mask], reduction="mean")
+                    logits_per_text[mask].float(), r2o_m,
+                    pos_weight=_pos_weight(r2o_m), reduction="mean")
                 contrastive_loss = (loss_i + loss_t) / 2
             else:
                 # No valid (non-PAD) contrastive cells — never silent; warn loudly.
