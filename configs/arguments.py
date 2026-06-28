@@ -68,5 +68,17 @@ class CustomTrainingArguments(Seq2SeqTrainingArguments):
     )
     smoke_test: bool = field(
         default=False,
-        metadata={"help": "Run a quick check with tiny dataset and minimal steps to verify the pipeline."}
+        metadata={"help": "Run a quick check with a small dataset and few steps to verify the pipeline."}
+    )
+    smoke_train_samples: int = field(
+        default=256,
+        metadata={"help": "Number of training samples to keep in smoke/mock test (enough to be meaningful, still fast)."}
+    )
+    smoke_eval_samples: int = field(
+        default=64,
+        metadata={"help": "Number of eval samples to keep in smoke/mock test."}
+    )
+    smoke_max_steps: int = field(
+        default=60,
+        metadata={"help": "Number of optimizer steps to run in smoke/mock test (long enough to see loss/metric trends)."}
     )
