@@ -93,6 +93,177 @@ def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     else:
         return parser.parse_args_into_dataclasses(args=args)
 
+def _tensor_health(t):
+    """One-line numeric health report for a tensor (or 'None')."""
+    if t is None:
+        return "None"
+    if not torch.is_tensor(t):
+        return f"(not a tensor: {type(t).__name__})"
+    f = t.detach().float()
+    if f.numel() == 0:
+        return f"shape={tuple(t.shape)} (empty)"
+    return (f"shape={tuple(t.shape)} nan={bool(torch.isnan(f).any())} inf={bool(torch.isinf(f).any())} "
+            f"min={f.min().item():.3g} max={f.max().item():.3g} mean={f.mean().item():.3g}")
+
+
+def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, device, use_twc):
+    """
+    Run ONE batch forward + backward and (a) DUMP detailed diagnostics for every
+    pretrain component and (b) ASSERT they are computed and numerically sound.
+    This is the fast "is the method + code correct, and if not WHERE?" gate
+    before committing to a full run.
+
+    Raises RuntimeError listing the failed checks if anything is wrong.
+    """
+    print("\n" + "=" * 70)
+    print("🔬 [VERIFY] Single-batch pretrain method check (with diagnostics)")
+    print("=" * 70)
+
+    k = min(8, len(dataset))
+    if k < 2:
+        print("⚠️ [VERIFY] Need >= 2 samples (ITM pollute needs batch>1); skipping.")
+        return
+
+    raw = [dataset[i] for i in range(k)]
+    batch = data_collator(raw)
+    batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
+
+    model.train()
+    model.zero_grad(set_to_none=True)
+    out = model(**batch)
+    total = loss_fn(batch, out)  # stamps loss_mlm / loss_itm / loss_twc into `out`
+
+    tcls = out.get("textcls_scores")
+    pcls = out.get("pollutecls_scores")
+    cs   = out.get("contrastive_scores")
+    o2r  = out.get("o2r_block")
+    lm, li, lt = out.get("loss_mlm"), out.get("loss_itm"), out.get("loss_twc")
+
+    # ── DIAGNOSTIC DUMP (always printed, so you can SEE where a problem is) ──
+    print(f"\n[diag] batch size = {k}")
+    print("[diag] forward tensors:")
+    print(f"    MLM  textcls_scores   : {_tensor_health(tcls)}")
+    print(f"    ITM  pollutecls_scores: {_tensor_health(pcls)}")
+    print(f"    TWC  contrastive_scores: {_tensor_health(cs)}")
+
+    print("[diag] loss components:")
+    for nm, lv in [("loss_mlm", lm), ("loss_itm", li), ("loss_twc", lt), ("TOTAL", total)]:
+        if lv is None:
+            print(f"    {nm:9s}: None")
+        else:
+            finite = bool(torch.isfinite(lv).all())
+            print(f"    {nm:9s}: {lv.item():.5f}  finite={finite}")
+
+    # MLM detail
+    if tcls is not None:
+        tgt = batch["cmb_text_mask_label"]
+        msk = tgt != -1
+        n_masked = int(msk.sum().item())
+        if n_masked > 0:
+            mlm_acc = (tcls.argmax(-1)[msk] == tgt[msk]).float().mean().item()
+            print(f"[diag] MLM: masked_positions={n_masked}, batch_token_acc={mlm_acc:.3f}")
+        else:
+            print("[diag] MLM: NO masked positions in this batch!")
+
+    # ITM detail
+    tp = batch["tag_pollute"]
+    print(f"[diag] ITM: tag_pollute dist -> polluted={int((tp==1).sum())}, clean={int((tp==0).sum())}")
+
+    # TWC detail (label distribution + positive/negative logit separation)
+    if use_twc and cs is not None and o2r is not None:
+        n_pos = int((o2r > 0.5).sum()); n_semi = int(((o2r > 0.0) & (o2r <= 0.5)).sum())
+        n_neg = int((o2r == 0.0).sum()); n_ign = int((o2r == -1).sum())
+        print(f"[diag] TWC labels: positives(>0.5)={n_pos}, semi(0–0.5]={n_semi}, "
+              f"negatives(==0)={n_neg}, ignored(-1)={n_ign}")
+        pos_l = cs[o2r > 0.5]; neg_l = cs[o2r == 0.0]
+        pm = pos_l.mean().item() if pos_l.numel() else float("nan")
+        nm = neg_l.mean().item() if neg_l.numel() else float("nan")
+        print(f"[diag] TWC logits: mean(positive)={pm:.3f} vs mean(negative)={nm:.3f} "
+              f"(positive should trend higher as training proceeds)")
+        ls = getattr(model, "logit_scale", None)
+        if ls is not None:
+            print(f"[diag] TWC logit_scale(raw)={ls.item():.3f}, exp≈{float(torch.exp(ls.detach())):.2f}")
+
+    checks = []
+    def chk(name, ok, detail=""):
+        checks.append((name, bool(ok), detail))
+
+    # ── MLM checks ────────────────────────────────────────────────────────
+    chk("[MLM] head produced logits", tcls is not None)
+    chk("[MLM] has masked positions", int((batch["cmb_text_mask_label"] != -1).sum()) > 0)
+    chk("[MLM] loss_mlm finite", lm is not None and bool(torch.isfinite(lm).all()))
+
+    # ── ITM checks ────────────────────────────────────────────────────────
+    chk("[ITM] head produced logits", pcls is not None)
+    if not (int((tp == 1).sum()) > 0 and int((tp == 0).sum()) > 0):
+        # Non-fatal: pollution is random per batch; a one-sided draw is not a bug.
+        print("  ⚠️ [ITM] this batch is one-sided (all polluted or all clean) — "
+              "not a code error, just an unlucky random draw.")
+    chk("[ITM] loss_itm finite", li is not None and bool(torch.isfinite(li).all()))
+
+    # ── TWC checks ────────────────────────────────────────────────────────
+    if use_twc:
+        chk("[TWC] contrastive_scores produced", cs is not None, "MISSING => TWC branch skipped!")
+        chk("[TWC] o2r_block produced", o2r is not None)
+        if cs is not None and o2r is not None:
+            chk("[TWC] score/label shapes match", tuple(cs.shape) == tuple(o2r.shape),
+                f"scores={tuple(cs.shape)} labels={tuple(o2r.shape)}")
+            chk("[TWC] scores finite", bool(torch.isfinite(cs).all()))
+            chk("[TWC] labels have positives (>0.5)", bool((o2r > 0.5).any()))
+            chk("[TWC] labels have negatives (==0)", bool((o2r == 0.0).any()))
+        chk("[TWC] loss_twc finite & > 0", lt is not None and bool(torch.isfinite(lt).all()) and lt.item() > 0)
+
+    # ── total + backward + per-submodule gradient localization ─────────────
+    chk("[TOTAL] loss finite", bool(torch.isfinite(total).all()))
+    chk("[TOTAL] loss requires grad", bool(total.requires_grad))
+    total.backward()
+
+    grp = {}  # submodule prefix -> [grad_sq_sum, has_bad]
+    for nm_, p in model.named_parameters():
+        if p.grad is None:
+            continue
+        pref = nm_.split(".")[0]
+        g = p.grad.detach().float()
+        bad = not bool(torch.isfinite(g).all())
+        ent = grp.setdefault(pref, [0.0, False])
+        ent[0] += float(g.pow(2).sum()) if not bad else 0.0
+        ent[1] = ent[1] or bad
+    print("\n[diag] per-submodule gradient (||grad|| and NaN/inf flag):")
+    for pref in sorted(grp):
+        gnorm = grp[pref][0] ** 0.5
+        flag = "  ⚠️ NaN/inf!" if grp[pref][1] else ""
+        print(f"    {pref:24s} ||g||={gnorm:.4g}{flag}")
+    bad_mods = [pref for pref, v in grp.items() if v[1]]
+    chk("[GRAD] all gradients finite (no NaN/inf)", len(bad_mods) == 0,
+        f"bad submodules: {bad_mods}" if bad_mods else "ok")
+    chk("[GRAD] gradients flow into params", len(grp) > 0, f"{len(grp)} submodules got grad")
+
+    # ── metric aggregation path ───────────────────────────────────────────
+    try:
+        acc = acc_fn.calculate(batch, out)
+        acc_t = acc if torch.is_tensor(acc) else torch.tensor(float(acc))
+        chk("[METRIC] aggregator runs & finite", bool(torch.isfinite(acc_t).all()),
+            f"vec={[round(float(x), 3) for x in acc_t.flatten().tolist()[:8]]}")
+    except Exception as e:
+        chk("[METRIC] aggregator runs", False, f"raised {type(e).__name__}: {e}")
+
+    model.zero_grad(set_to_none=True)
+
+    print("\n[result]")
+    all_ok = True
+    for name, ok, detail in checks:
+        print(f"  {'✅' if ok else '❌'} {name}" + (f"  ({detail})" if detail else ""))
+        all_ok = all_ok and ok
+    print("=" * 70)
+    if not all_ok:
+        failed = [n for n, ok, _ in checks if not ok]
+        raise RuntimeError(
+            f"🔬 [VERIFY] Pretrain method check FAILED at: {failed}. "
+            f"See [diag] lines above to localize which loss/component is wrong."
+        )
+    print("🔬 [VERIFY] All pretrain components OK — proceeding to the short training loop.\n")
+
+
 def main(args_list=None):
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "pretrain.yaml"))
@@ -155,14 +326,33 @@ def main(args_list=None):
             return
 
     if training_args.smoke_test:
-        print("🚨 RUNNING IN SMOKE TEST MODE: Truncating dataset and reducing training steps.")
-        train_df = train_df.head(8)
-        val_df = val_df.head(4)
-        training_args.max_steps = 3
+        n_tr = int(getattr(training_args, "smoke_train_samples", 256))
+        n_ev = int(getattr(training_args, "smoke_eval_samples", 64))
+        n_steps = int(getattr(training_args, "smoke_max_steps", 60))
+        print(f"🚨 SMOKE TEST MODE: train={n_tr}, eval={n_ev}, max_steps={n_steps} "
+              f"— exercises the FULL pretrain pipeline fast with per-loss debug logging.")
+        train_df = train_df.head(n_tr)
+        val_df = val_df.head(n_ev)
+        # Real optimizer steps (no accumulation) so the loop + scheduler are genuinely exercised.
+        training_args.gradient_accumulation_steps = 1
+        # ITM pollute logic needs batch > 1; keep small but >= 2.
+        training_args.per_device_train_batch_size = max(2, min(4, int(training_args.per_device_train_batch_size)))
+        training_args.per_device_eval_batch_size = max(2, min(4, int(training_args.per_device_eval_batch_size)))
+        training_args.max_steps = n_steps
         training_args.num_train_epochs = 1.0
-        training_args.logging_steps = 1
-        training_args.eval_steps = 2
-        training_args.save_steps = 3
+        training_args.warmup_steps = 0
+        training_args.warmup_ratio = 0.0
+        training_args.logging_steps = max(1, n_steps // 20)
+        training_args.eval_steps = max(1, n_steps // 3)
+        training_args.save_steps = n_steps
+        training_args.save_total_limit = 1
+        # Avoid best-model bookkeeping that needs many aligned eval/save steps.
+        training_args.load_best_model_at_end = False
+        # Turn ON the built-in per-step per-loss breakdown (Loss M / I / TWC) so a
+        # diverging or wrong loss term is immediately visible during the loop.
+        import training.metrics as _M
+        _M.DEBUG_TRAIN = True
+        _M.LOG_TRAIN_EVERY = training_args.logging_steps
 
     train_dataset = ViT5VQADataset(train_df)
     val_dataset = ViT5VQADataset(val_df)
@@ -248,6 +438,14 @@ def main(args_list=None):
         pretrain_loss_fn=pretrain_loss_fn,
         pretrain_acc_fn=pretrain_acc_fn,
     )
+
+    # Fast method-correctness gate: in smoke/mock mode, verify a single batch
+    # exercises MLM + ITM + TWC correctly before spending time on the loop.
+    if training_args.smoke_test:
+        _verify_pretrain_batch(
+            model, data_collator, train_dataset,
+            pretrain_loss_fn, pretrain_acc_fn, DEVICE, use_twc,
+        )
 
     print(">>> Starting Pretrain...")
     if training_args.resume_from_checkpoint:
