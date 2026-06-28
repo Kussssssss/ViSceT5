@@ -25,38 +25,6 @@ def create_batch_labels(batch_labels):
         result[:, ignore_mask] = -1.0           # col i
     return result
 
-def _twc_infonce(logits, labels, valid):
-    """
-    Soft-label InfoNCE for one direction of TWC (TWA Eq. 4–6).
-
-    logits : [M, M] = logit_scale * <O_i, R_j>  (cosine, scaled by temperature)
-    labels : [M, M] soft labels in {-1 (ignore), 0 (neg), 0.9 (semi), 1.0 (pos)}
-    valid  : [M] bool — real (non-PAD) tokens; PAD rows AND cols are excluded.
-
-    For each valid row i we softmax over the valid columns (the candidate
-    augmented tokens in the batch) and take cross-entropy against the row's
-    soft-label distribution. Negatives (other tokens / other images) live in the
-    softmax denominator, so the positive must out-rank them — this is what keeps
-    the task from collapsing to "predict everything negative" (the failure mode
-    of independent per-cell sigmoid BCE under heavy class imbalance).
-    """
-    neg_inf = -1e9  # safe large-negative mask (far from fp32 overflow)
-    col_mask = valid.unsqueeze(0)                        # [1, M] valid columns
-    masked_logits = logits.masked_fill(~col_mask, neg_inf)
-    logp = torch.log_softmax(masked_logits, dim=1)       # over candidate columns
-
-    tgt = labels.clamp(min=0.0) * col_mask.float()       # -1 -> 0, drop invalid cols
-    denom = tgt.sum(dim=1, keepdim=True)                 # positive mass per row
-    has_pos = (denom.squeeze(1) > 0) & valid             # valid rows that own a positive
-    tgt = tgt / denom.clamp_min(1e-9)                    # normalize to a distribution
-
-    row_ce = -(tgt * logp).sum(dim=1)                    # [M] cross-entropy per row
-    row_ce = row_ce[has_pos]
-    if row_ce.numel() == 0:
-        return logits.sum() * 0.0                        # keep in graph, no signal
-    return row_ce.mean()
-
-
 class ViT5PretrainLoss(nn.Module):
     def __init__(self, pretrain_ablation_mode="full"):
         super().__init__()
@@ -129,24 +97,23 @@ class ViT5PretrainLoss(nn.Module):
                 r2o_block = r2o_block.to(logits_per_image.device)
                 r2o_block = create_batch_labels(r2o_block)
 
-            # TWA Eq. 4–6: softmax (temperature) contrastive with soft labels,
-            # over REAL tokens only. A token is PAD/ignored iff its diagonal == -1
-            # (create_batch_labels has propagated -1 across its row/col).
-            diag = torch.diagonal(o2r_block)
-            valid = diag != -1
-
-            n_valid = int(valid.sum().item())
-            if n_valid >= 2:
+            # TWA released code: sigmoid BCE on the valid (non-PAD) cells of the
+            # block-diagonal label matrix. PAD/ignored cells are excluded via
+            # mask != -1 (our collator sets PAD diagonal = -1; create_batch_labels
+            # then propagates -1 across PAD rows/cols). Same-text in-image pairs are
+            # positive/semi-positive; everything else (cross-text, cross-image) = 0.
+            mask = o2r_block != -1
+            if mask.any():
                 o2r_labels = o2r_block.float()
                 r2o_labels = r2o_block.float()
-                loss_i = _twc_infonce(logits_per_image.float(), o2r_labels, valid)  # token->word
-                loss_t = _twc_infonce(logits_per_text.float(),  r2o_labels, valid)  # word->token
+                loss_i = F.binary_cross_entropy_with_logits(
+                    logits_per_image[mask].float(), o2r_labels[mask], reduction="mean")
+                loss_t = F.binary_cross_entropy_with_logits(
+                    logits_per_text[mask].float(), r2o_labels[mask], reduction="mean")
                 contrastive_loss = (loss_i + loss_t) / 2
             else:
-                # Degenerate batch with <2 real OCR tokens — TWC cannot form a
-                # contrastive pair. Never silent: warn loudly so it can't hide.
-                print(f"⚠️ [TWC] only {n_valid} real OCR token(s) in batch — TWC contributes 0 "
-                      f"this step (check OCR extraction / augmentation if this recurs).")
+                # No valid (non-PAD) contrastive cells — never silent; warn loudly.
+                print("⚠️ [TWC] no valid (non-PAD) contrastive cells this batch — TWC contributes 0.")
                 contrastive_loss = logits_per_image.sum() * 0.0
 
         mode = self.pretrain_ablation_mode
