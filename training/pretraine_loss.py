@@ -25,6 +25,38 @@ def create_batch_labels(batch_labels):
         result[:, ignore_mask] = -1.0           # col i
     return result
 
+def _twc_infonce(logits, labels, valid):
+    """
+    Soft-label InfoNCE for one direction of TWC (TWA Eq. 4–6).
+
+    logits : [M, M] = logit_scale * <O_i, R_j>  (cosine, scaled by temperature)
+    labels : [M, M] soft labels in {-1 (ignore), 0 (neg), 0.9 (semi), 1.0 (pos)}
+    valid  : [M] bool — real (non-PAD) tokens; PAD rows AND cols are excluded.
+
+    For each valid row i we softmax over the valid columns (the candidate
+    augmented tokens in the batch) and take cross-entropy against the row's
+    soft-label distribution. Negatives (other tokens / other images) live in the
+    softmax denominator, so the positive must out-rank them — this is what keeps
+    the task from collapsing to "predict everything negative" (the failure mode
+    of independent per-cell sigmoid BCE under heavy class imbalance).
+    """
+    neg_inf = torch.finfo(logits.dtype).min / 2
+    col_mask = valid.unsqueeze(0)                        # [1, M] valid columns
+    masked_logits = logits.masked_fill(~col_mask, neg_inf)
+    logp = torch.log_softmax(masked_logits, dim=1)       # over candidate columns
+
+    tgt = labels.clamp(min=0.0) * col_mask.float()       # -1 -> 0, drop invalid cols
+    denom = tgt.sum(dim=1, keepdim=True)                 # positive mass per row
+    has_pos = (denom.squeeze(1) > 0) & valid             # valid rows that own a positive
+    tgt = tgt / denom.clamp_min(1e-9)                    # normalize to a distribution
+
+    row_ce = -(tgt * logp).sum(dim=1)                    # [M] cross-entropy per row
+    row_ce = row_ce[has_pos]
+    if row_ce.numel() == 0:
+        return logits.sum() * 0.0                        # keep in graph, no signal
+    return row_ce.mean()
+
+
 class ViT5PretrainLoss(nn.Module):
     def __init__(self, pretrain_ablation_mode="full"):
         super().__init__()
@@ -97,34 +129,21 @@ class ViT5PretrainLoss(nn.Module):
                 r2o_block = r2o_block.to(logits_per_image.device)
                 r2o_block = create_batch_labels(r2o_block)
 
-            mask = o2r_block != -1
+            # TWA Eq. 4–6: softmax (temperature) contrastive with soft labels,
+            # over REAL tokens only. A token is PAD/ignored iff its diagonal == -1
+            # (create_batch_labels has propagated -1 across its row/col).
+            diag = torch.diagonal(o2r_block)
+            valid = diag != -1
 
-            if mask.any():
+            if int(valid.sum().item()) >= 2:
                 o2r_labels = o2r_block.float()
                 r2o_labels = r2o_block.float()
-
-                # Notebook gốc / TWA paper (Eq.6): BCE thường giữa soft-label và logit,
-                # KHÔNG pos_weight. Cặp identical (label=1.0) được giữ làm positive nên
-                # tỷ lệ pos/neg đã cân bằng hơn, không cần bù trọng số.
-                loss_i = F.binary_cross_entropy_with_logits(
-                    logits_per_image[mask].float(),
-                    o2r_labels[mask],
-                    reduction="mean",
-                )
-
-                loss_t = F.binary_cross_entropy_with_logits(
-                    logits_per_text[mask].float(),
-                    r2o_labels[mask],
-                    reduction="mean",
-                )
-
+                loss_i = _twc_infonce(logits_per_image.float(), o2r_labels, valid)  # token->word
+                loss_t = _twc_infonce(logits_per_text.float(),  r2o_labels, valid)  # word->token
                 contrastive_loss = (loss_i + loss_t) / 2
-
             else:
-                raise RuntimeError(
-                    "TWC branch ran but o2r_block has no valid labels. "
-                    "Check OCR Aug label generation."
-                )
+                # No real OCR tokens in this batch — keep loss in graph, no signal.
+                contrastive_loss = logits_per_image.sum() * 0.0
 
         mode = self.pretrain_ablation_mode
 
@@ -212,68 +231,43 @@ class PreTrainMLMAccuracy(BaseMetric):
 
 class PreTrainTWCAccuracy(BaseMetric):
     """
-    FIX: Balanced TWC Accuracy = (Positive Recall + Negative Recall) / 2
+    Retrieval-based TWC accuracy, aligned with the softmax (InfoNCE) objective.
 
-    Tại sao fix:
-    - Ma trận label [BN×BN] có ~99.9% negative cells (label=0.0) và ~0.1% positive.
-    - Metric cũ tính accuracy trên TẤT CẢ cells → trivially ~99.7% khi model
-      chỉ học push tất cả logits xuống âm (predict negative cho mọi pair).
-    - Metric mới đo riêng:
-        * pos_recall: % positive pairs (label>0.5) được predict đúng (logit>0)
-        * neg_recall: % negative pairs (label=0) được predict đúng (logit<=0)
-      và báo trung bình macro → không bị dominated bởi lớp negative.
-    - Để tránh noise từ việc sample ngẫu nhiên, neg_recall được tính trên
-      tập negative với kích thước min(4*n_pos, n_neg) để balanced nhưng
-      có đủ negative signal.
+    For each REAL original OCR token (row, PAD excluded), we take the highest-
+    similarity augmented token (argmax over valid columns) and count it correct
+    if that column is a true positive (label > 0.5). This directly measures
+    whether the model ranks a token's own augmented counterpart above all the
+    in-batch negatives — the actual goal of TWC. Returns:
+        (retrieval_acc, top1_pos_rate, top1_neg_rate)
+    where the latter two are the row-wise top-1 hit/miss rates kept for the
+    8-element diagnostic vector (twc_pos_recall / twc_neg_recall slots).
     """
     def __init__(self):
         super().__init__("twc_acc")
 
     def calculate(self, sample_list, model_output):
-        if "contrastive_scores" not in model_output or model_output["contrastive_scores"] is None:
-            return 0.0
+        cs = model_output.get("contrastive_scores", None)
+        o2r = model_output.get("o2r_block", None)
+        if cs is None or o2r is None:
+            return 0.0, 0.0, 0.0
 
-        logits_per_image = model_output["contrastive_scores"].detach()  # [BN, BN]
-        o2r_block = model_output.get("o2r_block", None)
+        logits = cs.detach()
+        o2r = o2r.detach()
+        valid = torch.diagonal(o2r) != -1          # real (non-PAD) tokens
+        if int(valid.sum().item()) < 1:
+            return 0.0, 0.0, 0.0
 
-        if o2r_block is None:
-            return 0.0
+        # Mask invalid (PAD) columns out of the retrieval argmax.
+        neg_inf = torch.finfo(logits.dtype).min / 2
+        masked = logits.masked_fill(~valid.unsqueeze(0), neg_inf)
 
-        # o2r_block đã là [BN, BN] block-diag từ model output
-        # Tách riêng positive và strict-negative cells
-        pos_mask = (o2r_block > 0.5)                # label > 0.5 → positive pair
-        neg_mask = (o2r_block == 0.0)               # label == 0 → negative pair (strict)
-        # Bỏ qua cells có label = -1 (padding) và label ∈ (0, 0.5] (mềm)
-
-        # ── Positive Recall ────────────────────────────────────────────────────
-        # "Trong tất cả positive pairs, có bao nhiêu % được predict là positive?"
-        if pos_mask.any():
-            pos_logits = logits_per_image[pos_mask]
-            pos_recall = (pos_logits > 0.0).float().mean().item()
-        else:
-            pos_recall = 0.0
-
-        # ── Negative Recall (subsampled) ───────────────────────────────────────
-        # "Trong các negative pairs được chọn, có bao nhiêu % được predict đúng?"
-        # Subsample để tránh bias và giữ tỷ lệ pos:neg ≈ 1:4 (đủ để ổn định)
-        if neg_mask.any():
-            n_pos = int(pos_mask.sum().item())
-            n_neg_target = min(n_pos * 4, int(neg_mask.sum().item()))
-            n_neg_target = max(n_neg_target, 1)
-
-            neg_indices = neg_mask.nonzero(as_tuple=False)   # [K, 2]
-            if neg_indices.size(0) > n_neg_target:
-                perm = torch.randperm(neg_indices.size(0), device=logits_per_image.device)
-                neg_indices = neg_indices[perm[:n_neg_target]]
-
-            sampled_neg_logits = logits_per_image[neg_indices[:, 0], neg_indices[:, 1]]
-            neg_recall = (sampled_neg_logits <= 0.0).float().mean().item()
-        else:
-            neg_recall = 1.0  # Không có negative → perfect trivially
-
-        # Balanced accuracy: macro average của pos_recall và neg_recall
-        balanced_acc = (pos_recall + neg_recall) / 2.0
-        return balanced_acc, pos_recall, neg_recall
+        rows = valid.nonzero(as_tuple=True)[0]      # valid row indices
+        pred = masked[rows].argmax(dim=1)           # top-1 column per valid row
+        hit = (o2r[rows, pred] > 0.5).float()       # is the top-1 a true positive?
+        retrieval_acc = hit.mean().item()
+        pos_rate = retrieval_acc                    # fraction of rows whose top-1 is positive
+        neg_rate = 1.0 - retrieval_acc              # fraction whose top-1 is a negative/wrong
+        return retrieval_acc, pos_rate, neg_rate
 
 
 # HÀM METRIC TỔNG - TỰ ĐỘNG ĐIỀU HƯỚNG THEO ABLATION MODE
