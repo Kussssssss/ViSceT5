@@ -135,14 +135,18 @@ class ViT5PretrainLoss(nn.Module):
             diag = torch.diagonal(o2r_block)
             valid = diag != -1
 
-            if int(valid.sum().item()) >= 2:
+            n_valid = int(valid.sum().item())
+            if n_valid >= 2:
                 o2r_labels = o2r_block.float()
                 r2o_labels = r2o_block.float()
                 loss_i = _twc_infonce(logits_per_image.float(), o2r_labels, valid)  # token->word
                 loss_t = _twc_infonce(logits_per_text.float(),  r2o_labels, valid)  # word->token
                 contrastive_loss = (loss_i + loss_t) / 2
             else:
-                # No real OCR tokens in this batch — keep loss in graph, no signal.
+                # Degenerate batch with <2 real OCR tokens — TWC cannot form a
+                # contrastive pair. Never silent: warn loudly so it can't hide.
+                print(f"⚠️ [TWC] only {n_valid} real OCR token(s) in batch — TWC contributes 0 "
+                      f"this step (check OCR extraction / augmentation if this recurs).")
                 contrastive_loss = logits_per_image.sum() * 0.0
 
         mode = self.pretrain_ablation_mode
