@@ -40,7 +40,7 @@ def _twc_infonce(logits, labels, valid):
     the task from collapsing to "predict everything negative" (the failure mode
     of independent per-cell sigmoid BCE under heavy class imbalance).
     """
-    neg_inf = torch.finfo(logits.dtype).min / 2
+    neg_inf = -1e9  # safe large-negative mask (far from fp32 overflow)
     col_mask = valid.unsqueeze(0)                        # [1, M] valid columns
     masked_logits = logits.masked_fill(~col_mask, neg_inf)
     logp = torch.log_softmax(masked_logits, dim=1)       # over candidate columns
@@ -258,8 +258,7 @@ class PreTrainTWCAccuracy(BaseMetric):
             return 0.0, 0.0, 0.0
 
         # Mask invalid (PAD) columns out of the retrieval argmax.
-        neg_inf = torch.finfo(logits.dtype).min / 2
-        masked = logits.masked_fill(~valid.unsqueeze(0), neg_inf)
+        masked = logits.masked_fill(~valid.unsqueeze(0), -1e9)
 
         rows = valid.nonzero(as_tuple=True)[0]      # valid row indices
         pred = masked[rows].argmax(dim=1)           # top-1 column per valid row
