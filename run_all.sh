@@ -1,6 +1,32 @@
 #!/bin/bash
+# run_all.sh — Vast.ai / generic Linux launcher for ViSceT5
+#
+# Usage:
+#   bash run_all.sh                 # full pretrain (default)
+#   bash run_all.sh mock            # quick MOCK/SMOKE pretrain (fast sanity test)
+#   bash run_all.sh finetune        # full finetune
+#   bash run_all.sh finetune mock   # mock finetune
+#
+# Args are order-independent. Environment overrides are also respected and take
+# precedence if already exported: STAGE, MOCK_TEST, HF_TOKEN, HF_REPO,
+# VAST_CONTAINERLABEL, CONTAINER_API_KEY (see run_pipeline.py).
 set -e
 
+# ---- resolve STAGE / MOCK_TEST from args (env wins if already set) ----
+STAGE="${STAGE:-pretrain}"
+MOCK_TEST="${MOCK_TEST:-false}"
+for a in "$@"; do
+  case "$(echo "$a" | tr '[:upper:]' '[:lower:]')" in
+    pretrain|finetune)            STAGE="$a" ;;
+    mock|mocktest|smoke|smoke_test) MOCK_TEST="true" ;;
+    full)                          MOCK_TEST="false" ;;
+    *) echo "⚠️  Unknown arg '$a' (ignored). Use: [pretrain|finetune] [mock]";;
+  esac
+done
+export STAGE MOCK_TEST
+echo "▶ [Vast.ai] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST"
+
+# ---- environment bootstrap ----
 apt-get update && apt-get install -y python3-venv git
 cd /workspace
 
@@ -21,4 +47,7 @@ source /workspace/myenv/bin/activate
 chmod +x setup.sh
 ./setup.sh
 
+# ---- launch (background so the run survives SSH disconnects) ----
 nohup python3 run_pipeline.py > train_execution.log 2>&1 &
+echo "✅ Launched in background (STAGE=$STAGE, MOCK_TEST=$MOCK_TEST)."
+echo "   Tail logs:  tail -f /workspace/ViSceT5/train_execution.log"
