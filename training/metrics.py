@@ -189,46 +189,36 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         self._last_log_step = -1
 
     def training_step(self, model, inputs):
-        bad_params_before = []
-        for name, param in model.named_parameters():
-            if torch.isnan(param).any() or torch.isinf(param).any():
-                bad_params_before.append(name)
-        if bad_params_before:
-            print(f"🚨 [Trainer Check] BEFORE step {self.state.global_step}, NaN/inf weights: {bad_params_before[:15]}")
+        # Detect weights that are ALREADY corrupted (means a previous step slipped
+        # a bad update through — should not happen once the guard below works).
+        corrupted = [n for n, p in model.named_parameters()
+                     if not torch.isfinite(p).all()]
+        if corrupted:
+            print(f"🚨 [Trainer Check] step {self.state.global_step}: NaN/inf WEIGHTS already in {corrupted[:10]} "
+                  f"(+{max(0,len(corrupted)-10)} more) — model is corrupted upstream.")
 
-        loss = super().training_step(model, inputs)
+        loss = super().training_step(model, inputs)  # forward + backward (grads now set)
 
-        if torch.isnan(loss) or torch.isinf(loss):
-            print(f"🚨 [Trainer Check] Loss is NaN/inf at step {self.state.global_step}: {loss.item()}")
+        if not torch.isfinite(loss):
+            print(f"🚨 [Trainer Check] Loss is non-finite at step {self.state.global_step}: {loss.item()}")
 
-        bad_grads = []
-        for name, param in model.named_parameters():
-            if param.grad is not None and (torch.isnan(param.grad).any() or torch.isinf(param.grad).any()):
-                bad_grads.append(name)
-        if bad_grads:
-            print(f"🚨 [Trainer Check] NaN/inf gradients at step {self.state.global_step} ({len(bad_grads)} params):")
-            for name in bad_grads[:20]:
-                print(f"   - {name}")
-            for k, v in inputs.items():
-                if isinstance(v, torch.Tensor):
-                    print(f"   Input '{k}': shape={v.shape}, nan={torch.isnan(v).any().item()}, inf={torch.isinf(v).any().item()}")
-                elif isinstance(v, list):
-                    print(f"   Input '{k}': list of len {len(v)}")
+        # CRITICAL GUARD. transformers 4.38/4.45 have no `_clip_grad_norm` hook and
+        # clip gradients via accelerate AFTER this method returns. Their
+        # clip_grad_norm_ turns an inf gradient into NaN (clip_coef = max_norm/inf
+        # = 0, then inf*0 = NaN), which the optimizer then writes into the weights —
+        # corrupting the whole model permanently (every later forward becomes NaN).
+        # So sanitize non-finite grads HERE, before the optimizer step.
+        bad = {}
+        for name, p in model.named_parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+                pref = name.split(".")[0]
+                bad[pref] = bad.get(pref, 0) + 1
+        if bad:
+            print(f"⚠️  [GradGuard] step {self.state.global_step}: sanitized non-finite grads "
+                  f"(zeroed) in submodules {bad} — watch which one recurs to find the source.")
 
         return loss
-
-    def _clip_grad_norm(self):
-        # Zero out any NaN/inf gradients BEFORE clip_grad_norm_ touches them.
-        # clip_grad_norm_ with total_norm=inf computes clip_coef=0, then
-        # inf_grad * 0 = NaN (IEEE 754), corrupting weights permanently.
-        n_zeroed = 0
-        for param in self.model.parameters():
-            if param.grad is not None and not torch.isfinite(param.grad).all():
-                param.grad.zero_()
-                n_zeroed += 1
-        if n_zeroed:
-            print(f"⚠️  [GradClip] Zeroed {n_zeroed} params with NaN/inf grad at step {self.state.global_step}")
-        return super()._clip_grad_norm()
 
 
     def log(self, logs: Dict[str, float]) -> None:
