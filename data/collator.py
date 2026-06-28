@@ -480,7 +480,12 @@ class ViT5VQADataCollator:
             raw_tok = toks[i]
             norm_tok = _normalize_text(raw_tok, lowercase=True)
             if raw_tok == pad_tok or norm_tok in {"<pad>", "</s>"}:
-                rel = pad_tok; o2r[i, i], r2o[i, i] = 1.0, 1.0; actions.append("PAD")
+                # PAD is NOT a contrastive sample: its pooled feature is ~0 and
+                # labelling PAD-PAD as positive (=1.0) floods the positive class
+                # with zero-feature pairs, collapsing TWC. Ignore it entirely (-1).
+                rel = pad_tok
+                o2r[i, i], r2o[i, i] = self.contrastive_ignore, self.contrastive_ignore
+                actions.append("PAD")
                 padded.append(norm_tok); related.append(rel); continue
 
             is_special = bool(self.regex_special.search(norm_tok))
@@ -509,6 +514,10 @@ class ViT5VQADataCollator:
 
         for i in range(len(related)):
             for j in range(i + 1, len(related)):
+                # If either token is PAD/ignored (diagonal == ignore), leave the
+                # whole pair ignored so PAD never becomes a positive or negative.
+                if o2r[i, i] == self.contrastive_ignore or o2r[j, j] == self.contrastive_ignore:
+                    continue
                 if padded[i].lower() == padded[j].lower():
                     o2r[i, j], o2r[j, i] = o2r[j, j], o2r[i, i]
                     r2o[i, j], r2o[j, i] = r2o[j, j], r2o[i, i]
