@@ -203,7 +203,8 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
 
     # ── TWC checks ────────────────────────────────────────────────────────
     if use_twc:
-        chk("[TWC] contrastive_scores produced", cs is not None, "MISSING => TWC branch skipped!")
+        chk("[TWC] contrastive_scores produced", cs is not None,
+            f"shape={tuple(cs.shape)}" if cs is not None else "MISSING => TWC branch was skipped!")
         chk("[TWC] o2r_block produced", o2r is not None)
         if cs is not None and o2r is not None:
             chk("[TWC] score/label shapes match", tuple(cs.shape) == tuple(o2r.shape),
