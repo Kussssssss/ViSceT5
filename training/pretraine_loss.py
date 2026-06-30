@@ -1,4 +1,5 @@
 # @title
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,6 +30,13 @@ class ViT5PretrainLoss(nn.Module):
     def __init__(self, pretrain_ablation_mode="full"):
         super().__init__()
         self.pretrain_ablation_mode = str(pretrain_ablation_mode).lower().strip()
+        # pos_weight is NOT in TWA (TWA = plain BCE). Toggle via env:
+        #   TWC_POS_WEIGHT_CAP unset / 0  -> plain BCE (TWA-faithful)
+        #   TWC_POS_WEIGHT_CAP = e.g. 1000 -> dynamic pos_weight = n_neg/n_pos, clamped [1, cap]
+        try:
+            self.twc_pos_weight_cap = float(os.environ.get("TWC_POS_WEIGHT_CAP", "0"))
+        except ValueError:
+            self.twc_pos_weight_cap = 0.0
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
@@ -108,22 +116,22 @@ class ViT5PretrainLoss(nn.Module):
                 r2o_labels = r2o_block.float()
                 o2r_m, r2o_m = o2r_labels[mask], r2o_labels[mask]
 
-                # Option (b): dynamic pos_weight on top of TWA's BCE to counter the
-                # extreme imbalance (positives ~0.4% of valid cells). pos_weight =
-                # n_neg/n_pos makes the positive and negative terms contribute
-                # comparably, preventing the all-negative collapse of plain BCE.
-                # (Not in TWA's released code; standard imbalance fix for BCE.)
-                def _pos_weight(lbl):
-                    n_pos = (lbl > 0.5).sum().clamp_min(1.0)
-                    n_neg = (lbl == 0.0).sum().clamp_min(1.0)
-                    return (n_neg / n_pos).clamp(1.0, 1000.0)
+                # TWA = plain BCE (no pos_weight). pos_weight is an optional imbalance
+                # fix, toggled via env TWC_POS_WEIGHT_CAP (0/unset => plain BCE).
+                cap = self.twc_pos_weight_cap
+                if cap and cap > 1.0:
+                    def _pos_weight(lbl):
+                        n_pos = (lbl > 0.5).sum().clamp_min(1.0)
+                        n_neg = (lbl == 0.0).sum().clamp_min(1.0)
+                        return (n_neg / n_pos).clamp(1.0, cap)
+                    pw_i, pw_t = _pos_weight(o2r_m), _pos_weight(r2o_m)
+                else:
+                    pw_i = pw_t = None  # plain BCE, TWA-faithful
 
                 loss_i = F.binary_cross_entropy_with_logits(
-                    logits_per_image[mask].float(), o2r_m,
-                    pos_weight=_pos_weight(o2r_m), reduction="mean")
+                    logits_per_image[mask].float(), o2r_m, pos_weight=pw_i, reduction="mean")
                 loss_t = F.binary_cross_entropy_with_logits(
-                    logits_per_text[mask].float(), r2o_m,
-                    pos_weight=_pos_weight(r2o_m), reduction="mean")
+                    logits_per_text[mask].float(), r2o_m, pos_weight=pw_t, reduction="mean")
                 contrastive_loss = (loss_i + loss_t) / 2
             else:
                 # No valid (non-PAD) contrastive cells — never silent; warn loudly.
