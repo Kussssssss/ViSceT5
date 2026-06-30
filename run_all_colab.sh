@@ -27,7 +27,9 @@ for a in "$@"; do
   esac
 done
 export STAGE MOCK_TEST
-echo "▶ [Colab] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST"
+# Colab: show only the trainer's tqdm progress bar, suppress per-step debug logs.
+export VISCET5_PROGRESS_ONLY=1
+echo "▶ [Colab] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST | progress-bar only"
 
 # ---- environment bootstrap ----
 cd /content

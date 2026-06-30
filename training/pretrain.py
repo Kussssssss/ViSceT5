@@ -265,6 +265,21 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     print("🔬 [VERIFY] All pretrain components OK — proceeding to the short training loop.\n")
 
 
+def _progress_only_mode():
+    """
+    True when we should show only the trainer's tqdm progress bar and suppress the
+    verbose per-step debug logs — i.e. on Colab. Triggered by env VISCET5_PROGRESS_ONLY
+    (set by run_all_colab.sh) or by detecting the google.colab runtime.
+    """
+    if os.environ.get("VISCET5_PROGRESS_ONLY", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    try:
+        import google.colab  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def main(args_list=None):
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "pretrain.yaml"))
@@ -349,11 +364,17 @@ def main(args_list=None):
         training_args.save_total_limit = 1
         # Avoid best-model bookkeeping that needs many aligned eval/save steps.
         training_args.load_best_model_at_end = False
-        # Turn ON the built-in per-step per-loss breakdown (Loss M / I / TWC) so a
-        # diverging or wrong loss term is immediately visible during the loop.
-        import training.metrics as _M
-        _M.DEBUG_TRAIN = True
-        _M.LOG_TRAIN_EVERY = training_args.logging_steps
+        if _progress_only_mode():
+            # Colab / progress-only: keep the tqdm progress bar clean — do NOT emit
+            # the per-step [Pretrain] loss logs (they clutter / break the bar).
+            training_args.disable_tqdm = False
+            print("ℹ️ [smoke] progress-bar mode (Colab): per-step debug logs disabled.")
+        else:
+            # Turn ON the built-in per-step per-loss breakdown (Loss M / I / TWC) so a
+            # diverging or wrong loss term is immediately visible during the loop.
+            import training.metrics as _M
+            _M.DEBUG_TRAIN = True
+            _M.LOG_TRAIN_EVERY = training_args.logging_steps
 
     train_dataset = ViT5VQADataset(train_df)
     val_dataset = ViT5VQADataset(val_df)
