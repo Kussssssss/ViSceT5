@@ -42,7 +42,15 @@ def run():
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
                     sys.argv.extend(["--smoke_test", "True"])
-                    
+                    # Cho phép chỉnh số sample/steps qua env: SMOKE_TRAIN_SAMPLES, SMOKE_EVAL_SAMPLES, SMOKE_MAX_STEPS
+                    for _env_key, _flag in [("SMOKE_TRAIN_SAMPLES", "--smoke_train_samples"),
+                                            ("SMOKE_EVAL_SAMPLES", "--smoke_eval_samples"),
+                                            ("SMOKE_MAX_STEPS", "--smoke_max_steps")]:
+                        _v = os.environ.get(_env_key, "").strip()
+                        if _v:
+                            sys.argv.extend([_flag, _v])
+                            print(f"   [MOCK_TEST] {_flag} = {_v}")
+
                 from training import pretrain
                 importlib.reload(pretrain)
                 pretrain.main()
