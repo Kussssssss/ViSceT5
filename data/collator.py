@@ -686,7 +686,7 @@ class ViT5VQADataCollator:
 
             # Khởi tạo list
             masked_q_ids_list, q_mask_label_list = [], []
-            ocr_info_list, o2r_list, r2o_list = [], [], []
+            ocr_info_list, o2r_list, r2o_list, group_ids_list = [], [], [], []
             twa_char_list, twa_char_mask_list, twa_word_ids_list, ocr_to_word_map_list = [], [], [], []
             ocr_mask_token_list, ocr_mask_box_list, ocr_lbl_tok_list, ocr_msk_inp_list = [], [], [], []
 
@@ -745,6 +745,23 @@ class ViT5VQADataCollator:
                     mask_all = torch.cat([info["word_mask"], info["word_mask"]], dim=0)
                     o2r_list.append(o2r); r2o_list.append(r2o)
 
+                    # Per-word group key = (OCR-source image, normalized text) so the
+                    # model can re-link cross-sample tokens that are the SAME text of
+                    # the SAME image (e.g. one image asked with several questions in a
+                    # batch). PAD/ignored positions -> -1.
+                    if src_idx >= 0:
+                        _src_path = paths[src_idx]
+                    else:
+                        _hi = max(0, min(-(src_idx + 1), len(self.itm_history) - 1))
+                        _src_path = self.itm_history[_hi][0]
+                    grp = []
+                    for k in range(current_max_len):
+                        if k < len(norm_tokens) and o2r[k, k] != self.contrastive_ignore:
+                            grp.append(_stable_hash_int(f"{_src_path}|{norm_tokens[k]}") & 0x3FFFFFFF)
+                        else:
+                            grp.append(-1)
+                    group_ids_list.append(torch.tensor(grp, dtype=torch.long))
+
                 else:
                     # Chế độ only_itm_mlm
                     pad_ocr = norm_tokens[:current_max_len]
@@ -790,9 +807,11 @@ class ViT5VQADataCollator:
             if use_ocr_aug:
                 batch_dict["o2r_labels"] = torch.stack(o2r_list).to(pixel_values.device)
                 batch_dict["r2o_labels"] = torch.stack(r2o_list).to(pixel_values.device)
+                batch_dict["twc_group_ids"] = torch.stack(group_ids_list).to(pixel_values.device)
             else:
                 batch_dict["o2r_labels"] = None
                 batch_dict["r2o_labels"] = None
+                batch_dict["twc_group_ids"] = None
 
             return batch_dict
 

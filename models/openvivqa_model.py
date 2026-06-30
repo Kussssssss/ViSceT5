@@ -692,6 +692,7 @@ class OpenViVQAModel(PreTrainedModel):
         tag_pollute: Optional[torch.LongTensor] = None,
         o2r_labels: Optional[torch.FloatTensor] = None,
         r2o_labels: Optional[torch.FloatTensor] = None,
+        twc_group_ids: Optional[torch.LongTensor] = None,
         return_visual_search_debug: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -1012,6 +1013,37 @@ class OpenViVQAModel(PreTrainedModel):
                         out_dict["r2o_block"] = torch.block_diag(*blocks_r)
                     else:
                         out_dict["r2o_block"] = None
+
+                    # ── Cross-sample SAME-IMAGE SAME-TEXT inheritance ──────────────
+                    # TWA §3.4: OCR tokens with the same text + their augmented forms
+                    # become positive/semi-positive samples "in pairs". Because we let
+                    # augmentation vary per sample (not TWA's fixed seed), the same
+                    # image's "cash" may be KEEP (1.0) in one sample and NOISE (0.9) in
+                    # another. block_diag would wrongly mark these cross-sample pairs as
+                    # negative. So for cross-sample pairs sharing (OCR image, text)
+                    # — identified by twc_group_ids — re-inherit the partner's diagonal
+                    # label, exactly like the within-sample same-text rule in the collator.
+                    if twc_group_ids is not None:
+                        _g = twc_group_ids.to(device).reshape(-1)          # [M], -1 = PAD/ignore
+                        _o2rb = out_dict["o2r_block"]
+                        _M = _o2rb.size(0)
+                        if _g.numel() == _M:
+                            _samp = torch.arange(_M, device=device) // half
+                            _inherit = (
+                                (_g.unsqueeze(1) == _g.unsqueeze(0))       # same (image, text) group
+                                & (_g.unsqueeze(1) >= 0)                   # exclude PAD
+                                & (_samp.unsqueeze(1) != _samp.unsqueeze(0))  # cross-sample only
+                            )
+                            if _inherit.any():
+                                # o2r_block[p, q] <- o2r_block[q, q]  (partner's diagonal)
+                                _diag_o = torch.diagonal(_o2rb).clone()
+                                out_dict["o2r_block"] = torch.where(
+                                    _inherit, _diag_o.unsqueeze(0).expand(_M, _M), _o2rb)
+                                if out_dict["r2o_block"] is not None:
+                                    _r2ob = out_dict["r2o_block"]
+                                    _diag_r = torch.diagonal(_r2ob).clone()
+                                    out_dict["r2o_block"] = torch.where(
+                                        _inherit, _diag_r.unsqueeze(0).expand(_M, _M), _r2ob)
 
             if return_visual_search_debug:
                 out_dict["vs_debug"] = vs_out
