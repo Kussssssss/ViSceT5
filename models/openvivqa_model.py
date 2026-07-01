@@ -238,7 +238,9 @@ class OpenViVQAModel(PreTrainedModel):
     def get_input_embeddings(self): return self.vit5.get_input_embeddings()
     def set_input_embeddings(self, v): return self.vit5.set_input_embeddings(v)
     def get_output_embeddings(self): return self.vit5.get_output_embeddings()
-    def tie_weights(self): 
+    def tie_weights(self, *args, **kwargs):
+        # Accept/ignore extra kwargs (e.g. recompute_mapping) that newer
+        # transformers pass from init_weights(); our tie logic just defers to ViT5.
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
     def get_encoder(self): return self.vit5.get_encoder()
     def get_decoder(self): return self.vit5.get_decoder()
