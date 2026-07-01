@@ -19,10 +19,35 @@ def _is_ocr(f):
     e = os.path.splitext(f)[1].lower()
     return e in [".npy",".npz"]
 
+def _as_id_list(file_id):
+    """Primary id first, then backups. Accepts a single id, a comma-separated
+    string, or a list — so a config drive_id can carry fallback ids."""
+    if file_id is None:
+        return []
+    items = list(file_id) if isinstance(file_id, (list, tuple)) else str(file_id).split(",")
+    return [str(i).strip() for i in items if str(i).strip()]
+
 def _download_gdown_id(file_id: str, out_path: str, fuzzy: bool = True):
     import gdown
-    url = f"https://drive.google.com/uc?id={file_id}"
-    gdown.download(url=url, output=out_path, quiet=False)
+    ids = _as_id_list(file_id)
+    for idx, fid in enumerate(ids):
+        tag = "primary" if idx == 0 else f"backup #{idx}"
+        try:
+            url = f"https://drive.google.com/uc?id={fid}"
+            gdown.download(url=url, output=out_path, quiet=False)
+            if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+                if idx > 0:
+                    print(f"✅ Downloaded via {tag} id: {fid}")
+                return
+            raise RuntimeError("empty/failed output")
+        except Exception as e:
+            print(f"⚠️  Drive id '{fid}' ({tag}) failed: {e}")
+            if os.path.exists(out_path):
+                try: os.remove(out_path)
+                except OSError: pass
+            if idx + 1 < len(ids):
+                print(f"   ↪ trying backup id #{idx + 1}...")
+    raise RuntimeError(f"All {len(ids)} drive id(s) failed for {out_path}")
 
 def _download_url(url: str, out_path: str):
     import urllib.request
