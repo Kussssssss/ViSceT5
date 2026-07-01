@@ -364,17 +364,15 @@ def main(args_list=None):
         training_args.save_total_limit = 1
         # Avoid best-model bookkeeping that needs many aligned eval/save steps.
         training_args.load_best_model_at_end = False
-        if _progress_only_mode():
-            # Colab / progress-only: keep the tqdm progress bar clean — do NOT emit
-            # the per-step [Pretrain] loss logs (they clutter / break the bar).
-            training_args.disable_tqdm = False
-            print("ℹ️ [smoke] progress-bar mode (Colab): per-step debug logs disabled.")
-        else:
-            # Turn ON the built-in per-step per-loss breakdown (Loss M / I / TWC) so a
-            # diverging or wrong loss term is immediately visible during the loop.
+        # Default: CLEAN output — progress bar + val eval results only, NO continuous
+        # per-step train debug logs (heavy). Opt in with TWC_TRAIN_LOG=1 to see the
+        # per-step Loss(M)/Loss(I)/Loss(TWC) breakdown for debugging.
+        if os.environ.get("TWC_TRAIN_LOG", "").strip().lower() in ("1", "true", "yes"):
             import training.metrics as _M
             _M.DEBUG_TRAIN = True
             _M.LOG_TRAIN_EVERY = training_args.logging_steps
+        else:
+            training_args.disable_tqdm = False
 
     train_dataset = ViT5VQADataset(train_df)
     val_dataset = ViT5VQADataset(val_df)
