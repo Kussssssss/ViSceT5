@@ -2,16 +2,16 @@ dataset_name: ViTextVQA
 dataset:
   train:
     dir: ''
-    drive_id: '1fKBlPAA2DmEf1Y1MESIUIuqlUeCBTXjE'
+    drive_id: '1fKBlPAA2DmEf1Y1MESIUIuqlUeCBTXjE, 18X9hFJZ_kuG506uMAIQc3JFY4eMbTMW8'
   validation:
     dir: ''
-    drive_id: '18nt6rJQZSf0g6Z7t0skaTuU_Bgc7EHAP'
+    drive_id: '18nt6rJQZSf0g6Z7t0skaTuU_Bgc7EHAP, 1JXhqgqwkjyWscQvr9HnCuy0Csh9SEezD'
   test:
     dir: ''
-    drive_id: '1S58lXoNadz0j4A4GhJPSc-Glq3ydaC1N'
+    drive_id: '1S58lXoNadz0j4A4GhJPSc-Glq3ydaC1N, 102HSaKO-YVEUSYpZeCclRzWz0HlgtIBG'
 image:
   dir: ''
-  drive_id: '1HsqhYGjaPSGISGLRRFSK00hmUHFRMjte'
+  drive_id: '1HsqhYGjaPSGISGLRRFSK00hmUHFRMjte, 1LmnBxyUjRWpx4u5g0KTwQfwPVuvkQP4D'
 ocr:
   dir: ''
-  drive_id: '1krqFSZHNWDjqrcbFkAMV7dvEFJz103iZ'
+  drive_id: '1krqFSZHNWDjqrcbFkAMV7dvEFJz103iZ, 1xkHFQXkGi-fpbgVQOfoDXEhorcxZwnXj'
