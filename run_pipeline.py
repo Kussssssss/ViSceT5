@@ -37,7 +37,14 @@ def run():
             print("\n>>> [Step 3] Starting Pretrain Training...")
             try:
                 sys.argv = ["pretrain.py", "configs/pretrain.yaml"]
-                
+
+                # Cho phép chỉnh số epoch qua env NUM_TRAIN_EPOCHS (dùng cho full run;
+                # mock bỏ qua epoch vì max_steps được ưu tiên).
+                _ep = os.environ.get("NUM_TRAIN_EPOCHS", "").strip()
+                if _ep:
+                    sys.argv.extend(["--num_train_epochs", _ep])
+                    print(f">>> [pretrain] num_train_epochs = {_ep}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
