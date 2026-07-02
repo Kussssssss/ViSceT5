@@ -39,6 +39,20 @@ from training.pretraine_loss import ViT5PretrainLoss, GlobalPretrainAccuracy
 from training.metrics import TaskSpecificTrainer, simple_pretrain_aggregator
 from utils.io_utils import download_and_extract_checkpoint
 
+# --- Torch >= 2.6 compat for resume ---------------------------------------------
+# PyTorch 2.6 flipped torch.load's default to weights_only=True. HF Trainer's
+# resume path does torch.load(rng_state.pth / optimizer.pt) without that arg, and
+# those files hold numpy objects (RNG state) that weights_only=True rejects
+# (numpy._core.multiarray._reconstruct not allowlisted). Our own checkpoints are
+# trusted, so restore the pre-2.6 behavior (weights_only=False). Idempotent.
+if not getattr(torch.load, "_viscet5_wo_patch", False):
+    _orig_torch_load = torch.load
+    def _torch_load_full(*args, **kwargs):
+        kwargs["weights_only"] = False
+        return _orig_torch_load(*args, **kwargs)
+    _torch_load_full._viscet5_wo_patch = True
+    torch.load = _torch_load_full
+
 def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     import yaml
     is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or (len(sys.argv) > 0 and ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0]))
