@@ -23,6 +23,41 @@ from transformers import (
     GenerationConfig,
     set_seed,
 )
+from transformers.trainer_callback import ProgressCallback
+
+
+class CleanProgressCallback(ProgressCallback):
+    """Keep only the TRAIN progress bar + the eval RESULTS.
+
+    Suppresses (a) the eval/prediction progress bar and (b) the per-step train
+    loss/lr/grad_norm log spam. Eval metric dicts are still printed on their own
+    line above the training bar.
+    """
+    def on_prediction_step(self, args, state, control, **kwargs):
+        # No eval progress bar; announce once so a long eval isn't silent.
+        if state.is_world_process_zero and not getattr(self, "_eval_announced", False):
+            print("⏳ Running validation...", flush=True)
+            self._eval_announced = True
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        self._eval_announced = False  # reset for the next eval
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not state.is_world_process_zero:
+            return
+        logs = logs or {}
+        # Only surface evaluation results; drop train-step logs (loss/lr/grad_norm).
+        if not any(k.startswith("eval_") for k in logs):
+            return
+        msg = " | ".join(
+            f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
+            for k, v in logs.items()
+        )
+        line = "✅ [eval] " + msg
+        if getattr(self, "training_bar", None) is not None:
+            self.training_bar.write(line)
+        else:
+            print(line, flush=True)
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
