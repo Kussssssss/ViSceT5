@@ -45,6 +45,20 @@ def run():
                     sys.argv.extend(["--num_train_epochs", _ep])
                     print(f">>> [pretrain] num_train_epochs = {_ep}")
 
+                # Tiếp tục train:
+                #  RESUME_FROM_CHECKPOINT = đường dẫn LOCAL tới thư mục checkpoint-XXXX đầy đủ
+                #        (có optimizer/scheduler/trainer_state) -> resume ĐÚNG bước/epoch/LR.
+                #  RESUME_CHECKPOINT_ID   = Drive id của zip checkpoint đầy đủ -> tải rồi resume đúng.
+                #  MODEL_NAME_OR_PATH     = thư mục chỉ có trọng số (vd model tải từ HF) -> WARM-START
+                #        (optimizer/LR khởi tạo lại).
+                for _rk, _rflag in [("RESUME_FROM_CHECKPOINT", "--resume_from_checkpoint"),
+                                    ("RESUME_CHECKPOINT_ID", "--resume_checkpoint_id"),
+                                    ("MODEL_NAME_OR_PATH", "--model_name_or_path")]:
+                    _rv = os.environ.get(_rk, "").strip()
+                    if _rv:
+                        sys.argv.extend([_rflag, _rv])
+                        print(f">>> [pretrain] {_rflag} = {_rv}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
