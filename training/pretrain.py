@@ -473,6 +473,20 @@ def main(args_list=None):
         pretrain_acc_fn=pretrain_acc_fn,
     )
 
+    # Clean console output: keep only the TRAIN progress bar + eval results.
+    # Swap HF's default tqdm ProgressCallback (which also draws an eval bar and
+    # prints every train-step loss/lr) for CleanProgressCallback. Only applies to
+    # the non-notebook (bash) path where ProgressCallback is active.
+    try:
+        from transformers.trainer_callback import ProgressCallback, PrinterCallback
+        from training.metrics import CleanProgressCallback
+        if any(isinstance(cb, ProgressCallback) for cb in trainer.callback_handler.callbacks):
+            trainer.remove_callback(ProgressCallback)
+            trainer.remove_callback(PrinterCallback)
+            trainer.add_callback(CleanProgressCallback())
+    except Exception as _e:
+        print(f"ℹ️ Could not install CleanProgressCallback ({_e}); using default logging.")
+
     # Fast method-correctness gate: in smoke/mock mode, verify a single batch
     # exercises MLM + ITM + TWC correctly before spending time on the loop.
     if training_args.smoke_test:
