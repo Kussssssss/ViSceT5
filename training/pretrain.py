@@ -152,6 +152,8 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     cs   = out.get("contrastive_scores")
     o2r  = out.get("o2r_block")
     lm, li, lt = out.get("loss_mlm"), out.get("loss_itm"), out.get("loss_twc")
+    lg = out.get("loss_gen")
+    gen_on = out.get("gen_loss") is not None
 
     # ── DIAGNOSTIC DUMP (always printed, so you can SEE where a problem is) ──
     print(f"\n[diag] batch size = {k}")
@@ -161,7 +163,8 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     print(f"    TWC  contrastive_scores: {_tensor_health(cs)}")
 
     print("[diag] loss components:")
-    for nm, lv in [("loss_mlm", lm), ("loss_itm", li), ("loss_twc", lt), ("TOTAL", total)]:
+    for nm, lv in [("loss_mlm", lm), ("loss_itm", li), ("loss_twc", lt),
+                   ("loss_gen", lg), ("TOTAL", total)]:
         if lv is None:
             print(f"    {nm:9s}: None")
         else:
@@ -227,6 +230,15 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
             chk("[TWC] labels have positives (>0.5)", bool((o2r > 0.5).any()))
             chk("[TWC] labels have negatives (==0)", bool((o2r == 0.0).any()))
         chk("[TWC] loss_twc finite & > 0", lt is not None and bool(torch.isfinite(lt).all()) and lt.item() > 0)
+
+    # ── GEN checks (only when a generative decoder objective is active) ────
+    if gen_on:
+        gl = out.get("gen_loss")
+        chk("[GEN] gen_loss produced", gl is not None)
+        chk("[GEN] gen_loss finite & > 0",
+            gl is not None and bool(torch.isfinite(gl).all()) and gl.item() > 0,
+            f"gen_loss={gl.item():.4f}" if gl is not None else "MISSING")
+        chk("[GEN] gen_loss requires grad", gl is not None and bool(gl.requires_grad))
 
     # ── total + backward + per-submodule gradient localization ─────────────
     chk("[TOTAL] loss finite", bool(torch.isfinite(total).all()))
@@ -441,8 +453,10 @@ def main(args_list=None):
 
     # Apply config overrides
     mode = model_args.loss_ablation_mode
-    use_twc = mode in ["all", "only_twc_ocr_aug"]
-    use_ocr_aug = mode in ["all", "only_twc_ocr_aug"]
+    # 'gen_all' = generative decoder pretrain + MLM/ITM/TWC auxiliaries (needs OCR-aug + TWC).
+    # 'gen'     = generative decoder pretrain + MLM/ITM only (no TWC/OCR-aug).
+    use_twc = mode in ["all", "only_twc_ocr_aug", "gen_all"]
+    use_ocr_aug = mode in ["all", "only_twc_ocr_aug", "gen_all"]
     
     model.pretrain = True
     model.config.pretrain = True

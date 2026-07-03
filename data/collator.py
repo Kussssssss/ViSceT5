@@ -58,7 +58,9 @@ class ViT5VQADataCollator:
 
         self.use_ocr_aug_pretrain = self.pretrain_ablation_mode in [
             "full",
+            "all",
             "only_twc_ocr_aug",
+            "gen_all",
         ]
 
         self.use_ocr_aug_finetune = bool(
@@ -690,6 +692,14 @@ class ViT5VQADataCollator:
             twa_char_list, twa_char_mask_list, twa_word_ids_list, ocr_to_word_map_list = [], [], [], []
             ocr_mask_token_list, ocr_mask_box_list, ocr_lbl_tok_list, ocr_msk_inp_list = [], [], [], []
 
+            # Generative-decoder pretrain (read-scene-text): in 'gen'/'gen_all' the
+            # decoder is trained to GENERATE the scene text (target below), using a
+            # finetune-shaped forward (question-only encoder). Target = OCR tokens of
+            # the (pollute-source) image joined in spotter order; this matches the OCR
+            # feature branch the decoder must learn to read from. See pretrain_decoder_plan.md.
+            _gen_mode = str(getattr(self, "pretrain_ablation_mode", "")).lower().strip() in ("gen", "gen_all")
+            gen_target_texts = []
+
             # QUAN TRỌNG: Nối OCR vào câu hỏi để làm OCR-Aware MLM
             combined_texts = []
             for i in range(B):
@@ -725,6 +735,13 @@ class ViT5VQADataCollator:
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
                 info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
                 norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
+
+                if _gen_mode:
+                    # Reading-order (spotter order) scene-text string as the decoder
+                    # generation target. Cap length to the answer-length regime.
+                    _rt = [t.strip() for t in raw_texts
+                           if isinstance(t, str) and t.strip() and t.strip() not in ("<pad>", "</s>")]
+                    gen_target_texts.append(" ".join(_rt[:48]))
 
                 if use_ocr_aug:
                     pad_ocr, rel_ocr, o2r, r2o, _ = self._findRelatedOCR_adr(norm_tokens, current_max_len, adv_pro, self.contrastive_label_list, self.editlen)
@@ -812,6 +829,22 @@ class ViT5VQADataCollator:
                 batch_dict["o2r_labels"] = None
                 batch_dict["r2o_labels"] = None
                 batch_dict["twc_group_ids"] = None
+
+            if _gen_mode:
+                # Encoder input = QUESTION ONLY (q_tok, computed above) — matches the
+                # finetune text branch (no OCR-as-text), so the decoder must read the
+                # scene text from the OCR feature branch, not copy it. Target = OCR
+                # reading string; pad -> -100 so short targets don't dominate.
+                gen_cap = min(64, self.txt_max_len)
+                gen_tok = self.tokenizer(
+                    gen_target_texts, padding="max_length", truncation=True,
+                    max_length=gen_cap, return_tensors="pt",
+                )
+                gen_labels = gen_tok.input_ids.clone()
+                gen_labels[gen_labels == self.pad_id] = -100
+                batch_dict["gen_input_ids"] = q_tok.input_ids.to(pixel_values.device)
+                batch_dict["gen_attention_mask"] = q_tok.attention_mask.to(pixel_values.device)
+                batch_dict["gen_labels"] = gen_labels.to(pixel_values.device)
 
             return batch_dict
 

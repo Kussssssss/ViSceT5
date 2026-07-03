@@ -59,6 +59,14 @@ def run():
                         sys.argv.extend([_rflag, _rv])
                         print(f">>> [pretrain] {_rflag} = {_rv}")
 
+                # Chọn mục tiêu pretrain qua env LOSS_ABLATION_MODE:
+                #   all (mặc định) | only_twc_ocr_aug | only_itm_mlm |
+                #   gen_all (decoder read-scene-text + MLM/ITM/TWC phụ trợ) | gen (+ MLM/ITM)
+                _mode = os.environ.get("LOSS_ABLATION_MODE", "").strip()
+                if _mode:
+                    sys.argv.extend(["--loss_ablation_mode", _mode])
+                    print(f">>> [pretrain] loss_ablation_mode = {_mode}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
