@@ -430,7 +430,14 @@ def main(args_list=None):
             state_dict = torch.load(bin_path, map_location="cpu")
         if state_dict:
             new_state_dict = {k[7:] if k.startswith("module.") else k: v for k, v in state_dict.items()}
-            model.load_state_dict(new_state_dict, strict=False)
+            res = model.load_state_dict(new_state_dict, strict=False)
+            n_model = len(model.state_dict())
+            n_loaded = n_model - len(res.missing_keys)
+            print(f"✅ Loaded {n_loaded}/{n_model} model tensors from checkpoint "
+                  f"({len(new_state_dict)} in ckpt) | missing={len(res.missing_keys)} | "
+                  f"unexpected={len(res.unexpected_keys)}")
+            if n_loaded < 0.5 * n_model:
+                print("🚨 CẢNH BÁO: <50% tensor được nạp — trọng số gần như KHÔNG chuyển sang!")
 
     # Apply config overrides
     mode = model_args.loss_ablation_mode
