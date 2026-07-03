@@ -503,6 +503,8 @@ def main(args_list=None):
 
     print(">>> Starting Pretrain...")
     if training_args.resume_from_checkpoint:
+        from training.metrics import seed_train_metrics_from_checkpoint
+        seed_train_metrics_from_checkpoint(training_args.output_dir, training_args.resume_from_checkpoint)
         train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     else:
         train_result = trainer.train()

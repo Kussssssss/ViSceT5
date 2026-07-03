@@ -58,6 +58,38 @@ class CleanProgressCallback(ProgressCallback):
             self.training_bar.write(line)
         else:
             print(line, flush=True)
+
+
+def seed_train_metrics_from_checkpoint(output_dir, checkpoint_dir):
+    """On resume, prepend the checkpoint's HF log_history into the custom
+    train_metrics files so they CONTINUE (append) instead of starting empty in a
+    fresh session — i.e. resume adds to the history, never overwrites it.
+    No-op if the local metrics file already has content (same-session resume)."""
+    import os, json
+    if not checkpoint_dir:
+        return
+    ts = os.path.join(checkpoint_dir, "trainer_state.json")
+    if not os.path.exists(ts):
+        return
+    jsonl = os.path.join(output_dir, "train_metrics.jsonl")
+    summary = os.path.join(output_dir, "train_metrics_summary.log")
+    if os.path.exists(jsonl) and os.path.getsize(jsonl) > 0:
+        return  # history already present in this output_dir; append() will continue it
+    try:
+        hist = json.load(open(ts, encoding="utf-8")).get("log_history", [])
+        os.makedirs(output_dir, exist_ok=True)
+        with open(jsonl, "a", encoding="utf-8") as f:
+            for e in hist:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+        with open(summary, "a", encoding="utf-8") as f:
+            f.write(f"# ==== resumed; {len(hist)} prior log entries carried over from "
+                    f"{os.path.basename(checkpoint_dir)} ====\n")
+        print(f"↩️  Carried over {len(hist)} prior log entries from "
+              f"{os.path.basename(checkpoint_dir)} (metrics continuity).")
+    except Exception as e:
+        print(f"ℹ️ Could not seed train metrics from checkpoint ({e}).")
+
+
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
