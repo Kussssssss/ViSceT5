@@ -140,8 +140,24 @@ class ViT5PretrainLoss(nn.Module):
 
         mode = self.pretrain_ablation_mode
 
+        # Generative-decoder pretrain loss (read-scene-text). Stamped by the model
+        # in 'gen'/'gen_all' modes. This is the primary lever for a seq2seq answer
+        # generator (see pretrain_decoder_plan.md): it trains the decoder that
+        # finetune actually uses, which MLM/ITM/TWC do not.
+        gen_loss = model_output.get("gen_loss", None)
+
         if mode in ["full", "all"]:
             total_loss = mlm_loss + pollute_loss + contrastive_loss
+
+        elif mode in ["gen_all", "gen"]:
+            if gen_loss is None:
+                raise RuntimeError(
+                    "gen/gen_all mode requires model_output['gen_loss']. Check that the "
+                    "collator emits gen_labels (pretrain_ablation_mode in gen/gen_all) and "
+                    "the model runs the generative decoder pass."
+                )
+            # gen is the trunk; MLM/ITM/TWC kept as 0.5-weighted auxiliary regularizers.
+            total_loss = gen_loss + 0.5 * (mlm_loss + pollute_loss + contrastive_loss)
 
         elif mode in ["only_twc_ocr_aug", "no_mlm_itm", "w/o_mlm_itm", "without_mlm_itm"]:
             if logits_per_image is None or o2r_block is None:
@@ -166,6 +182,9 @@ class ViT5PretrainLoss(nn.Module):
         model_output["loss_mlm"] = mlm_loss.detach()
         model_output["loss_itm"] = pollute_loss.detach()
         model_output["loss_twc"] = contrastive_loss.detach()
+        model_output["loss_gen"] = (
+            gen_loss.detach() if gen_loss is not None else mlm_loss.detach() * 0.0
+        )
         return total_loss
 
 class BaseMetric:
@@ -285,6 +304,8 @@ class GlobalPretrainAccuracy(BaseMetric):
         loss_mlm = model_output.get("loss_mlm", torch.tensor(0.0)).item()
         loss_itm = model_output.get("loss_itm", torch.tensor(0.0)).item()
         loss_twc = model_output.get("loss_twc", torch.tensor(0.0)).item()
+        _lg = model_output.get("loss_gen", torch.tensor(0.0))
+        loss_gen = _lg.item() if torch.is_tensor(_lg) else float(_lg or 0.0)
 
         # 3. Tính Total Acc tùy mode
         if self.mode == "only_twc_ocr_aug":
@@ -294,13 +315,14 @@ class GlobalPretrainAccuracy(BaseMetric):
         else:
             total_acc = (mlm_acc + itm_acc + twc_acc) / 3.0
 
-        # TRẢ VỀ 1 TENSOR CHỨA 8 GIÁ TRỊ ĐỂ TRAINER THU THẬP
+        # TRẢ VỀ 1 TENSOR CHỨA 9 GIÁ TRỊ ĐỂ TRAINER THU THẬP
         # [0] total_acc  [1] mlm_itm_acc  [2] twc_acc  [3] loss_mlm
         # [4] loss_itm   [5] loss_twc     [6] twc_pos_recall  [7] twc_neg_recall
+        # [8] loss_gen (read-scene-text generative decoder loss; 0 when gen off)
         device = model_output["textcls_scores"].device
         return torch.tensor(
             [total_acc, (mlm_acc + itm_acc)/2.0, twc_acc,
              loss_mlm, loss_itm, loss_twc,
-             twc_pos_recall, twc_neg_recall],
+             twc_pos_recall, twc_neg_recall, loss_gen],
             device=device
         )

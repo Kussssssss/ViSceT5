@@ -161,5 +161,6 @@ checkpoints/
 
 # Notebooks
 *.ipynb
-# ...except the curated, token-free Colab runner
+# ...except the curated, token-free Colab runners
 !notebooks/finetune_colab.ipynb
+!notebooks/pretrain_colab.ipynb

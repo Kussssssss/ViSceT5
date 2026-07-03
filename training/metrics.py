@@ -177,6 +177,8 @@ def simple_pretrain_aggregator(eval_pred):
         if mean_vals.shape[0] >= 8:
             result["twc_pos_recall"] = float(mean_vals[6])
             result["twc_neg_recall"] = float(mean_vals[7])
+        if mean_vals.shape[0] >= 9:
+            result["loss_gen"] = float(mean_vals[8])
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
