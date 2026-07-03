@@ -83,12 +83,31 @@ def run():
             print("\n>>> [Step 3] Starting Finetune Training...")
             try:
                 sys.argv = ["finetune.py", "configs/finetune.yaml"]
-                
+
+                _fep = os.environ.get("NUM_TRAIN_EPOCHS", "").strip()
+                if _fep:
+                    sys.argv.extend(["--num_train_epochs", _fep])
+                    print(f">>> [finetune] num_train_epochs = {_fep}")
+
+                # Nạp trọng số PRETRAIN để finetune (warm-start):
+                #  MODEL_NAME_OR_PATH = thư mục local chứa model.safetensors của pretrain
+                #                       (vd tải checkpoint pretrain từ HF về).
+                #  PRETRAIN_WEIGHTS_ID = Drive id zip checkpoint pretrain (tự tải + nạp).
+                # Resume một lần finetune đang dở: RESUME_FROM_CHECKPOINT / RESUME_CHECKPOINT_ID.
+                for _fk, _fflag in [("MODEL_NAME_OR_PATH", "--model_name_or_path"),
+                                    ("PRETRAIN_WEIGHTS_ID", "--pretrain_weights_id"),
+                                    ("RESUME_FROM_CHECKPOINT", "--resume_from_checkpoint"),
+                                    ("RESUME_CHECKPOINT_ID", "--resume_checkpoint_id")]:
+                    _fv = os.environ.get(_fk, "").strip()
+                    if _fv:
+                        sys.argv.extend([_fflag, _fv])
+                        print(f">>> [finetune] {_fflag} = {_fv}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
                     sys.argv.extend(["--smoke_test", "True"])
-                    
+
                 from training import finetune
                 importlib.reload(finetune)
                 finetune.main()
