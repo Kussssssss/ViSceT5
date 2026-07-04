@@ -221,12 +221,6 @@ class OpenViVQAModel(PreTrainedModel):
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
         self.post_init()
 
-        # Partial vision unfreeze (representation learning): applied AFTER post_init
-        # so it isn't overridden. n=0 keeps the fully-frozen backbone (default).
-        _vuf = int(getattr(config, "vision_unfreeze_last_n", 0))
-        if _vuf > 0 and hasattr(self.qa_clip, "unfreeze_last_layers"):
-            self.qa_clip.unfreeze_last_layers(_vuf)
-
     # --- Các hàm đồng bộ cơ bản ---
     def sync_tokenizer_ids(self, tokenizer, persist_dir: Optional[str] = None):
         if tokenizer.pad_token_id is None: tokenizer.pad_token_id = self.config.pad_token_id
@@ -701,9 +695,6 @@ class OpenViVQAModel(PreTrainedModel):
         o2r_labels: Optional[torch.FloatTensor] = None,
         r2o_labels: Optional[torch.FloatTensor] = None,
         twc_group_ids: Optional[torch.LongTensor] = None,
-        gen_input_ids: Optional[torch.LongTensor] = None,
-        gen_attention_mask: Optional[torch.LongTensor] = None,
-        gen_labels: Optional[torch.LongTensor] = None,
         return_visual_search_debug: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -1055,40 +1046,6 @@ class OpenViVQAModel(PreTrainedModel):
                                     _diag_r = torch.diagonal(_r2ob).clone()
                                     out_dict["r2o_block"] = torch.where(
                                         _inherit, _diag_r.unsqueeze(0).expand(_M, _M), _r2ob)
-
-            # ── Generative decoder pretrain (read-scene-text) ────────────────
-            # The biggest gap vs TWA's transfer: TWA's answer predictor is a
-            # POINTER network over OCR-token features that pretrain (TWC) sharpens,
-            # so pretrain flows straight into answer selection. Our answer path is
-            # a generative T5 decoder, which MLM/ITM/TWC barely train (answer
-            # labels are all -100). Here we additionally train the decoder to
-            # GENERATE the scene text via the SAME finetune-shaped forward
-            # (question-only text + image + OCR features), so the pretrained
-            # decoder↔encoder cross-attention matches what finetune uses. Reuses
-            # the battle-tested finetune path via pretrain=False (same trick as
-            # .generate()); no encoder duplication. gen_labels is supplied by the
-            # collator only in 'gen'/'gen_all' modes.
-            if gen_labels is not None and gen_input_ids is not None:
-                _orig_pretrain = self.pretrain
-                self.pretrain = False
-                try:
-                    gen_out = self.forward(
-                        input_ids=gen_input_ids,
-                        attention_mask=gen_attention_mask,
-                        pixel_values=pixel_values,
-                        pil_images=pil_images,
-                        ocr_info=ocr_info,
-                        ocr_mask_token=ocr_mask_token,
-                        ocr_mask_box=ocr_mask_box,
-                        labels=gen_labels,
-                        twa_ocr_char=twa_ocr_char,
-                        twa_ocr_char_mask=twa_ocr_char_mask,
-                        twa_word_ids=twa_word_ids,
-                        ocr_to_word_map=ocr_to_word_map,
-                    )
-                finally:
-                    self.pretrain = _orig_pretrain
-                out_dict["gen_loss"] = gen_out.get("loss")
 
             if return_visual_search_debug:
                 out_dict["vs_debug"] = vs_out

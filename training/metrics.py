@@ -361,6 +361,42 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             self._running_acc = 0.0
             self._running_cnt = 0
 
+    def _pretrain_gen_loss(self, model, inputs):
+        """Read-scene-text GENERATIVE loss for pretrain, computed WITHOUT modifying
+        models/: reuse the model's EXISTING finetune forward path (question-only
+        encoder + gen_labels) by temporarily flipping `pretrain`. This keeps the
+        gen objective a pure PRETRAIN-METHOD concern. Returns an in-graph loss
+        tensor, or None if the collator didn't emit gen targets (non-gen modes).
+        """
+        if inputs.get("gen_labels") is None or inputs.get("gen_input_ids") is None:
+            return None
+        base = model
+        for _ in range(4):
+            if hasattr(base, "module"):
+                base = base.module
+            else:
+                break
+        orig = getattr(base, "pretrain", False)
+        base.pretrain = False
+        try:
+            gen_out = model(
+                input_ids=inputs.get("gen_input_ids"),
+                attention_mask=inputs.get("gen_attention_mask"),
+                pixel_values=inputs.get("pixel_values"),
+                pil_images=inputs.get("pil_images"),
+                ocr_info=inputs.get("ocr_info"),
+                ocr_mask_token=inputs.get("ocr_mask_token"),
+                ocr_mask_box=inputs.get("ocr_mask_box"),
+                labels=inputs.get("gen_labels"),
+                twa_ocr_char=inputs.get("twa_ocr_char"),
+                twa_ocr_char_mask=inputs.get("twa_ocr_char_mask"),
+                twa_word_ids=inputs.get("twa_word_ids"),
+                ocr_to_word_map=inputs.get("ocr_to_word_map"),
+            )
+        finally:
+            base.pretrain = orig
+        return gen_out.get("loss") if isinstance(gen_out, dict) else None
+
     def compute_loss(self, model, inputs, return_outputs=False):
         if "tag_pollute" in inputs and inputs["tag_pollute"].ndim > 1:
             inputs["tag_pollute"] = inputs["tag_pollute"].squeeze(-1)
@@ -370,6 +406,9 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         if getattr(model, "pretrain", False):
             loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
             acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
+            gen_loss = self._pretrain_gen_loss(model, inputs)
+            if gen_loss is not None:
+                outputs["gen_loss"] = gen_loss
             loss = loss_fn(inputs, outputs)
             self._log_pretrain_metrics(loss, inputs, outputs)
 
@@ -409,6 +448,9 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
                 acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
                 outputs = model(**inputs)
+                gen_loss = self._pretrain_gen_loss(model, inputs)
+                if gen_loss is not None:
+                    outputs["gen_loss"] = gen_loss
                 loss = loss_fn(inputs, outputs)
                 acc_tensor = acc_fn.calculate(inputs, outputs)
 

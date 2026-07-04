@@ -76,7 +76,7 @@ Chia theo *thứ được luyện*. Mục tiêu: học đặc trưng tốt, khô
 
 ## 5. Lộ trình đề xuất (ưu tiên theo tác động × bản chất transfer)
 
-1. **Mở băng một phần vision** (vài lớp cuối CLIP-vision) — điều kiện cần để mọi mục tiêu vision/grounding có ý nghĩa. ✅ **ĐÃ TRIỂN KHAI** (nhánh `exp/pretrain-gen-all`): config/arg `vision_unfreeze_last_n` (env `VISION_UNFREEZE_LAST_N`) → mở băng N block vision cuối + `post_layernorm` qua `QACLIPEncoder.unfreeze_last_layers`. n=2 ≈ +14.2M params trainable; n=0 = giữ đóng băng (mặc định).
+1. **Mở băng một phần vision** (vài lớp cuối CLIP-vision) — điều kiện cần để mọi mục tiêu vision/grounding có ý nghĩa. ✅ **ĐÃ TRIỂN KHAI** (nhánh `exp/pretrain-gen-all`): arg/env `vision_unfreeze_last_n` / `VISION_UNFREEZE_LAST_N`, áp dụng bằng `requires_grad` **trong `training/pretrain.py`** (KHÔNG sửa `models/`) → mở băng N block vision cuối + `post_layernorm` chỉ trong pretrain. n=2 ≈ +14.2M params; n=0 = giữ đóng băng (mặc định). Vì làm ở tầng training nên finetune (dựng lại model) hoàn toàn không bị ảnh hưởng.
 2. **TWC Việt-hoá + OCR-denoise generative** — đưa error-tolerance vào cả encoder (TWC) lẫn decoder (denoise). *(Việt-hoá/denoise: đã có xử lý tiếng Việt + denoise một phần — chưa sửa lại ở đợt này theo yêu cầu.)*
 3. **Fine-grained OCR↔region alignment** (dùng bbox) — thay ITM thô.
 4. **Layout-aware objective** — tận dụng toạ độ.

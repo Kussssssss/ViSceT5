@@ -86,20 +86,25 @@ Kỳ vọng: (mới) > (cũ) ≈ (scratch). Nếu (mới) không hơn → xem l�
 ## ĐÃ TRIỂN KHAI (2026-07-03) — mode `gen_all`
 Cơ chế: pretrain chạy thêm **1 lượt decoder theo đúng đường finetune** (encoder question-only + ảnh
 + OCR-feature) để sinh **read-scene-text** (chuỗi OCR đọc theo thứ tự spotter). Tái dùng nhánh finetune
-qua `self.pretrain=False` (giống `.generate()`) — KHÔNG nhân đôi code encoder. `gen` là trục
-(hệ số 1.0), MLM/ITM/TWC là phụ trợ (hệ số 0.5).
+qua `self.pretrain=False` (giống `.generate()`). `gen` là trục (hệ số 1.0), MLM/ITM/TWC là phụ trợ (0.5).
 
-Files đã sửa:
+> **RÀNG BUỘC QUAN TRỌNG (2026-07-03): KHÔNG sửa `models/`.** Toàn bộ logic gen + vision-unfreeze nằm ở
+> tầng **training/data** để finetune (dựng lại model từ config) không bị ảnh hưởng. Lượt decoder gen được
+> gọi TỪ TRAINER (`_pretrain_gen_loss`) chứ không nhúng vào `model.forward`. Model modules == `main`.
+
+Files đã sửa (chỉ training/data):
 - `data/collator.py`: nhánh pretrain, khi mode∈{gen,gen_all} phát thêm `gen_input_ids` (=question-only
   `q_tok`), `gen_attention_mask`, `gen_labels` (=OCR reading string, cap 64 token, pad→-100).
-- `models/openvivqa_model.py`: cuối nhánh pretrain, nếu có `gen_labels` → gọi đệ quy forward (pretrain=False)
-  với `labels=gen_labels` → `out_dict["gen_loss"]`.
+- `training/metrics.py`: `TaskSpecificTrainer._pretrain_gen_loss` chạy lượt finetune-forward (flip
+  `pretrain=False`) để lấy `gen_loss`, stamp vào `outputs["gen_loss"]` trong `compute_loss` + `prediction_step`.
+  `simple_pretrain_aggregator` báo `loss_gen`.
 - `training/pretraine_loss.py`: mode `gen_all/gen`: `total = gen_loss + 0.5*(mlm+itm+twc)`; stamp `loss_gen`;
   metric vector nới lên 9 phần tử (index 8 = loss_gen).
-- `training/metrics.py`: `simple_pretrain_aggregator` báo `loss_gen`.
-- `training/pretrain.py`: `use_twc/use_ocr_aug` bật cho `gen_all`; smoke-test `_verify_pretrain_batch`
-  thêm nhóm check `[GEN]`.
-- `run_pipeline.py`: env passthrough `LOSS_ABLATION_MODE`.
+- `training/pretrain.py`: `use_twc/use_ocr_aug` bật cho `gen_all`; **vision unfreeze bằng `requires_grad`**
+  (đọc `--vision_unfreeze_last_n`) sau `model.to(DEVICE)`; smoke `_verify_pretrain_batch` chạy gen-forward + check `[GEN]`.
+- `configs/arguments.py`: thêm arg `vision_unfreeze_last_n`.
+- `run_pipeline.py`: env passthrough `LOSS_ABLATION_MODE`, `VISION_UNFREEZE_LAST_N`.
+- `models/*`, `configs/model_config.py`: **KHÔNG đổi** (== main).
 
 Chạy: `STAGE=pretrain LOSS_ABLATION_MODE=gen_all MOCK_TEST=true bash run_all_colab.sh` (smoke 1-batch),
 rồi bỏ `MOCK_TEST` để chạy full. Đọc dòng `[GEN] gen_loss finite & > 0` + `loss_gen` trong eval.
