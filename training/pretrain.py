@@ -546,6 +546,10 @@ def main(args_list=None):
     use_ocr_aug = mode in ["all", "only_twc_ocr_aug", "gen_all"]
     
     model.pretrain = True
+    # Marks this model instance as being in the PRETRAIN stage so the forward's
+    # numerical guard (fused_seq nan_to_num) activates even inside the gen forward
+    # (which flips self.pretrain=False). Finetune never sets this → forward untouched.
+    model._pretrain_stage = True
     model.config.pretrain = True
     model.config.pretrain_ablation_mode = mode
     model.config.use_twc = use_twc
