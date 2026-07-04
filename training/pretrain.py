@@ -315,6 +315,63 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     print("🔬 [VERIFY] All pretrain components OK — proceeding to the short training loop.\n")
 
 
+def _mlm_masked_acc(out, batch, device):
+    """MLM token-accuracy on masked (label != -1) & non-polluted positions."""
+    logits = out["textcls_scores"].detach()
+    tgt = batch["cmb_text_mask_label"].to(logits.device)
+    B, L, V = logits.shape
+    pollute = batch["tag_pollute"].to(logits.device).float().view(B, 1).expand(B, L)
+    mask = (tgt != -1) & (pollute <= 0.5)
+    n = int(mask.sum().item())
+    if n == 0:
+        return float("nan"), 0
+    pred = logits.argmax(-1)
+    return (pred[mask] == tgt[mask]).float().mean().item(), n
+
+
+def _diagnose_mlm_crutch(model, data_collator, dataset, device):
+    """
+    Measure the MLM "copy crutch": how much MLM relies on the OCR-FEATURE branch.
+    Compare MLM masked-token accuracy (a) FULL vs (b) with the OCR-feature branch
+    ABLATED (twa_word_ids -> pad, so those positions are masked out of attention).
+    Small drop => MLM solves masked OCR from the TEXT branch (the crutch), NOT from
+    the feature branch => feature branch under-trained. Large drop => MLM genuinely
+    needs the feature branch. Run under each mask mode to compare.
+    """
+    print("\n" + "=" * 70)
+    print("🔍 [DIAG] MLM 'copy-crutch' — reliance on the OCR-feature branch")
+    print("=" * 70)
+    k = min(8, len(dataset))
+    if k < 2:
+        print("  skip (need >= 2 samples)"); return
+    batch = data_collator([dataset[i] for i in range(k)])
+    batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
+    model.eval()
+    with torch.no_grad():
+        out_full = model(**batch)
+        acc_full, n = _mlm_masked_acc(out_full, batch, device)
+        b2 = dict(batch)
+        if batch.get("twa_word_ids") is not None:
+            b2["twa_word_ids"] = torch.full_like(batch["twa_word_ids"], data_collator.pad_id)
+        b2["o2r_labels"] = None; b2["r2o_labels"] = None; b2["twc_group_ids"] = None
+        try:
+            out_abl = model(**b2)
+            acc_abl, _ = _mlm_masked_acc(out_abl, batch, device)
+        except Exception as e:
+            print(f"  (ablated forward failed: {type(e).__name__}: {e})"); acc_abl = float("nan")
+    print(f"  mask mode                    : {getattr(data_collator, 'mlm_mask_mode', '?')}")
+    print(f"  masked positions (clean)     : {n}")
+    print(f"  MLM acc — FULL               : {acc_full:.3f}")
+    print(f"  MLM acc — OCR-feature ABLATED : {acc_abl:.3f}")
+    if acc_full == acc_full and acc_abl == acc_abl:
+        drop = acc_full - acc_abl
+        print(f"  → DROP = {drop:.3f}")
+        print("     drop nhỏ  = MLM ít dùng nhánh OCR-feature (giải bằng text = 'nạng')")
+        print("     drop lớn  = MLM buộc phải dùng nhánh OCR-feature (grounding tốt)")
+    print("=" * 70 + "\n")
+    model.train()
+
+
 def _progress_only_mode():
     """
     True when we should show only the trainer's tqdm progress bar and suppress the
@@ -533,6 +590,8 @@ def main(args_list=None):
         data_collator.set_mode(pretrain=True, mask_prob=0.15)
     data_collator.pretrain_ablation_mode = mode
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
+    data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
+    print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode}")
 
     # 6. Trainer
     trainer = TaskSpecificTrainer(
@@ -568,6 +627,9 @@ def main(args_list=None):
             model, data_collator, train_dataset,
             pretrain_loss_fn, pretrain_acc_fn, DEVICE, use_twc,
         )
+        # (b) Measure the MLM copy-crutch (feature-branch reliance) under the current
+        # mask mode. Run pretrain twice (MLM_MASK_MODE=wholeword vs subword) to compare.
+        _diagnose_mlm_crutch(model, data_collator, train_dataset, DEVICE)
 
     print(">>> Starting Pretrain...")
     if training_args.resume_from_checkpoint:

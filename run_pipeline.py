@@ -73,6 +73,12 @@ def run():
                     sys.argv.extend(["--vision_unfreeze_last_n", _vuf])
                     print(f">>> [pretrain] vision_unfreeze_last_n = {_vuf}")
 
+                # MLM mask granularity: wholeword (mặc định) | subword (cho ablation A/B).
+                _mmm = os.environ.get("MLM_MASK_MODE", "").strip()
+                if _mmm:
+                    sys.argv.extend(["--mlm_mask_mode", _mmm])
+                    print(f">>> [pretrain] mlm_mask_mode = {_mmm}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")

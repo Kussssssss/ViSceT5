@@ -34,6 +34,10 @@ class ModelArguments:
         default=0,
         metadata={"help": "Unfreeze last N CLIP vision layers (+post_layernorm) so pretrain learns visual features. 0 = frozen backbone."}
     )
+    mlm_mask_mode: str = field(
+        default="wholeword",
+        metadata={"help": "Pretrain MLM masking granularity: 'wholeword' (mask whole OCR/question word, TWA-faithful) or 'subword' (old BERT per-subword, for A/B ablation)."}
+    )
 
 @dataclass
 class DataArguments:
