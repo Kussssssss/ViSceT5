@@ -346,11 +346,12 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) >= 6:
                 mlm_itm_a, twc_a = batch_acc[1].item(), batch_acc[2].item()
                 mlm_l, itm_l, twc_l = batch_acc[3].item(), batch_acc[4].item(), batch_acc[5].item()
+                gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0
                 print(
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
                     f"Batch Detail -> Acc(M+I):{mlm_itm_a:.3f}, Acc(TWC):{twc_a:.3f} | "
-                    f"Loss(M):{mlm_l:.3f}, Loss(I):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}"
+                    f"Loss(M):{mlm_l:.3f}, Loss(I):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(GEN):{gen_l:.3f}"
                 )
             else:
                 print(

@@ -339,35 +339,41 @@ def _diagnose_mlm_crutch(model, data_collator, dataset, device):
     needs the feature branch. Run under each mask mode to compare.
     """
     print("\n" + "=" * 70)
-    print("🔍 [DIAG] MLM 'copy-crutch' — reliance on the OCR-feature branch")
+    print("🔍 [DIAG] MLM 'copy-crutch' A/B — reliance on the OCR-feature branch")
+    print("   (model chưa train ở smoke → nhìn để ĐẢM BẢO code chạy + so tương đối;")
+    print("    số DROP có ý nghĩa nhất SAU khi train — xem lại ở eval/full run)")
     print("=" * 70)
     k = min(8, len(dataset))
     if k < 2:
         print("  skip (need >= 2 samples)"); return
-    batch = data_collator([dataset[i] for i in range(k)])
-    batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
+    tok = data_collator.tokenizer
+    orig_mode = getattr(data_collator, "mlm_mask_mode", "wholeword")
     model.eval()
-    with torch.no_grad():
-        out_full = model(**batch)
-        acc_full, n = _mlm_masked_acc(out_full, batch, device)
-        b2 = dict(batch)
-        if batch.get("twa_word_ids") is not None:
-            b2["twa_word_ids"] = torch.full_like(batch["twa_word_ids"], data_collator.pad_id)
-        b2["o2r_labels"] = None; b2["r2o_labels"] = None; b2["twc_group_ids"] = None
-        try:
-            out_abl = model(**b2)
-            acc_abl, _ = _mlm_masked_acc(out_abl, batch, device)
-        except Exception as e:
-            print(f"  (ablated forward failed: {type(e).__name__}: {e})"); acc_abl = float("nan")
-    print(f"  mask mode                    : {getattr(data_collator, 'mlm_mask_mode', '?')}")
-    print(f"  masked positions (clean)     : {n}")
-    print(f"  MLM acc — FULL               : {acc_full:.3f}")
-    print(f"  MLM acc — OCR-feature ABLATED : {acc_abl:.3f}")
-    if acc_full == acc_full and acc_abl == acc_abl:
-        drop = acc_full - acc_abl
-        print(f"  → DROP = {drop:.3f}")
-        print("     drop nhỏ  = MLM ít dùng nhánh OCR-feature (giải bằng text = 'nạng')")
-        print("     drop lớn  = MLM buộc phải dùng nhánh OCR-feature (grounding tốt)")
+    for mode in ["wholeword", "subword"]:
+        data_collator.mlm_mask_mode = mode
+        batch = data_collator([dataset[i] for i in range(k)])
+        batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
+        with torch.no_grad():
+            out_full = model(**batch)
+            acc_full, n = _mlm_masked_acc(out_full, batch, device)
+            b2 = dict(batch)
+            if batch.get("twa_word_ids") is not None:
+                b2["twa_word_ids"] = torch.full_like(batch["twa_word_ids"], data_collator.pad_id)
+            b2["o2r_labels"] = None; b2["r2o_labels"] = None; b2["twc_group_ids"] = None
+            try:
+                out_abl = model(**b2)
+                acc_abl, _ = _mlm_masked_acc(out_abl, batch, device)
+            except Exception as e:
+                print(f"  (ablated forward failed: {type(e).__name__}: {e})"); acc_abl = float("nan")
+        # decode what got masked in sample 0 (shows whole-word vs subword)
+        lab0 = batch["cmb_text_mask_label"][0].tolist()
+        masked_ids = [t for t in lab0 if t != -1]
+        sample = tok.decode(masked_ids) if masked_ids else "(none)"
+        drop = (acc_full - acc_abl) if (acc_full == acc_full and acc_abl == acc_abl) else float("nan")
+        print(f"  [{mode:9s}] masked={n:4d} | acc FULL={acc_full:.3f} | acc OCR-ablated={acc_abl:.3f} | DROP={drop:.3f}")
+        print(f"             mask-targets(sample0): {sample[:120]}")
+    data_collator.mlm_mask_mode = orig_mode
+    print("  → kỳ vọng: wholeword DROP lớn hơn subword (buộc dùng feature nhiều hơn)")
     print("=" * 70 + "\n")
     model.train()
 
