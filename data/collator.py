@@ -77,6 +77,14 @@ class ViT5VQADataCollator:
         else:
           self.txt_max_len = int(getattr(self.cfg, "text_max_input_length", 32))
 
+        # MLM masking granularity for pretrain:
+        #   "wholeword" — decide masking at WORD level, then tokenize, so a multi-subword
+        #                 OCR word (e.g. 'pepsi'->['▁p','ep','si']) is masked as ONE unit
+        #                 (all its subwords) → removes the intra-word subword copy shortcut,
+        #                 forcing recovery from OCR-feature/image/context (TWA-faithful).
+        #   "subword"   — old per-subword BERT masking (kept for A/B ablation).
+        self.mlm_mask_mode = str(getattr(self.cfg, "mlm_mask_mode", "wholeword")).lower().strip()
+
         self.tgt_max_len = int(getattr(self.cfg, "text_max_target_length", 56))
         self.char_max_num = int(getattr(self.cfg, "char_max_num", 50))
 
@@ -315,6 +323,50 @@ class ViT5VQADataCollator:
         keep_box = box[idx_tensor]
 
         return keep_t, keep_det, keep_rec, keep_box
+
+    def _whole_word_mask(self, words, seed):
+        """Whole-word MLM masking (TWA-faithful): decide masking at the WORD level,
+        THEN tokenize, so a multi-subword word ('pepsi'->['▁p','ep','si']) is masked
+        as ONE unit (all its subwords) — no intra-word subword to copy from. Returns
+        (input_ids, labels, attention_mask), each length self.txt_max_len. 80/10/10
+        (mask/random/keep) applied per WORD. Deterministic per `seed`."""
+        rng = random.Random(int(seed) & 0x7FFFFFFF)
+        max_len = self.txt_max_len
+        vocab = int(getattr(self.tokenizer, "vocab_size", 32000))
+        ids, labels = [], []
+        for w in words:
+            if len(ids) >= max_len - 1:
+                break
+            sub = self.tokenizer.encode(w, add_special_tokens=False)
+            if not sub:
+                continue
+            if rng.random() < self.mask_prob:
+                r2 = rng.random()  # one decision for the whole word
+                for sid in sub:
+                    labels.append(int(sid))
+                    if r2 < 0.8:
+                        ids.append(self.mask_token_id)          # [MASK]
+                    elif r2 < 0.9:
+                        ids.append(rng.randrange(vocab))         # random
+                    else:
+                        ids.append(int(sid))                     # keep
+            else:
+                for sid in sub:
+                    ids.append(int(sid)); labels.append(-1)
+        # truncate (leave room for EOS), append EOS, pad
+        ids = ids[:max_len - 1] + [self.eos_id]
+        labels = labels[:max_len - 1] + [-1]
+        attn = [1] * len(ids)
+        while len(ids) < max_len:
+            ids.append(self.pad_id); labels.append(-1); attn.append(0)
+        # fallback: guarantee ≥1 masked position (else MLM loss has no target)
+        if all(l == -1 for l in labels):
+            for k in range(len(ids)):
+                if attn[k] == 1 and ids[k] not in (self.pad_id, self.eos_id):
+                    labels[k] = ids[k]; ids[k] = self.mask_token_id; break
+        return (torch.tensor(ids, dtype=torch.long),
+                torch.tensor(labels, dtype=torch.long),
+                torch.tensor(attn, dtype=torch.long))
 
     def _random_word(self, tokens, tokenizer, mask_prob, gen, pad_id):
         if mask_prob <= 0.0: return tokens.clone(), torch.full_like(tokens, -1)
@@ -702,6 +754,7 @@ class ViT5VQADataCollator:
 
             # QUAN TRỌNG: Nối OCR vào câu hỏi để làm OCR-Aware MLM
             combined_texts = []
+            words_per_i = []
             for i in range(B):
                 src_idx = pollute_indices[i]
                 ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
@@ -709,25 +762,38 @@ class ViT5VQADataCollator:
 
                 # Nối câu hỏi và OCR lại
                 combined_texts.append(f"{qs[i]} {' '.join(raw_texts)}".strip())
+                # Danh sách TỪ (câu hỏi + OCR) để mask theo whole-word
+                _ow = [t for t in raw_texts if isinstance(t, str) and t.strip()]
+                words_per_i.append((qs[i].split() if isinstance(qs[i], str) else []) + _ow)
 
-            # Tokenize chuỗi kết hợp (Cần đảm bảo self.txt_max_len đủ lớn, vd: 128)
-            q_tok_cmb = self.tokenizer(combined_texts, padding="max_length", truncation=True, max_length=self.txt_max_len, return_tensors="pt")
+            if self.mlm_mask_mode == "wholeword":
+                # 1a. WHOLE-WORD masking: quyết định mask ở mức TỪ rồi mới ghép subword →
+                # 'pepsi' bị mask trọn cả 3 subword, không còn subword để copy.
+                attn_list = []
+                for i in range(B):
+                    m_ids, qlab, attn = self._whole_word_mask(words_per_i[i], seeds[i] ^ 0x5A5A5A5A)
+                    masked_q_ids_list.append(m_ids)
+                    q_mask_label_list.append(qlab)
+                    attn_list.append(attn)
+                cmb_attention_mask = torch.stack(attn_list)
+            else:
+                # 1b. SUBWORD masking (BERT-style) — giữ cho ablation A/B.
+                q_tok_cmb = self.tokenizer(combined_texts, padding="max_length", truncation=True, max_length=self.txt_max_len, return_tensors="pt")
+                for i in range(B):
+                    gen = torch.Generator(device=q_tok_cmb.input_ids.device)
+                    gen.manual_seed((seeds[i] ^ 0x5A5A5A5A) & 0xFFFFFFFFFFFFFFFF)
+                    m_ids, qlab = self._random_word(q_tok_cmb.input_ids[i], self.tokenizer, self.mask_prob, gen, self.pad_id)
+                    attn = q_tok_cmb.attention_mask[i]
+                    qlab[attn == 0] = -1; m_ids[attn == 0] = self.pad_id
 
-            # 1. ĐỤC LỖ TRÊN CHUỖI ĐÃ NỐI (MLM)
-            for i in range(B):
-                gen = torch.Generator(device=q_tok_cmb.input_ids.device)
-                gen.manual_seed((seeds[i] ^ 0x5A5A5A5A) & 0xFFFFFFFFFFFFFFFF)
-                m_ids, qlab = self._random_word(q_tok_cmb.input_ids[i], self.tokenizer, self.mask_prob, gen, self.pad_id)
-                attn = q_tok_cmb.attention_mask[i]
-                qlab[attn == 0] = -1; m_ids[attn == 0] = self.pad_id
+                    if (qlab != -1).sum() == 0:
+                        valid = (attn == 1) & (q_tok_cmb.input_ids[i] != self.pad_id) & (q_tok_cmb.input_ids[i] != self.eos_id)
+                        idxs = torch.nonzero(valid, as_tuple=False)
+                        if idxs.numel() > 0: j = idxs[0, 0].item(); qlab[j] = q_tok_cmb.input_ids[i][j]; m_ids[j] = self.mask_token_id
 
-                if (qlab != -1).sum() == 0:
-                    valid = (attn == 1) & (q_tok_cmb.input_ids[i] != self.pad_id) & (q_tok_cmb.input_ids[i] != self.eos_id)
-                    idxs = torch.nonzero(valid, as_tuple=False)
-                    if idxs.numel() > 0: j = idxs[0, 0].item(); qlab[j] = q_tok_cmb.input_ids[i][j]; m_ids[j] = self.mask_token_id
-
-                masked_q_ids_list.append(m_ids)
-                q_mask_label_list.append(qlab)
+                    masked_q_ids_list.append(m_ids)
+                    q_mask_label_list.append(qlab)
+                cmb_attention_mask = q_tok_cmb.attention_mask
 
             # 2. XỬ LÝ LUỒNG OCR ĐỂ TÍNH TWC (GIỮ NGUYÊN VẸN, KHÔNG ĐỤC LỖ)
             for i in range(B):
@@ -806,7 +872,7 @@ class ViT5VQADataCollator:
             batch_dict = {
                 # Chỉ đưa chuỗi Text (đã nối OCR) vào làm Text Branch
                 "mlm_input_ids": torch.stack(masked_q_ids_list).to(pixel_values.device),
-                "attention_mask": q_tok_cmb.attention_mask.to(pixel_values.device),
+                "attention_mask": cmb_attention_mask.to(pixel_values.device),
 
                 # Label là nhãn đục lỗ của chuỗi Text trên
                 "cmb_text_mask_label": torch.stack(q_mask_label_list).to(pixel_values.device),
