@@ -145,7 +145,31 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     model.train()
     model.zero_grad(set_to_none=True)
     out = model(**batch)
-    total = loss_fn(batch, out)  # stamps loss_mlm / loss_itm / loss_twc into `out`
+    # Read-scene-text GEN loss via the model's existing finetune path (pretrain flipped
+    # off) — same mechanism the trainer uses; keeps the gen objective in the pretrain
+    # method, not in models/. Only fires when the collator emitted gen targets.
+    if batch.get("gen_labels") is not None and batch.get("gen_input_ids") is not None:
+        _op = model.pretrain
+        model.pretrain = False
+        try:
+            _gen = model(
+                input_ids=batch.get("gen_input_ids"),
+                attention_mask=batch.get("gen_attention_mask"),
+                pixel_values=batch.get("pixel_values"),
+                pil_images=batch.get("pil_images"),
+                ocr_info=batch.get("ocr_info"),
+                ocr_mask_token=batch.get("ocr_mask_token"),
+                ocr_mask_box=batch.get("ocr_mask_box"),
+                labels=batch.get("gen_labels"),
+                twa_ocr_char=batch.get("twa_ocr_char"),
+                twa_ocr_char_mask=batch.get("twa_ocr_char_mask"),
+                twa_word_ids=batch.get("twa_word_ids"),
+                ocr_to_word_map=batch.get("ocr_to_word_map"),
+            )
+        finally:
+            model.pretrain = _op
+        out["gen_loss"] = _gen.get("loss")
+    total = loss_fn(batch, out)  # stamps loss_mlm / loss_itm / loss_twc / loss_gen into `out`
 
     tcls = out.get("textcls_scores")
     pcls = out.get("pollutecls_scores")
@@ -430,10 +454,6 @@ def main(args_list=None):
         tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
         config = OpenViVQAConfig()
 
-    # Partial vision unfreeze (representation learning) — set on config BEFORE
-    # constructing the model so QACLIP applies it in __init__.
-    config.vision_unfreeze_last_n = int(getattr(model_args, "vision_unfreeze_last_n", 0))
-
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
@@ -469,7 +489,30 @@ def main(args_list=None):
     model.config.use_ocr_aug_finetune = use_ocr_aug
     
     model.to(DEVICE)
-    
+
+    # PRETRAIN-ONLY partial vision unfreeze (representation learning). Done HERE in
+    # the training script via requires_grad — NOT inside models/ — so the model
+    # architecture stays identical to main and finetune (which rebuilds the model)
+    # is completely unaffected. n=0 keeps the frozen backbone (default).
+    _vuf = int(getattr(model_args, "vision_unfreeze_last_n", 0))
+    if _vuf > 0:
+        try:
+            _layers = model.qa_clip.vision_model.encoder.layers
+            _k = min(_vuf, len(_layers)); _cnt = 0
+            for _layer in _layers[-_k:]:
+                for _p in _layer.parameters():
+                    if not _p.requires_grad:
+                        _p.requires_grad = True; _cnt += _p.numel()
+            _pln = getattr(model.qa_clip.vision_model, "post_layernorm", None)
+            if _pln is not None:
+                for _p in _pln.parameters():
+                    if not _p.requires_grad:
+                        _p.requires_grad = True; _cnt += _p.numel()
+            print(f"🧊➡️🔥 [pretrain] vision unfreeze: last {_k}/{len(_layers)} CLIP-vision "
+                  f"layers (+post_layernorm) → +{_cnt:,} params trainable.")
+        except Exception as _e:
+            print(f"⚠️ [pretrain] vision unfreeze skipped ({_e}).")
+
     # 5. Loss, Metrics, Collator
     pretrain_loss_fn = ViT5PretrainLoss(pretrain_ablation_mode=mode)
     pretrain_acc_fn = GlobalPretrainAccuracy(mode=mode)

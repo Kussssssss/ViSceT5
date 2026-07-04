@@ -330,35 +330,6 @@ class QACLIPEncoder(CLIPPreTrainedModel):
             if ('instruct' in n) or ('instruction' in n):
                 p.requires_grad = True
 
-    def unfreeze_last_layers(self, n: int):
-        """Partial vision unfreeze for representation-learning during pretrain.
-
-        Re-enables grad on the LAST `n` CLIP vision encoder blocks plus the final
-        `post_layernorm`, while keeping patch-embeddings + early layers frozen
-        (stable low-level features). No-op if n<=0. Returns #params unfrozen.
-        Only meaningful when freeze_clip=True (otherwise everything already trains).
-        """
-        n = int(n)
-        if n <= 0:
-            return 0
-        layers = self.vision_model.encoder.layers
-        n = min(n, len(layers))
-        unfrozen = 0
-        for layer in layers[-n:]:
-            for p in layer.parameters():
-                if not p.requires_grad:
-                    p.requires_grad = True
-                    unfrozen += p.numel()
-        post_ln = getattr(self.vision_model, "post_layernorm", None)
-        if post_ln is not None:
-            for p in post_ln.parameters():
-                if not p.requires_grad:
-                    p.requires_grad = True
-                    unfrozen += p.numel()
-        print(f"🧊➡️🔥 [QACLIP] unfroze last {n}/{len(layers)} vision layers "
-              f"(+post_layernorm): +{unfrozen:,} params now trainable.")
-        return unfrozen
-
     def init_qavit_comps(self):
         with torch.no_grad():
             for layer in self.vision_model.encoder.layers:

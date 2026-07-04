@@ -78,7 +78,6 @@ class OpenViVQAConfig(PretrainedConfig):
         ocrseq_pool_size: int = 3,
         ocrseq_use_spatial: bool = True,
         ocrseq_dropout: float = 0.1,
-        vision_unfreeze_last_n: int = 0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -92,12 +91,6 @@ class OpenViVQAConfig(PretrainedConfig):
         self.pretrain = bool(pretrain)
         self.pretrain_mask_prob = float(pretrain_mask_prob)
         self.pretrain_mask_seed = int(pretrain_mask_seed)
-
-        # Partial vision unfreeze: N>0 unfreezes the last N CLIP vision encoder
-        # layers (+ final layernorm) so pretrain can actually shape visual
-        # features (representation learning). 0 = fully frozen backbone (only the
-        # instruct/late-fusion comps train, current default).
-        self.vision_unfreeze_last_n = int(vision_unfreeze_last_n)
 
         self.qa_clip_d_text = qa_clip_d_text
         self.pad_token_id = pad_token_id
