@@ -430,6 +430,10 @@ def main(args_list=None):
         tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
         config = OpenViVQAConfig()
 
+    # Partial vision unfreeze (representation learning) — set on config BEFORE
+    # constructing the model so QACLIP applies it in __init__.
+    config.vision_unfreeze_last_n = int(getattr(model_args, "vision_unfreeze_last_n", 0))
+
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
