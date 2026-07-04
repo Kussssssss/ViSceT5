@@ -67,6 +67,12 @@ def run():
                     sys.argv.extend(["--loss_ablation_mode", _mode])
                     print(f">>> [pretrain] loss_ablation_mode = {_mode}")
 
+                # Mở băng N lớp vision cuối để pretrain học đặc trưng thị giác (0/unset = đóng băng).
+                _vuf = os.environ.get("VISION_UNFREEZE_LAST_N", "").strip()
+                if _vuf:
+                    sys.argv.extend(["--vision_unfreeze_last_n", _vuf])
+                    print(f">>> [pretrain] vision_unfreeze_last_n = {_vuf}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")

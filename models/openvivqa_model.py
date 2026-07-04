@@ -221,6 +221,12 @@ class OpenViVQAModel(PreTrainedModel):
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
         self.post_init()
 
+        # Partial vision unfreeze (representation learning): applied AFTER post_init
+        # so it isn't overridden. n=0 keeps the fully-frozen backbone (default).
+        _vuf = int(getattr(config, "vision_unfreeze_last_n", 0))
+        if _vuf > 0 and hasattr(self.qa_clip, "unfreeze_last_layers"):
+            self.qa_clip.unfreeze_last_layers(_vuf)
+
     # --- Các hàm đồng bộ cơ bản ---
     def sync_tokenizer_ids(self, tokenizer, persist_dir: Optional[str] = None):
         if tokenizer.pad_token_id is None: tokenizer.pad_token_id = self.config.pad_token_id

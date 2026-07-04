@@ -28,7 +28,11 @@ class ModelArguments:
     )
     loss_ablation_mode: str = field(
         default="all",
-        metadata={"help": "Pretrain loss ablation mode: 'all', 'only_itm_mlm', or 'only_twc_ocr_aug'"}
+        metadata={"help": "Pretrain loss ablation mode: 'all', 'only_itm_mlm', 'only_twc_ocr_aug', 'gen_all', 'gen'"}
+    )
+    vision_unfreeze_last_n: int = field(
+        default=0,
+        metadata={"help": "Unfreeze last N CLIP vision layers (+post_layernorm) so pretrain learns visual features. 0 = frozen backbone."}
     )
 
 @dataclass
