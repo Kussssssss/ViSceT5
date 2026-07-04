@@ -886,6 +886,16 @@ class OpenViVQAModel(PreTrainedModel):
             for k in list(img_pack.keys()):
                 if k not in ("img_tokens", "img_attn_mask", "patch_scores"): del img_pack[k]
 
+        # PRETRAIN-ONLY numerical guard: QA-CLIP vision (custom MMCLIPAttention) can
+        # nondeterministically emit non-finite values that cascade (img_tokens →
+        # enc_out → all losses = NaN). Sanitize the fused sequence BEFORE the encoder
+        # so pretrain is robust. Gated by `_pretrain_stage` (set only in pretrain.py) so
+        # it also covers the gen forward (which sets self.pretrain=False) yet leaves
+        # finetune — which never sets `_pretrain_stage` — completely untouched.
+        if getattr(self, "_pretrain_stage", False) and not torch.isfinite(fused_seq).all():
+            print("⚠️ [pretrain guard] non-finite in fused_seq (QA-CLIP vision) → nan_to_num")
+            fused_seq = torch.nan_to_num(fused_seq, nan=0.0, posinf=1e4, neginf=-1e4)
+
         # Notebook gốc / TWA paper: dùng mask 1D chuẩn — original và related token
         # được encode cùng nhau với full attention (KHÔNG chặn cross-half).
         enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=fused_mask, return_dict=True)
