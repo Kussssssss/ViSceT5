@@ -329,6 +329,65 @@ def _mlm_masked_acc(out, batch, device):
     return (pred[mask] == tgt[mask]).float().mean().item(), n
 
 
+def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
+    """Human-readable MLM debug: for a few CLEAN samples, show the masked input text
+    and, for each masked WORD, the gold token vs the model's prediction (argmax).
+    Consecutive masked subwords (a whole-word mask) are grouped so it reads at the
+    word level: 'gold=pepsi | pred=pepsi ✓'."""
+    print("\n" + "=" * 70)
+    print("🔎 [MLM DEBUG] câu bị mask → model dự đoán (word-level)")
+    print("=" * 70)
+    k = min(8, len(dataset))
+    if k < 2:
+        print("  skip (need >= 2 samples)"); return
+    tok = data_collator.tokenizer
+    batch = data_collator([dataset[i] for i in range(k)])
+    batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
+    model.eval()
+    with torch.no_grad():
+        out = model(**batch)
+    logits = out.get("textcls_scores")
+    if logits is None:
+        print("  (no textcls_scores)"); model.train(); return
+    pred = logits.argmax(-1)                      # (B, L)
+    ids = batch["mlm_input_ids"]
+    labels = batch["cmb_text_mask_label"]
+    pollute = batch["tag_pollute"].view(-1)
+    pad_id = data_collator.pad_id
+    shown = 0
+    for i in range(ids.size(0)):
+        if int(pollute[i].item()) == 1:
+            continue                              # MLM chỉ tính trên mẫu sạch
+        lab = labels[i].tolist()
+        mask_pos = [p for p, v in enumerate(lab) if v != -1]
+        if not mask_pos:
+            continue
+        # readable masked input (bỏ pad, giữ <extra_id_0>)
+        vis = [int(t) for t in ids[i].tolist() if int(t) != pad_id]
+        inp_txt = tok.decode(vis, skip_special_tokens=False)
+        # gộp các vị trí mask liên tiếp thành 1 "từ"
+        spans, cur = [], [mask_pos[0]]
+        for p in mask_pos[1:]:
+            if p == cur[-1] + 1:
+                cur.append(p)
+            else:
+                spans.append(cur); cur = [p]
+        spans.append(cur)
+        print(f"\n[sample {i}] input(masked): {inp_txt[:160]}")
+        for sp in spans[:8]:
+            gold = tok.decode([lab[p] for p in sp]).strip()
+            prd = tok.decode([int(pred[i][p].item()) for p in sp]).strip()
+            mark = "✓" if gold == prd else "✗"
+            print(f"     mask: gold='{gold}'  →  pred='{prd}'  {mark}")
+        shown += 1
+        if shown >= n_show:
+            break
+    if shown == 0:
+        print("  (không có mẫu sạch nào có vị trí mask trong batch này)")
+    print("=" * 70 + "\n")
+    model.train()
+
+
 def _diagnose_mlm_crutch(model, data_collator, dataset, device):
     """
     Measure the MLM "copy crutch": how much MLM relies on the OCR-FEATURE branch.
@@ -601,7 +660,9 @@ def main(args_list=None):
     data_collator.pretrain_ablation_mode = mode
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
-    print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode}")
+    data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
+    print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
+          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'})")
 
     # 6. Trainer
     trainer = TaskSpecificTrainer(
@@ -649,10 +710,10 @@ def main(args_list=None):
     print(">>> Pretrain Finished. Verifying...")
     verify_metrics = trainer.evaluate()
 
-    # (b) MLM copy-crutch A/B — run AFTER training so acc>0 and the DROP is meaningful
-    # (at init it was 0/0). Compares wholeword vs subword feature-branch reliance.
+    # Readable MLM debug AFTER training: show masked question → model prediction
+    # (word-level). Clearer than the numeric crutch A/B for judging what MLM learned.
     if training_args.smoke_test:
-        _diagnose_mlm_crutch(model, data_collator, val_dataset, DEVICE)
+        _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
 
     # Save best
     trainer.save_model(training_args.output_dir)

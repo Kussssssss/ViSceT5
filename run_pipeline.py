@@ -79,6 +79,13 @@ def run():
                     sys.argv.extend(["--mlm_mask_mode", _mmm])
                     print(f">>> [pretrain] mlm_mask_mode = {_mmm}")
 
+                # OCR trong nhánh text của MLM: 0/false = question-only (giảm nạng, mặc định),
+                # 1/true = question+OCR (cũ, cho A/B).
+                _moit = os.environ.get("MLM_OCR_IN_TEXT", "").strip()
+                if _moit:
+                    sys.argv.extend(["--mlm_ocr_in_text", _moit])
+                    print(f">>> [pretrain] mlm_ocr_in_text = {_moit}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
