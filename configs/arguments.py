@@ -38,6 +38,10 @@ class ModelArguments:
         default="wholeword",
         metadata={"help": "Pretrain MLM masking granularity: 'wholeword' (mask whole OCR/question word, TWA-faithful) or 'subword' (old BERT per-subword, for A/B ablation)."}
     )
+    mlm_ocr_in_text: bool = field(
+        default=False,
+        metadata={"help": "Include OCR tokens in the MLM encoder text branch. False (default) = question-only (removes OCR-as-text copy crutch, aligns with finetune; OCR learned via gen+TWC). True = old question+OCR."}
+    )
 
 @dataclass
 class DataArguments:

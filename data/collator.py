@@ -85,6 +85,13 @@ class ViT5VQADataCollator:
         #   "subword"   — old per-subword BERT masking (kept for A/B ablation).
         self.mlm_mask_mode = str(getattr(self.cfg, "mlm_mask_mode", "wholeword")).lower().strip()
 
+        # Whether the MLM encoder text branch INCLUDES the OCR tokens (concatenated to
+        # the question). False (default) = QUESTION-ONLY → removes the OCR-as-text
+        # "copy crutch" AND aligns the encoder input with finetune (which is also
+        # question-only). OCR is still learned via the OCR-feature branch (gen +
+        # TWC). True = old behaviour (question+OCR), kept for A/B.
+        self.mlm_ocr_in_text = bool(getattr(self.cfg, "mlm_ocr_in_text", False))
+
         self.tgt_max_len = int(getattr(self.cfg, "text_max_target_length", 56))
         self.char_max_num = int(getattr(self.cfg, "char_max_num", 50))
 
@@ -756,15 +763,20 @@ class ViT5VQADataCollator:
             combined_texts = []
             words_per_i = []
             for i in range(B):
-                src_idx = pollute_indices[i]
-                ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
-
-                # Nối câu hỏi và OCR lại
-                combined_texts.append(f"{qs[i]} {' '.join(raw_texts)}".strip())
-                # Danh sách TỪ (câu hỏi + OCR) để mask theo whole-word
-                _ow = [t for t in raw_texts if isinstance(t, str) and t.strip()]
-                words_per_i.append((qs[i].split() if isinstance(qs[i], str) else []) + _ow)
+                _q = qs[i].strip() if isinstance(qs[i], str) else ""
+                _qwords = _q.split()
+                if self.mlm_ocr_in_text:
+                    # Cũ: nối câu hỏi + OCR (còn "nạng" OCR-as-text). Giữ cho A/B.
+                    src_idx = pollute_indices[i]
+                    ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
+                    info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
+                    combined_texts.append(f"{_q} {' '.join(raw_texts)}".strip())
+                    _ow = [t for t in raw_texts if isinstance(t, str) and t.strip()]
+                    words_per_i.append(_qwords + _ow)
+                else:
+                    # GIẢM NẠNG: chỉ câu hỏi (khớp finetune, OCR học qua nhánh feature: gen + TWC)
+                    combined_texts.append(_q)
+                    words_per_i.append(_qwords)
 
             if self.mlm_mask_mode == "wholeword":
                 # 1a. WHOLE-WORD masking: quyết định mask ở mức TỪ rồi mới ghép subword →
