@@ -633,9 +633,6 @@ def main(args_list=None):
             model, data_collator, train_dataset,
             pretrain_loss_fn, pretrain_acc_fn, DEVICE, use_twc,
         )
-        # (b) Measure the MLM copy-crutch (feature-branch reliance) under the current
-        # mask mode. Run pretrain twice (MLM_MASK_MODE=wholeword vs subword) to compare.
-        _diagnose_mlm_crutch(model, data_collator, train_dataset, DEVICE)
 
     print(">>> Starting Pretrain...")
     if training_args.resume_from_checkpoint:
@@ -647,7 +644,12 @@ def main(args_list=None):
 
     print(">>> Pretrain Finished. Verifying...")
     verify_metrics = trainer.evaluate()
-    
+
+    # (b) MLM copy-crutch A/B — run AFTER training so acc>0 and the DROP is meaningful
+    # (at init it was 0/0). Compares wholeword vs subword feature-branch reliance.
+    if training_args.smoke_test:
+        _diagnose_mlm_crutch(model, data_collator, val_dataset, DEVICE)
+
     # Save best
     trainer.save_model(training_args.output_dir)
     

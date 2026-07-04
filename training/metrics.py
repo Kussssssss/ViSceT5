@@ -287,6 +287,18 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             print(f"⚠️  [GradGuard] step {self.state.global_step}: sanitized non-finite grads "
                   f"(zeroed) in submodules {bad} — watch which one recurs to find the source.")
 
+        # PRETRAIN-ONLY vision grad clip. The newly-unfrozen CLIP-vision layers can
+        # produce huge gradients that dominate the GLOBAL clip (max_grad_norm) and
+        # STARVE vit5/OCR of updates (→ loss_mlm/loss_gen stall). Clip qa_clip grads
+        # to a small norm HERE, before the global clip, so vision fine-tunes gently
+        # without hijacking the step. Gated to pretrain so finetune (shared trainer)
+        # is untouched.
+        if getattr(model, "pretrain", False):
+            _vparams = [p for n, p in model.named_parameters()
+                        if p.grad is not None and "qa_clip" in n]
+            if _vparams:
+                torch.nn.utils.clip_grad_norm_(_vparams, max_norm=1.0)
+
         return loss
 
 
