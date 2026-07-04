@@ -1,0 +1,78 @@
+<svg width="100%" viewBox="0 0 680 560" role="img" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif">
+<title>TWA (pointer) vs ViSceT5 (seq2seq): nơi pretrain đổ gradient vs nơi sinh đáp án</title>
+<desc>TWA pretrains one shared trunk that a thin pointer head reads directly (near-total transfer). In ViSceT5 the decoder IS partly trained by MLM but on the wrong task (denoising, not answer generation) with mismatched input; TWC-sharpened z_ocr has no consumer. gen_all pretrains the decoder on the right task and input.</desc>
+<defs>
+<marker id="ah" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="#9AA6B2"/></marker>
+</defs>
+
+<text x="175" y="24" text-anchor="middle" font-size="15" font-weight="700" fill="#1F2937">TWA (M4C / TAP)</text>
+<text x="505" y="24" text-anchor="middle" font-size="15" font-weight="700" fill="#1F2937">ViSceT5 (ViT5 seq2seq)</text>
+
+<!-- legend -->
+<rect x="40" y="40" width="13" height="13" rx="2" fill="#DCF3E4" stroke="#2E9E5B"/>
+<text x="59" y="51" font-size="11.5" fill="#55606B">luyện đúng (transfer tốt)</text>
+<rect x="250" y="40" width="13" height="13" rx="2" fill="#FDF0D9" stroke="#D19125"/>
+<text x="269" y="51" font-size="11.5" fill="#55606B">luyện SAI việc / một phần</text>
+<rect x="470" y="40" width="13" height="13" rx="2" fill="#EDF0F3" stroke="#9AA6B2" stroke-dasharray="4 3"/>
+<text x="489" y="51" font-size="11.5" fill="#55606B">trung tính / ngữ cảnh</text>
+
+<!-- ===== LEFT: TWA ===== -->
+<rect x="40" y="70" width="270" height="46" rx="6" fill="#EDF0F3" stroke="#9AA6B2"/>
+<text x="175" y="91" text-anchor="middle" font-size="13" font-weight="600" fill="#2B3440">Đầu vào</text>
+<text x="175" y="108" text-anchor="middle" font-size="11" fill="#55606B">Q + Objects + OCR-feature</text>
+<line x1="175" y1="116" x2="175" y2="144" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+
+<rect x="40" y="146" width="270" height="46" rx="6" fill="#DCF3E4" stroke="#2E9E5B"/>
+<text x="175" y="167" text-anchor="middle" font-size="13" font-weight="600" fill="#0B5132">MMT — transformer DÙNG CHUNG</text>
+<text x="175" y="184" text-anchor="middle" font-size="11" fill="#2E7D4F">pretrain: TWC + MLM + ITM + RPP</text>
+<line x1="175" y1="192" x2="175" y2="220" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+
+<rect x="40" y="222" width="270" height="46" rx="6" fill="#DCF3E4" stroke="#2E9E5B"/>
+<text x="175" y="243" text-anchor="middle" font-size="13" font-weight="600" fill="#0B5132">z_q · z_obj · z_ocr · z_dec</text>
+<text x="175" y="260" text-anchor="middle" font-size="11" fill="#2E7D4F">đầu ra của CHÍNH MMT đó</text>
+<line x1="175" y1="268" x2="175" y2="296" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+
+<rect x="40" y="298" width="270" height="46" rx="6" fill="#DCF3E4" stroke="#2E9E5B"/>
+<text x="175" y="319" text-anchor="middle" font-size="13" font-weight="600" fill="#0B5132">Pointer head (MỎNG)</text>
+<text x="175" y="336" text-anchor="middle" font-size="11" fill="#2E7D4F">chấm z_dec · z_ocr — Eq.8</text>
+<line x1="175" y1="344" x2="175" y2="372" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+
+<rect x="40" y="374" width="270" height="40" rx="6" fill="#EDF0F3" stroke="#9AA6B2"/>
+<text x="175" y="399" text-anchor="middle" font-size="13" font-weight="600" fill="#2B3440">Đáp án = CHỌN OCR token</text>
+
+<!-- ===== RIGHT: ViSceT5 ===== -->
+<rect x="370" y="70" width="270" height="46" rx="6" fill="#EDF0F3" stroke="#9AA6B2"/>
+<text x="505" y="91" text-anchor="middle" font-size="13" font-weight="600" fill="#2B3440">Đầu vào</text>
+<text x="505" y="108" text-anchor="middle" font-size="11" fill="#55606B">Câu hỏi + ảnh + OCR-feature</text>
+<line x1="505" y1="116" x2="505" y2="144" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+
+<rect x="370" y="146" width="270" height="46" rx="6" fill="#DCF3E4" stroke="#2E9E5B"/>
+<text x="505" y="167" text-anchor="middle" font-size="13" font-weight="600" fill="#0B5132">ViT5 ENCODER</text>
+<text x="505" y="184" text-anchor="middle" font-size="11" fill="#2E7D4F">pretrain: MLM / ITM / TWC ✓</text>
+<line x1="505" y1="192" x2="505" y2="220" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+
+<rect x="370" y="222" width="270" height="46" rx="6" fill="#EDF0F3" stroke="#9AA6B2" stroke-dasharray="5 4"/>
+<text x="505" y="243" text-anchor="middle" font-size="13" font-weight="600" fill="#2B3440">enc_out (ngữ cảnh cross-attn)</text>
+<text x="505" y="260" text-anchor="middle" font-size="11" fill="#55606B">z_ocr do TWC luyện — KO head tiêu thụ</text>
+<line x1="505" y1="268" x2="505" y2="296" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="524" y="286" font-size="11" fill="#55606B">cross-attn</text>
+
+<rect x="370" y="298" width="270" height="46" rx="6" fill="#FDF0D9" stroke="#D19125"/>
+<text x="505" y="317" text-anchor="middle" font-size="12.5" font-weight="600" fill="#7A4E09">ViT5 DECODER (cùng khối, ko lớp riêng)</text>
+<text x="505" y="335" text-anchor="middle" font-size="11" fill="#92620F">MLM denoising ✓ · sinh đáp án ✗</text>
+<line x1="505" y1="344" x2="505" y2="372" stroke="#9AA6B2" stroke-width="1.5" marker-end="url(#ah)"/>
+
+<rect x="370" y="374" width="270" height="40" rx="6" fill="#EDF0F3" stroke="#9AA6B2"/>
+<text x="505" y="399" text-anchor="middle" font-size="13" font-weight="600" fill="#2B3440">Đáp án = SINH subword (tự hồi quy)</text>
+
+<!-- annotations -->
+<text x="175" y="434" text-anchor="middle" font-size="11" fill="#55606B">Pretrain luyện trunk → head mỏng đọc thẳng z_ocr</text>
+<text x="175" y="450" text-anchor="middle" font-size="11" fill="#55606B">→ transfer ~TRỌN VẸN</text>
+<text x="505" y="434" text-anchor="middle" font-size="11" fill="#55606B">Decoder CÓ luyện (MLM) nhưng SAI việc + input lệch</text>
+<text x="505" y="450" text-anchor="middle" font-size="11" fill="#55606B">→ transfer YẾU (≈ from-scratch)</text>
+
+<!-- gen_all fix bar -->
+<rect x="40" y="470" width="600" height="52" rx="6" fill="#DCF3E4" stroke="#2E9E5B"/>
+<text x="340" y="492" text-anchor="middle" font-size="13" font-weight="700" fill="#0B5132">gen_all: luyện decoder ĐÚNG việc + ĐÚNG input (amber → green)</text>
+<text x="340" y="511" text-anchor="middle" font-size="11" fill="#2E7D4F">sinh read-scene-text, encoder = question-only như finetune — nhưng đây mới là warm-up decoder, chưa phải học đặc trưng tối ưu</text>
+</svg>
