@@ -86,6 +86,12 @@ def run():
                     sys.argv.extend(["--mlm_ocr_in_text", _moit])
                     print(f">>> [pretrain] mlm_ocr_in_text = {_moit}")
 
+                # Tác vụ sinh: denoise (VG-OCR-Denoise, sửa lỗi — mặc định) | read (đọc, A/B).
+                _gt = os.environ.get("GEN_TASK", "").strip()
+                if _gt:
+                    sys.argv.extend(["--gen_task", _gt])
+                    print(f">>> [pretrain] gen_task = {_gt}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
