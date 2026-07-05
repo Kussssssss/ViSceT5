@@ -161,10 +161,10 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
                 ocr_mask_token=batch.get("ocr_mask_token"),
                 ocr_mask_box=batch.get("ocr_mask_box"),
                 labels=batch.get("gen_labels"),
-                twa_ocr_char=batch.get("twa_ocr_char"),
-                twa_ocr_char_mask=batch.get("twa_ocr_char_mask"),
-                twa_word_ids=batch.get("twa_word_ids"),
-                ocr_to_word_map=batch.get("ocr_to_word_map"),
+                twa_ocr_char=batch.get("gen_twa_ocr_char", batch.get("twa_ocr_char")),
+                twa_ocr_char_mask=batch.get("gen_twa_ocr_char_mask", batch.get("twa_ocr_char_mask")),
+                twa_word_ids=batch.get("gen_twa_word_ids", batch.get("twa_word_ids")),
+                ocr_to_word_map=batch.get("gen_ocr_to_word_map", batch.get("ocr_to_word_map")),
             )
         finally:
             model.pretrain = _op
@@ -384,6 +384,61 @@ def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
             break
     if shown == 0:
         print("  (không có mẫu sạch nào có vị trí mask trong batch này)")
+    print("=" * 70 + "\n")
+    model.train()
+
+
+def _debug_gen_denoise(model, data_collator, dataset, device, n_show=5):
+    """Readable VG-OCR-Denoise debug: run the gen forward (input OCR = CORRUPTED for
+    'denoise'), and show the CLEAN target reading vs the model's generated reading.
+    Lets you SEE whether the decoder is correcting OCR errors from visual evidence."""
+    print("\n" + "=" * 70)
+    print("🔧 [GEN DEBUG] read/denoise: target(clean) vs model-output")
+    print("=" * 70)
+    k = min(8, len(dataset))
+    if k < 2:
+        print("  skip"); return
+    tok = data_collator.tokenizer
+    batch = data_collator([dataset[i] for i in range(k)])
+    batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
+    if batch.get("gen_labels") is None or batch.get("gen_input_ids") is None:
+        print("  (no gen targets in batch)"); return
+    model.eval()
+    orig = getattr(model, "pretrain", False)
+    model.pretrain = False
+    try:
+        with torch.no_grad():
+            out = model(
+                input_ids=batch.get("gen_input_ids"),
+                attention_mask=batch.get("gen_attention_mask"),
+                pixel_values=batch.get("pixel_values"),
+                pil_images=batch.get("pil_images"),
+                ocr_info=batch.get("ocr_info"),
+                ocr_mask_token=batch.get("ocr_mask_token"),
+                ocr_mask_box=batch.get("ocr_mask_box"),
+                labels=batch.get("gen_labels"),
+                twa_ocr_char=batch.get("gen_twa_ocr_char", batch.get("twa_ocr_char")),
+                twa_ocr_char_mask=batch.get("gen_twa_ocr_char_mask", batch.get("twa_ocr_char_mask")),
+                twa_word_ids=batch.get("gen_twa_word_ids", batch.get("twa_word_ids")),
+                ocr_to_word_map=batch.get("gen_ocr_to_word_map", batch.get("ocr_to_word_map")),
+            )
+    finally:
+        model.pretrain = orig
+    logits = out.get("logits")
+    if logits is None:
+        print("  (no logits)"); model.train(); return
+    pred = logits.argmax(-1)
+    labels = batch["gen_labels"]
+    task = batch.get("gen_task", "denoise")
+    print(f"  gen_task={task} (input OCR {'CORRUPTED' if task == 'denoise' else 'clean'}; target = clean reading)")
+    for i in range(min(n_show, labels.size(0))):
+        pos = [p for p, t in enumerate(labels[i].tolist()) if t != -100]
+        if not pos:
+            continue
+        gold = tok.decode([int(labels[i][p]) for p in pos], skip_special_tokens=True).strip()
+        prd = tok.decode([int(pred[i][p].item()) for p in pos], skip_special_tokens=True).strip()
+        print(f"  [sample {i}] target : {gold[:110]}")
+        print(f"              output : {prd[:110]}")
     print("=" * 70 + "\n")
     model.train()
 
@@ -661,8 +716,10 @@ def main(args_list=None):
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
+    data_collator.gen_task = str(getattr(model_args, "gen_task", "denoise")).lower().strip()
     print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
-          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'})")
+          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | gen_task = {data_collator.gen_task} "
+          f"({'VG-OCR-Denoise (sửa lỗi)' if data_collator.gen_task == 'denoise' else 'read (đọc)'})")
 
     # 6. Trainer
     trainer = TaskSpecificTrainer(
@@ -710,10 +767,11 @@ def main(args_list=None):
     print(">>> Pretrain Finished. Verifying...")
     verify_metrics = trainer.evaluate()
 
-    # Readable MLM debug AFTER training: show masked question → model prediction
-    # (word-level). Clearer than the numeric crutch A/B for judging what MLM learned.
+    # Readable debug AFTER training: (1) MLM masked-question → prediction; (2) gen
+    # read/denoise clean-target → model-output (see if OCR correction is happening).
     if training_args.smoke_test:
         _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
+        _debug_gen_denoise(model, data_collator, val_dataset, DEVICE)
 
     # Save best
     trainer.save_model(training_args.output_dir)
