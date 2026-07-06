@@ -598,15 +598,11 @@ def main(args_list=None):
         training_args.save_total_limit = 1
         # Avoid best-model bookkeeping that needs many aligned eval/save steps.
         training_args.load_best_model_at_end = False
-        # Default: CLEAN output — progress bar + val eval results only, NO continuous
-        # per-step train debug logs (heavy). Opt in with TWC_TRAIN_LOG=1 to see the
-        # per-step Loss(M)/Loss(I)/Loss(TWC) breakdown for debugging.
-        if os.environ.get("TWC_TRAIN_LOG", "").strip().lower() in ("1", "true", "yes"):
-            import training.metrics as _M
-            _M.DEBUG_TRAIN = True
-            _M.LOG_TRAIN_EVERY = training_args.logging_steps
-        else:
-            training_args.disable_tqdm = False
+        # MOCK: ALWAYS print full debug (per-step Loss(M/I/TWC/GEN) + post-train
+        # MLM/GEN debug). No env needed.
+        import training.metrics as _M
+        _M.DEBUG_TRAIN = True
+        _M.LOG_TRAIN_EVERY = training_args.logging_steps
 
     train_dataset = ViT5VQADataset(train_df)
     val_dataset = ViT5VQADataset(val_df)
@@ -755,6 +751,15 @@ def main(args_list=None):
     except Exception as _e:
         print(f"ℹ️ Could not install CleanProgressCallback ({_e}); using default logging.")
 
+    # Debug policy: MOCK always debugs; FULL run debugs ONLY if TWC_TRAIN_LOG=1
+    # (default OFF → only progress bar + val eval, no spam/lag).
+    pretrain_debug = bool(training_args.smoke_test) or (
+        os.environ.get("TWC_TRAIN_LOG", "").strip().lower() in ("1", "true", "yes"))
+    if pretrain_debug and not training_args.smoke_test:
+        import training.metrics as _M
+        _M.DEBUG_TRAIN = True
+        _M.LOG_TRAIN_EVERY = max(1, int(getattr(training_args, "logging_steps", 50)))
+
     # Fast method-correctness gate: in smoke/mock mode, verify a single batch
     # exercises MLM + ITM + TWC correctly before spending time on the loop.
     if training_args.smoke_test:
@@ -774,9 +779,9 @@ def main(args_list=None):
     print(">>> Pretrain Finished. Verifying...")
     verify_metrics = trainer.evaluate()
 
-    # Readable debug AFTER training: (1) MLM masked-question → prediction; (2) gen
-    # read/denoise clean-target → model-output (see if OCR correction is happening).
-    if training_args.smoke_test:
+    # Readable debug AFTER training (MOCK always; FULL only if TWC_TRAIN_LOG=1):
+    # (1) MLM masked-question → prediction; (2) gen read/denoise target → output.
+    if pretrain_debug:
         _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
         _debug_gen_denoise(model, data_collator, val_dataset, DEVICE)
 
