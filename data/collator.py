@@ -92,17 +92,11 @@ class ViT5VQADataCollator:
         # TWC). True = old behaviour (question+OCR), kept for A/B.
         self.mlm_ocr_in_text = bool(getattr(self.cfg, "mlm_ocr_in_text", False))
 
-        # Generative pretext for the decoder:
-        #   "denoise" (default) = VG-OCR-Denoise: feed the CORRUPTED OCR char/word
-        #             (rel_ocr) into the OCR branch but keep the VISUAL features
-        #             (det/rec/box/confidence) intact; target = the CLEAN OCR
-        #             reading → forces the decoder to CORRECT OCR errors using
-        #             visual evidence (the research contribution).
-        #   "read"  = feed CLEAN OCR char/word; target = OCR reading (PreSTU-like,
-        #             DEFAULT). Warms the decoder / read-from-features; no correction claim.
-        # NOTE: "denoise" is OFF by default — its target is the noisy OCR output, which is
-        # hard to defend as "correction" without ground-truth. Revisit via synthetic-GT.
-        self.gen_task = str(getattr(self.cfg, "gen_task", "read")).lower().strip()
+        # Generative pretext for the decoder = READ-SCENE-TEXT (PreSTU-like): feed the
+        # CLEAN OCR char/word + visual features, target = the OCR reading. Warms the
+        # decoder + teaches read-from-features. (The old "denoise" correction pretext was
+        # removed: its target is the noisy OCR output, indefensible without ground-truth;
+        # revisit correction later with a real correct signal — synthetic-GT / multi-OCR.)
 
         self.tgt_max_len = int(getattr(self.cfg, "text_max_target_length", 56))
         self.char_max_num = int(getattr(self.cfg, "char_max_num", 50))
@@ -770,9 +764,8 @@ class ViT5VQADataCollator:
             # feature branch the decoder must learn to read from. See pretrain_decoder_plan.md.
             _gen_mode = str(getattr(self, "pretrain_ablation_mode", "")).lower().strip() in ("gen", "gen_all")
             gen_target_texts = []
-            # OCR branch fed to the gen (read/denoise) forward: for "denoise" we use the
-            # CORRUPTED char/word (rel_ocr) but keep visual features intact via ocr_info;
-            # for "read" we use the CLEAN char/word (pad_ocr). Single OCR set (not doubled).
+            # CLEAN single-set OCR branch fed to the read-scene-text gen forward
+            # (char/word from pad_ocr; det/rec/box come from ocr_info).
             gen_char_list, gen_char_mask_list, gen_word_ids_list, gen_map_list = [], [], [], []
 
             # QUAN TRỌNG: Nối OCR vào câu hỏi để làm OCR-Aware MLM
@@ -843,17 +836,13 @@ class ViT5VQADataCollator:
                     char_a, mask_a, flat_ids_a, lens_a = self._add_cons_ocr_info(pad_ocr, current_max_len)
                     char_b, mask_b, flat_ids_b, lens_b = self._add_cons_ocr_info(rel_ocr, current_max_len)
 
-                    # --- Gen (read/denoise) OCR branch: SINGLE set ---
+                    # --- Gen (read-scene-text) OCR branch: SINGLE CLEAN set ---
                     if _gen_mode:
-                        if self.gen_task == "read":
-                            g_char, g_mask, g_ids, g_lens = char_a, mask_a, flat_ids_a, lens_a  # clean
-                        else:
-                            g_char, g_mask, g_ids, g_lens = char_b, mask_b, flat_ids_b, lens_b  # corrupted
-                        gen_char_list.append(g_char)
-                        gen_char_mask_list.append(g_mask)
-                        gen_word_ids_list.append(g_ids)
+                        gen_char_list.append(char_a)
+                        gen_char_mask_list.append(mask_a)
+                        gen_word_ids_list.append(flat_ids_a)
                         _gmap = []
-                        for j, l in enumerate(g_lens): _gmap.extend([j] * l.item())
+                        for j, l in enumerate(lens_a): _gmap.extend([j] * l.item())
                         gen_map_list.append(torch.tensor(_gmap, dtype=torch.long))
 
                     # Nối Gốc và Augmented (Không hề đục lỗ!)
@@ -952,13 +941,10 @@ class ViT5VQADataCollator:
                 batch_dict["gen_input_ids"] = q_tok.input_ids.to(pixel_values.device)
                 batch_dict["gen_attention_mask"] = q_tok.attention_mask.to(pixel_values.device)
                 batch_dict["gen_labels"] = gen_labels.to(pixel_values.device)
-                batch_dict["gen_task"] = self.gen_task
 
-                # Dedicated (single-set) OCR branch for the gen forward. For "denoise"
-                # these carry the CORRUPTED char/word; det/rec/box (visual) come from the
-                # shared ocr_info (model auto-crops boxes to this word count → first half
-                # = correct boxes). If unavailable (no OCR-aug), gen falls back to the
-                # shared twa_* branch in the trainer.
+                # Dedicated single-set CLEAN OCR branch for the read-scene-text gen forward;
+                # det/rec/box (visual) come from the shared ocr_info (model auto-crops to this
+                # word count). If unavailable, gen falls back to the shared twa_* in the trainer.
                 if gen_word_ids_list:
                     batch_dict["gen_twa_ocr_char"] = torch.stack(gen_char_list).to(pixel_values.device)
                     batch_dict["gen_twa_ocr_char_mask"] = torch.stack(gen_char_mask_list).to(pixel_values.device)

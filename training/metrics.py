@@ -392,9 +392,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         orig = getattr(base, "pretrain", False)
         base.pretrain = False
         try:
-            # Prefer the dedicated gen OCR branch (single set; for "denoise" it carries
-            # CORRUPTED char/word so the decoder must correct using intact visual
-            # features). Fall back to the shared TWC branch if not provided.
+            # Prefer the dedicated single-set CLEAN gen OCR branch (read-scene-text);
+            # fall back to the shared TWC branch if not provided.
             gen_out = model(
                 input_ids=inputs.get("gen_input_ids"),
                 attention_mask=inputs.get("gen_attention_mask"),
