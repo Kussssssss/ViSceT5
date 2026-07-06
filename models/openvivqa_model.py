@@ -427,6 +427,13 @@ class OpenViVQAModel(PreTrainedModel):
                 if det_word_all.size(0) != N_word:
                     if det_word_all.size(0) > N_word:
                         det_word_all = det_word_all[:N_word]
+                    elif det_word_all.size(0) > 0 and N_word % det_word_all.size(0) == 0:
+                        # OCR-aug branch [clean;noisy]: augmented tokens are the SAME
+                        # image regions (only the TEXT is corrupted) → TILE det/rec so the
+                        # augmented half shares the original's visual features, consistent
+                        # with boxes (which the collator already duplicates). Previously
+                        # zero-padded → augmented tokens lost their visual features.
+                        det_word_all = det_word_all.repeat(N_word // det_word_all.size(0), 1)
                     else:
                         pad_d = torch.zeros(N_word - det_word_all.size(0), det_word_all.size(-1), device=device, dtype=self.target_dtype)
                         det_word_all = torch.cat([det_word_all, pad_d], dim=0)
@@ -447,6 +454,10 @@ class OpenViVQAModel(PreTrainedModel):
                 if rec_word_all.size(0) != N_word:
                     if rec_word_all.size(0) > N_word:
                         rec_word_all = rec_word_all[:N_word]
+                    elif rec_word_all.size(0) > 0 and N_word % rec_word_all.size(0) == 0:
+                        # See det note: tile so the augmented half reuses the original's
+                        # recognition features (same region), not zeros.
+                        rec_word_all = rec_word_all.repeat(N_word // rec_word_all.size(0), 1)
                     else:
                         pad_r = torch.zeros(N_word - rec_word_all.size(0), rec_word_all.size(-1), device=device, dtype=self.target_dtype)
                         rec_word_all = torch.cat([rec_word_all, pad_r], dim=0)

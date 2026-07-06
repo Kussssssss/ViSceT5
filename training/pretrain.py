@@ -395,12 +395,12 @@ def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
     model.train()
 
 
-def _debug_gen_denoise(model, data_collator, dataset, device, n_show=5):
-    """Readable VG-OCR-Denoise debug: run the gen forward (input OCR = CORRUPTED for
-    'denoise'), and show the CLEAN target reading vs the model's generated reading.
-    Lets you SEE whether the decoder is correcting OCR errors from visual evidence."""
+def _debug_gen_read(model, data_collator, dataset, device, n_show=5):
+    """Readable read-scene-text debug: run the gen forward and show the target OCR
+    reading vs the model's generated reading (how well the decoder reads scene text
+    from the image + OCR features)."""
     print("\n" + "=" * 70)
-    print("🔧 [GEN DEBUG] read/denoise: target(clean) vs model-output")
+    print("🔧 [GEN DEBUG] read-scene-text: target vs model-output")
     print("=" * 70)
     k = min(8, len(dataset))
     if k < 2:
@@ -436,8 +436,7 @@ def _debug_gen_denoise(model, data_collator, dataset, device, n_show=5):
         print("  (no logits)"); model.train(); return
     pred = logits.argmax(-1)
     labels = batch["gen_labels"]
-    task = batch.get("gen_task", "denoise")
-    print(f"  gen_task={task} (input OCR {'CORRUPTED' if task == 'denoise' else 'clean'}; target = clean reading)")
+    print("  (input OCR = clean; target = OCR reading)")
     for i in range(min(n_show, labels.size(0))):
         pos = [p for p, t in enumerate(labels[i].tolist()) if t != -100]
         if not pos:
@@ -719,10 +718,8 @@ def main(args_list=None):
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
-    data_collator.gen_task = str(getattr(model_args, "gen_task", "denoise")).lower().strip()
     print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
-          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | gen_task = {data_collator.gen_task} "
-          f"({'VG-OCR-Denoise (sửa lỗi)' if data_collator.gen_task == 'denoise' else 'read (đọc)'})")
+          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | gen = read-scene-text")
 
     # 6. Trainer
     trainer = TaskSpecificTrainer(
@@ -784,10 +781,10 @@ def main(args_list=None):
     verify_metrics = trainer.evaluate()
 
     # Readable debug AFTER training (MOCK always; FULL only if TWC_TRAIN_LOG=1):
-    # (1) MLM masked-question → prediction; (2) gen read/denoise target → output.
+    # (1) MLM masked-question → prediction; (2) gen read-scene-text target → output.
     if pretrain_debug:
         _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
-        _debug_gen_denoise(model, data_collator, val_dataset, DEVICE)
+        _debug_gen_read(model, data_collator, val_dataset, DEVICE)
 
     # Save best
     trainer.save_model(training_args.output_dir)
