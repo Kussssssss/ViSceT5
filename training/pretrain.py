@@ -755,9 +755,13 @@ def main(args_list=None):
     # (default OFF → only progress bar + val eval, no spam/lag).
     pretrain_debug = bool(training_args.smoke_test) or (
         os.environ.get("TWC_TRAIN_LOG", "").strip().lower() in ("1", "true", "yes"))
-    if pretrain_debug and not training_args.smoke_test:
-        import training.metrics as _M
-        _M.DEBUG_TRAIN = True
+    # ALWAYS set the flag (True or False). `training.metrics.DEBUG_TRAIN` is module-level
+    # state that PERSISTS across importlib.reload(pretrain) (metrics isn't reloaded), so a
+    # prior mock run in the same kernel would otherwise leave it True → full run spams
+    # [Pretrain] logs. Forcing it here guarantees full-run = clean unless TWC_TRAIN_LOG=1.
+    import training.metrics as _M
+    _M.DEBUG_TRAIN = bool(pretrain_debug)
+    if pretrain_debug:
         _M.LOG_TRAIN_EVERY = max(1, int(getattr(training_args, "logging_steps", 50)))
 
     # Fast method-correctness gate: in smoke/mock mode, verify a single batch
