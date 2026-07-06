@@ -43,8 +43,8 @@ class ModelArguments:
         metadata={"help": "Include OCR tokens in the MLM encoder text branch. False (default) = question-only (removes OCR-as-text copy crutch, aligns with finetune; OCR learned via gen+TWC). True = old question+OCR."}
     )
     gen_task: str = field(
-        default="denoise",
-        metadata={"help": "Generative pretext: 'denoise' (VG-OCR-Denoise: corrupted OCR char/word + intact visual features -> generate CLEAN reading; the correction contribution) or 'read' (clean OCR -> clean reading, PreSTU-like, for A/B)."}
+        default="read",
+        metadata={"help": "Generative pretext: 'read' (DEFAULT, PreSTU-like read-scene-text: warms decoder, no correction claim) or 'denoise' (experimental VG-OCR-Denoise; OFF by default because its target is the noisy OCR output, which is hard to defend without GT — revisit with synthetic-GT)."}
     )
 
 @dataclass

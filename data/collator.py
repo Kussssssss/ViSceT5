@@ -98,9 +98,11 @@ class ViT5VQADataCollator:
         #             (det/rec/box/confidence) intact; target = the CLEAN OCR
         #             reading → forces the decoder to CORRECT OCR errors using
         #             visual evidence (the research contribution).
-        #   "read"  = feed CLEAN OCR char/word; target = clean reading (PreSTU-like,
-        #             for A/B ablation).
-        self.gen_task = str(getattr(self.cfg, "gen_task", "denoise")).lower().strip()
+        #   "read"  = feed CLEAN OCR char/word; target = OCR reading (PreSTU-like,
+        #             DEFAULT). Warms the decoder / read-from-features; no correction claim.
+        # NOTE: "denoise" is OFF by default — its target is the noisy OCR output, which is
+        # hard to defend as "correction" without ground-truth. Revisit via synthetic-GT.
+        self.gen_task = str(getattr(self.cfg, "gen_task", "read")).lower().strip()
 
         self.tgt_max_len = int(getattr(self.cfg, "text_max_target_length", 56))
         self.char_max_num = int(getattr(self.cfg, "char_max_num", 50))
