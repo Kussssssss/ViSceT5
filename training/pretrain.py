@@ -373,12 +373,19 @@ def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
             else:
                 spans.append(cur); cur = [p]
         spans.append(cur)
-        print(f"\n[sample {i}] input(masked): {inp_txt[:160]}")
-        for sp in spans[:8]:
-            gold = tok.decode([lab[p] for p in sp]).strip()
-            prd = tok.decode([int(pred[i][p].item()) for p in sp]).strip()
-            mark = "✓" if gold == prd else "✗"
-            print(f"     mask: gold='{gold}'  →  pred='{prd}'  {mark}")
+        print(f"\n[sample {i}] input(masked): {inp_txt[:180]}")
+        print(f"     (#mask positions={len(mask_pos)}, gộp thành {len(spans)} từ)")
+        for wi, sp in enumerate(spans[:10]):
+            gold_ids = [int(lab[p]) for p in sp]
+            pred_ids = [int(pred[i][p].item()) for p in sp]
+            gold_toks = tok.convert_ids_to_tokens(gold_ids)   # subword tokens (thô)
+            pred_toks = tok.convert_ids_to_tokens(pred_ids)
+            gold_word = tok.decode(gold_ids).strip()           # gộp lại thành word
+            pred_word = tok.decode(pred_ids).strip()
+            mark = "✓" if gold_word == pred_word else "✗"
+            print(f"     từ {wi} @pos{sp[0]}..{sp[-1]}:")
+            print(f"        gold: tokens={gold_toks} → '{gold_word}'")
+            print(f"        pred: tokens={pred_toks} → '{pred_word}'  {mark}")
         shown += 1
         if shown >= n_show:
             break
