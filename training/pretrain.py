@@ -229,10 +229,14 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     def chk(name, ok, detail=""):
         checks.append((name, bool(ok), detail))
 
-    # ── MLM checks ────────────────────────────────────────────────────────
-    chk("[MLM] head produced logits", tcls is not None)
-    chk("[MLM] has masked positions", int((batch["cmb_text_mask_label"] != -1).sum()) > 0)
-    chk("[MLM] loss_mlm finite", lm is not None and bool(torch.isfinite(lm).all()))
+    # ── MLM checks (only when encoder-head MLM is active; DROPPED in cloze modes) ──
+    if not gen_on:
+        chk("[MLM] head produced logits", tcls is not None)
+        chk("[MLM] has masked positions", int((batch["cmb_text_mask_label"] != -1).sum()) > 0)
+        chk("[MLM] loss_mlm finite", lm is not None and bool(torch.isfinite(lm).all()))
+    else:
+        print("  ℹ️ [MLM] encoder-head MLM dropped in cloze mode — masked-prediction "
+              "is done by the decoder (grounded-cloze / span-infill).")
 
     # ── ITM checks ────────────────────────────────────────────────────────
     chk("[ITM] head produced logits", pcls is not None)
@@ -728,8 +732,14 @@ def main(args_list=None):
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
-    print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
-          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | decoder = grounded-cloze")
+    _cloze = str(mode).lower().strip() in ("gen", "gen_all")
+    if _cloze:
+        print(">>> [pretrain] objective = ITM + TWC (encoder) + grounded-cloze span-infill "
+              "(DECODER, single masked-prediction; encoder-head MLM dropped) | "
+              "mask = OCR-overlap + random spans, distinct <extra_id_i>, question-only encoder")
+    else:
+        print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
+              f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | (legacy encoder-MLM path)")
 
     # 6. Trainer
     trainer = TaskSpecificTrainer(
@@ -790,11 +800,14 @@ def main(args_list=None):
     print(">>> Pretrain Finished. Verifying...")
     verify_metrics = trainer.evaluate()
 
-    # Readable debug AFTER training (MOCK always; FULL only if TWC_TRAIN_LOG=1):
-    # (1) MLM masked-question → prediction; (2) grounded-cloze masked word → output.
+    # Readable debug AFTER training (MOCK always; FULL only if TWC_TRAIN_LOG=1).
+    # In cloze modes the decoder span-infill IS the masked-prediction; encoder-head
+    # MLM is dropped, so only the cloze debug is meaningful.
     if pretrain_debug:
-        _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
-        _debug_gen_cloze(model, data_collator, val_dataset, DEVICE)
+        if _cloze:
+            _debug_gen_cloze(model, data_collator, val_dataset, DEVICE)
+        else:
+            _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
 
     # Save best
     trainer.save_model(training_args.output_dir)
