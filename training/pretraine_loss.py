@@ -151,16 +151,16 @@ class ViT5PretrainLoss(nn.Module):
             total_loss = mlm_loss + pollute_loss + contrastive_loss
 
         elif mode in ["gen_all", "gen"]:
-            if gen_loss is None:
-                raise RuntimeError(
-                    "gen/gen_all mode requires model_output['gen_loss']. Check that the "
-                    "collator emits gen_labels (pretrain_ablation_mode in gen/gen_all) and "
-                    "the trainer runs the grounded-cloze decoder pass."
-                )
             # Full method (MLM + ITM + TWC) as before, PLUS the grounded-cloze decoder
             # objective — all four co-equal (cloze target is clean, no down-weighting
             # needed as with the old noisy read-scene-text trunk).
-            total_loss = mlm_loss + pollute_loss + contrastive_loss + gen_loss
+            total_loss = mlm_loss + pollute_loss + contrastive_loss
+            if gen_loss is not None:
+                total_loss = total_loss + gen_loss
+            # else: this batch has NO cloze span (no question∩OCR overlap this batch —
+            # ~48% of samples carry none, so a small batch can be fully empty). Train
+            # the encoder objectives only; the decoder just skips this batch. Not an
+            # error — grounded-cloze is intentionally sparse.
 
         elif mode in ["only_twc_ocr_aug", "no_mlm_itm", "w/o_mlm_itm", "without_mlm_itm"]:
             if logits_per_image is None or o2r_block is None:
