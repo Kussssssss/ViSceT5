@@ -58,19 +58,26 @@ def _cloze_core(word: str) -> str:
     return _CLOZE_EDGE_PUNCT.sub("", nw)
 
 
-def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8):
-    """Return (masked_question, target, n_spans) for grounded-cloze.
+def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
+                          rand_prob: float = 0.15, seed: int = 0):
+    """Return (masked_question, target, n_spans) — the SINGLE T5 span-infilling
+    objective for the decoder (this replaces the old encoder-head MLM).
 
-    masked_question : question with each OCR-overlapping content word replaced by
-                      a T5 sentinel (<extra_id_i>).
-    target          : "<extra_id_0> w0 <extra_id_1> w1 ... <extra_id_k>" (clean words).
-    n_spans         : number of masked words (0 => no grounding signal this sample).
-    Only EXACT normalized matches against OCR words are masked (reliable tier;
-    fuzzy matching is dropped — Vietnamese minimal-pairs make it unreliable).
+    Masking is BIASED toward grounding but always non-empty:
+      • GROUNDED spans: content words that appear (exact-normalized) in the OCR →
+        the decoder must READ the OCR feature branch to recover them.
+      • RANDOM spans: a few other content words (T5-style span corruption) → keeps a
+        language-model signal and guarantees ~100% coverage (grounded-only was ~52%).
+    Consecutive masked words are MERGED into one span (T5-native): a run gets a single
+    <extra_id_i> and the target emits "<extra_id_i> w0 w1 ...". Distinct sentinels per
+    span (never one shared <extra_id_0>) so the decoder can address each blank.
+
+    masked_question : question with each masked run replaced by one <extra_id_i>.
+    target          : "<extra_id_0> ... <extra_id_1> ... <extra_id_k>" (clean words).
+    n_spans         : number of spans (0 only if the question has no content word).
     """
     if not isinstance(question, str):
         return "", "", 0
-    # Build the set of normalized OCR words (split multi-word spotter tokens).
     ocr_set: Set[str] = set()
     for t in ocr_norm_tokens:
         for sub in str(t).split():
@@ -78,18 +85,42 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8):
                 ocr_set.add(sub)
 
     words = question.strip().split()
-    in_parts, tgt_parts, sid = [], [], 0
-    for w in words:
-        core = _cloze_core(w)
-        is_content = len(core) >= 3 and _remove_vietnamese_accents(core) not in _CLOZE_STOP
-        if sid < max_spans and is_content and core in ocr_set:
+    cores = [_cloze_core(w) for w in words]
+    is_content = [len(c) >= 3 and _remove_vietnamese_accents(c) not in _CLOZE_STOP for c in cores]
+
+    to_mask = [False] * len(words)
+    # 1) grounded: content words present in OCR
+    for i in range(len(words)):
+        if is_content[i] and cores[i] in ocr_set:
+            to_mask[i] = True
+    # 2) random: a few more content words (LM signal + full coverage)
+    rng = random.Random(seed & 0xFFFFFFFF)
+    for i in range(len(words)):
+        if (not to_mask[i]) and is_content[i] and rng.random() < rand_prob:
+            to_mask[i] = True
+    # 3) guarantee ≥1 span if any content word exists
+    if not any(to_mask):
+        cidx = [i for i in range(len(words)) if is_content[i]]
+        if cidx:
+            to_mask[rng.choice(cidx)] = True
+    if not any(to_mask):
+        return question.strip(), "", 0
+
+    # Build input + target, MERGING consecutive masked words into one span.
+    in_parts, tgt_parts, sid, i = [], [], 0, 0
+    while i < len(words):
+        if to_mask[i] and sid < max_spans:
+            run = []
+            while i < len(words) and to_mask[i]:
+                run.append(_CLOZE_EDGE_PUNCT.sub("", words[i]))
+                i += 1
             sent = f"<extra_id_{sid}>"
-            clean_w = _CLOZE_EDGE_PUNCT.sub("", w)  # keep human spelling (clean target)
             in_parts.append(sent)
-            tgt_parts.append(f"{sent} {clean_w}")
+            tgt_parts.append(sent + " " + " ".join(run))
             sid += 1
         else:
-            in_parts.append(w)
+            in_parts.append(words[i])
+            i += 1
     if sid == 0:
         return question.strip(), "", 0
     target = " ".join(tgt_parts) + f" <extra_id_{sid}>"
@@ -857,7 +888,17 @@ class ViT5VQADataCollator:
                     combined_texts.append(_q)
                     words_per_i.append(_qwords)
 
-            if self.mlm_mask_mode == "wholeword":
+            if _cloze_mode:
+                # DECODER span-infill (grounded-cloze) is the SINGLE masked-prediction
+                # objective; the ENCODER-head MLM is dropped. So the encoder text branch
+                # gets the CLEAN question (matches finetune + gives TWC/ITM clean context),
+                # and cmb_text_mask_label is all -1 → mlm_loss = 0 (removed from total).
+                q_tok_clean = self.tokenizer(combined_texts, padding="max_length", truncation=True, max_length=self.txt_max_len, return_tensors="pt")
+                for i in range(B):
+                    masked_q_ids_list.append(q_tok_clean.input_ids[i])
+                    q_mask_label_list.append(torch.full_like(q_tok_clean.input_ids[i], -1))
+                cmb_attention_mask = q_tok_clean.attention_mask
+            elif self.mlm_mask_mode == "wholeword":
                 # 1a. WHOLE-WORD masking: quyết định mask ở mức TỪ rồi mới ghép subword →
                 # 'pepsi' bị mask trọn cả 3 subword, không còn subword để copy.
                 attn_list = []
@@ -894,9 +935,10 @@ class ViT5VQADataCollator:
                 norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
 
                 if _cloze_mode:
-                    # Grounded-cloze: mask question words present in this image's OCR;
-                    # target = the clean question words (T5 sentinel format).
-                    masked_q, target_q, n_span = _build_grounded_cloze(qs[i], norm_tokens)
+                    # T5 span-infill: mask OCR-overlap words (grounded) + a few random
+                    # (LM signal); target = clean words in sentinel format.
+                    masked_q, target_q, n_span = _build_grounded_cloze(
+                        qs[i], norm_tokens, seed=seeds[i] ^ 0xC10E)
                     gen_masked_q_list.append(masked_q)
                     gen_target_texts.append(target_q)
                     gen_nmask_list.append(n_span)
