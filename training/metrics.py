@@ -182,6 +182,8 @@ def simple_pretrain_aggregator(eval_pred):
             result["twc_neg_recall"] = float(mean_vals[7])
         if mean_vals.shape[0] >= 9:
             result["loss_cloze"] = float(mean_vals[8])
+        if mean_vals.shape[0] >= 10:
+            result["acc_cloze"] = float(mean_vals[9])
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
@@ -362,10 +364,11 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 itm_a, twc_a = batch_acc[1].item(), batch_acc[2].item()
                 itm_l, twc_l = batch_acc[4].item(), batch_acc[5].item()
                 gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0
+                cloze_a = batch_acc[9].item() if len(batch_acc) >= 10 else 0.0
                 print(
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
-                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f} | "
+                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f}, Acc(CLOZE):{cloze_a:.3f} | "
                     f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(CLOZE):{gen_l:.3f}"
                 )
             else:
@@ -381,11 +384,12 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         """Grounded-cloze DECODER loss for pretrain, computed WITHOUT modifying
         models/: reuse the model's EXISTING finetune forward path (masked-question
         encoder + gen_labels) by temporarily flipping `pretrain`. This keeps the
-        decoder objective a pure PRETRAIN-METHOD concern. Returns an in-graph loss
-        tensor, or None if the collator didn't emit gen targets (non-gen modes).
+        decoder objective a pure PRETRAIN-METHOD concern. Returns (loss, acc) — an
+        in-graph loss tensor and the teacher-forced token accuracy over the masked
+        (non -100) target positions — or (None, None) when no gen targets (non-gen modes).
         """
         if inputs.get("gen_labels") is None or inputs.get("gen_input_ids") is None:
-            return None
+            return None, None
         base = model
         for _ in range(4):
             if hasattr(base, "module"):
@@ -413,7 +417,20 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             )
         finally:
             base.pretrain = orig
-        return gen_out.get("loss") if isinstance(gen_out, dict) else None
+        if not isinstance(gen_out, dict):
+            return None, None
+        loss = gen_out.get("loss")
+        # Cloze accuracy: teacher-forced argmax vs gen_labels over masked positions.
+        acc = None
+        logits = gen_out.get("logits")
+        labels = inputs.get("gen_labels")
+        if logits is not None and labels is not None:
+            with torch.no_grad():
+                pred = logits.argmax(-1)
+                m = labels != -100
+                acc = (pred[m] == labels[m]).float().mean() if bool(m.any()) \
+                    else torch.zeros((), device=logits.device)
+        return loss, acc
 
     def compute_loss(self, model, inputs, return_outputs=False):
         if "tag_pollute" in inputs and inputs["tag_pollute"].ndim > 1:
@@ -424,9 +441,11 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         if getattr(model, "pretrain", False):
             loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
             acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
-            gen_loss = self._pretrain_gen_loss(model, inputs)
+            gen_loss, gen_acc = self._pretrain_gen_loss(model, inputs)
             if gen_loss is not None:
                 outputs["gen_loss"] = gen_loss
+            if gen_acc is not None:
+                outputs["gen_acc"] = gen_acc
             loss = loss_fn(inputs, outputs)
             self._log_pretrain_metrics(loss, inputs, outputs)
 
@@ -466,9 +485,11 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
                 acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
                 outputs = model(**inputs)
-                gen_loss = self._pretrain_gen_loss(model, inputs)
+                gen_loss, gen_acc = self._pretrain_gen_loss(model, inputs)
                 if gen_loss is not None:
                     outputs["gen_loss"] = gen_loss
+                if gen_acc is not None:
+                    outputs["gen_acc"] = gen_acc
                 loss = loss_fn(inputs, outputs)
                 acc_tensor = acc_fn.calculate(inputs, outputs)
 
