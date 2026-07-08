@@ -309,14 +309,18 @@ class GlobalPretrainAccuracy(BaseMetric):
         loss_twc = model_output.get("loss_twc", torch.tensor(0.0)).item()
         _lg = model_output.get("loss_gen", torch.tensor(0.0))
         loss_gen = _lg.item() if torch.is_tensor(_lg) else float(_lg or 0.0)
+        # Cloze token accuracy (teacher-forced argmax vs gen_labels over masked
+        # positions) — the decoder-side analog of the old mlm_acc.
+        _ca = model_output.get("gen_acc", None)
+        cloze_acc = _ca.item() if torch.is_tensor(_ca) else (float(_ca) if _ca is not None else 0.0)
 
         # 3. Tính Total Acc tùy mode
         if self.mode in ("gen", "gen_all"):
             # Cloze modes: encoder-head MLM is DROPPED (mlm_acc/loss_mlm ≡ 0 by design).
-            # Report ITM alone in the acc-slot (not averaged with 0) and base total on
-            # ITM + TWC; the masked-prediction quality shows up as loss_gen (=cloze).
+            # The masked-prediction accuracy is now CLOZE (decoder). Report ITM alone in
+            # acc-slot; total = mean(ITM, TWC, CLOZE).
             acc_slot1 = itm_acc
-            total_acc = (itm_acc + twc_acc) / 2.0
+            total_acc = (itm_acc + twc_acc + cloze_acc) / 3.0
         elif self.mode == "only_twc_ocr_aug":
             acc_slot1 = (mlm_acc + itm_acc) / 2.0
             total_acc = twc_acc
@@ -327,14 +331,14 @@ class GlobalPretrainAccuracy(BaseMetric):
             acc_slot1 = (mlm_acc + itm_acc) / 2.0
             total_acc = (mlm_acc + itm_acc + twc_acc) / 3.0
 
-        # TRẢ VỀ 1 TENSOR CHỨA 9 GIÁ TRỊ ĐỂ TRAINER THU THẬP
+        # TRẢ VỀ 1 TENSOR CHỨA 10 GIÁ TRỊ ĐỂ TRAINER THU THẬP
         # [0] total_acc  [1] acc_slot1 (ITM-only in cloze; (MLM+ITM)/2 legacy)  [2] twc_acc
         # [3] loss_mlm (0 in cloze) [4] loss_itm [5] loss_twc  [6] twc_pos_recall
-        # [7] twc_neg_recall  [8] loss_gen (=cloze decoder loss)
+        # [7] twc_neg_recall  [8] loss_gen (=cloze decoder loss)  [9] cloze_acc
         device = model_output["textcls_scores"].device
         return torch.tensor(
             [total_acc, acc_slot1, twc_acc,
              loss_mlm, loss_itm, loss_twc,
-             twc_pos_recall, twc_neg_recall, loss_gen],
+             twc_pos_recall, twc_neg_recall, loss_gen, cloze_acc],
             device=device
         )
