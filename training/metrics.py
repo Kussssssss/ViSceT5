@@ -166,11 +166,14 @@ def simple_pretrain_aggregator(eval_pred):
         return {"pretrain_acc": mean_acc}
     else:
         mean_vals = np.mean(preds, axis=0)
+        # Cloze method: encoder-head MLM is dropped → loss_mlm ≡ 0, so it is NOT
+        # reported (a permanent-0 column is misleading). Masked-prediction quality is
+        # loss_cloze; acc slot is ITM alone. loss_mlm stays available in the raw vector
+        # (idx3) for legacy modes but is omitted from the displayed metrics.
         result = {
             "pretrain_acc": float(mean_vals[0]),
-            "acc_mlm_itm": float(mean_vals[1]),
+            "acc_itm": float(mean_vals[1]),
             "acc_twc": float(mean_vals[2]),
-            "loss_mlm": float(mean_vals[3]),
             "loss_itm": float(mean_vals[4]),
             "loss_twc": float(mean_vals[5]),
         }
@@ -178,7 +181,7 @@ def simple_pretrain_aggregator(eval_pred):
             result["twc_pos_recall"] = float(mean_vals[6])
             result["twc_neg_recall"] = float(mean_vals[7])
         if mean_vals.shape[0] >= 9:
-            result["loss_gen"] = float(mean_vals[8])
+            result["loss_cloze"] = float(mean_vals[8])
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
@@ -356,14 +359,14 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             current_epoch = self.state.epoch or 0.0
 
             if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) >= 6:
-                mlm_itm_a, twc_a = batch_acc[1].item(), batch_acc[2].item()
-                mlm_l, itm_l, twc_l = batch_acc[3].item(), batch_acc[4].item(), batch_acc[5].item()
+                itm_a, twc_a = batch_acc[1].item(), batch_acc[2].item()
+                itm_l, twc_l = batch_acc[4].item(), batch_acc[5].item()
                 gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0
                 print(
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
-                    f"Batch Detail -> Acc(M+I):{mlm_itm_a:.3f}, Acc(TWC):{twc_a:.3f} | "
-                    f"Loss(M):{mlm_l:.3f}, Loss(I):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(CLOZE):{gen_l:.3f}"
+                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f} | "
+                    f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(CLOZE):{gen_l:.3f}"
                 )
             else:
                 print(

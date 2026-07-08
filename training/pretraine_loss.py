@@ -311,20 +311,29 @@ class GlobalPretrainAccuracy(BaseMetric):
         loss_gen = _lg.item() if torch.is_tensor(_lg) else float(_lg or 0.0)
 
         # 3. Tính Total Acc tùy mode
-        if self.mode == "only_twc_ocr_aug":
+        if self.mode in ("gen", "gen_all"):
+            # Cloze modes: encoder-head MLM is DROPPED (mlm_acc/loss_mlm ≡ 0 by design).
+            # Report ITM alone in the acc-slot (not averaged with 0) and base total on
+            # ITM + TWC; the masked-prediction quality shows up as loss_gen (=cloze).
+            acc_slot1 = itm_acc
+            total_acc = (itm_acc + twc_acc) / 2.0
+        elif self.mode == "only_twc_ocr_aug":
+            acc_slot1 = (mlm_acc + itm_acc) / 2.0
             total_acc = twc_acc
         elif self.mode in ["no_twc_ocr_aug", "only_itm_mlm"]:
+            acc_slot1 = (mlm_acc + itm_acc) / 2.0
             total_acc = (mlm_acc + itm_acc) / 2.0
         else:
+            acc_slot1 = (mlm_acc + itm_acc) / 2.0
             total_acc = (mlm_acc + itm_acc + twc_acc) / 3.0
 
         # TRẢ VỀ 1 TENSOR CHỨA 9 GIÁ TRỊ ĐỂ TRAINER THU THẬP
-        # [0] total_acc  [1] mlm_itm_acc  [2] twc_acc  [3] loss_mlm
-        # [4] loss_itm   [5] loss_twc     [6] twc_pos_recall  [7] twc_neg_recall
-        # [8] loss_gen (grounded-cloze decoder loss; 0 when decoder objective off)
+        # [0] total_acc  [1] acc_slot1 (ITM-only in cloze; (MLM+ITM)/2 legacy)  [2] twc_acc
+        # [3] loss_mlm (0 in cloze) [4] loss_itm [5] loss_twc  [6] twc_pos_recall
+        # [7] twc_neg_recall  [8] loss_gen (=cloze decoder loss)
         device = model_output["textcls_scores"].device
         return torch.tensor(
-            [total_acc, (mlm_acc + itm_acc)/2.0, twc_acc,
+            [total_acc, acc_slot1, twc_acc,
              loss_mlm, loss_itm, loss_twc,
              twc_pos_recall, twc_neg_recall, loss_gen],
             device=device
