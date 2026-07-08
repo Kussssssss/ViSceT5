@@ -140,10 +140,11 @@ class ViT5PretrainLoss(nn.Module):
 
         mode = self.pretrain_ablation_mode
 
-        # Generative-decoder pretrain loss (read-scene-text). Stamped by the model
-        # in 'gen'/'gen_all' modes. This is the primary lever for a seq2seq answer
-        # generator (see pretrain_decoder_plan.md): it trains the decoder that
-        # finetune actually uses, which MLM/ITM/TWC do not.
+        # Grounded-cloze decoder loss. Stamped by the trainer in 'gen'/'gen_all'
+        # modes. This is what trains the seq2seq DECODER that finetune actually uses
+        # (MLM/ITM/TWC only shape the encoder): the decoder regenerates the CLEAN
+        # question words that appear in the OCR, forcing it to read the OCR feature
+        # branch. See pretrain_decoder_plan.md. (key name 'gen_loss' kept for compat.)
         gen_loss = model_output.get("gen_loss", None)
 
         if mode in ["full", "all"]:
@@ -154,10 +155,12 @@ class ViT5PretrainLoss(nn.Module):
                 raise RuntimeError(
                     "gen/gen_all mode requires model_output['gen_loss']. Check that the "
                     "collator emits gen_labels (pretrain_ablation_mode in gen/gen_all) and "
-                    "the model runs the generative decoder pass."
+                    "the trainer runs the grounded-cloze decoder pass."
                 )
-            # gen is the trunk; MLM/ITM/TWC kept as 0.5-weighted auxiliary regularizers.
-            total_loss = gen_loss + 0.5 * (mlm_loss + pollute_loss + contrastive_loss)
+            # Full method (MLM + ITM + TWC) as before, PLUS the grounded-cloze decoder
+            # objective — all four co-equal (cloze target is clean, no down-weighting
+            # needed as with the old noisy read-scene-text trunk).
+            total_loss = mlm_loss + pollute_loss + contrastive_loss + gen_loss
 
         elif mode in ["only_twc_ocr_aug", "no_mlm_itm", "w/o_mlm_itm", "without_mlm_itm"]:
             if logits_per_image is None or o2r_block is None:
@@ -318,7 +321,7 @@ class GlobalPretrainAccuracy(BaseMetric):
         # TRẢ VỀ 1 TENSOR CHỨA 9 GIÁ TRỊ ĐỂ TRAINER THU THẬP
         # [0] total_acc  [1] mlm_itm_acc  [2] twc_acc  [3] loss_mlm
         # [4] loss_itm   [5] loss_twc     [6] twc_pos_recall  [7] twc_neg_recall
-        # [8] loss_gen (read-scene-text generative decoder loss; 0 when gen off)
+        # [8] loss_gen (grounded-cloze decoder loss; 0 when decoder objective off)
         device = model_output["textcls_scores"].device
         return torch.tensor(
             [total_acc, (mlm_acc + itm_acc)/2.0, twc_acc,

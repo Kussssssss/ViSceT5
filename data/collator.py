@@ -28,6 +28,73 @@ from data.vocab import (
 )
 from data.dataset import ViT5VQADataset
 
+
+# ---------------------------------------------------------------------------
+# Grounded-cloze (OCR-grounded masked generation) — decoder pretrain objective.
+# Mask the question words that ALSO appear in the OCR (exact match), then have
+# the decoder regenerate the CLEAN question word (T5 sentinel format). To recover
+# a proper-noun/scene-text word it cannot guess from the language prior, the
+# decoder MUST read the OCR feature branch → warms the exact cross-attention
+# pathway finetune reuses (attend OCR feature → emit its text). Target is the
+# clean human question word, so NO OCR noise is ever learned.
+# ---------------------------------------------------------------------------
+
+# Vietnamese function/question words excluded from cloze span selection (they are
+# recoverable from the language prior, so masking them does NOT force grounding).
+# Keys are accent-stripped + lowercased.
+_CLOZE_STOP: Set[str] = set(
+    """la va cua co nhung cac nay do o cho voi duoc gi nao bao nhieu khi thi ma hay hoac
+    mot cai con nguoi trong tren duoi ngoai day kia ai sao tai vi de da dang se bi do tu den
+    ra vao len xuong khong cung nhu the boi rang thuoc bang qua lai chi nhe oi nha vay em anh
+    chi ban toi ta ho no chung minh cua_no dau bao_nhieu the_nao""".split()
+)
+
+_CLOZE_EDGE_PUNCT = re.compile(r"^[^0-9a-zA-ZÀ-ỹ]+|[^0-9a-zA-ZÀ-ỹ]+$")
+
+
+def _cloze_core(word: str) -> str:
+    """Normalized, punctuation-stripped form used for OCR matching + stopword test."""
+    nw = _normalize_text(word, lowercase=True).strip()
+    return _CLOZE_EDGE_PUNCT.sub("", nw)
+
+
+def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8):
+    """Return (masked_question, target, n_spans) for grounded-cloze.
+
+    masked_question : question with each OCR-overlapping content word replaced by
+                      a T5 sentinel (<extra_id_i>).
+    target          : "<extra_id_0> w0 <extra_id_1> w1 ... <extra_id_k>" (clean words).
+    n_spans         : number of masked words (0 => no grounding signal this sample).
+    Only EXACT normalized matches against OCR words are masked (reliable tier;
+    fuzzy matching is dropped — Vietnamese minimal-pairs make it unreliable).
+    """
+    if not isinstance(question, str):
+        return "", "", 0
+    # Build the set of normalized OCR words (split multi-word spotter tokens).
+    ocr_set: Set[str] = set()
+    for t in ocr_norm_tokens:
+        for sub in str(t).split():
+            if len(sub) >= 2:
+                ocr_set.add(sub)
+
+    words = question.strip().split()
+    in_parts, tgt_parts, sid = [], [], 0
+    for w in words:
+        core = _cloze_core(w)
+        is_content = len(core) >= 3 and _remove_vietnamese_accents(core) not in _CLOZE_STOP
+        if sid < max_spans and is_content and core in ocr_set:
+            sent = f"<extra_id_{sid}>"
+            clean_w = _CLOZE_EDGE_PUNCT.sub("", w)  # keep human spelling (clean target)
+            in_parts.append(sent)
+            tgt_parts.append(f"{sent} {clean_w}")
+            sid += 1
+        else:
+            in_parts.append(w)
+    if sid == 0:
+        return question.strip(), "", 0
+    target = " ".join(tgt_parts) + f" <extra_id_{sid}>"
+    return " ".join(in_parts), target, sid
+
 class ViT5VQADataCollator:
     def __init__(
         self,
@@ -757,15 +824,18 @@ class ViT5VQADataCollator:
             twa_char_list, twa_char_mask_list, twa_word_ids_list, ocr_to_word_map_list = [], [], [], []
             ocr_mask_token_list, ocr_mask_box_list, ocr_lbl_tok_list, ocr_msk_inp_list = [], [], [], []
 
-            # Generative-decoder pretrain (read-scene-text): in 'gen'/'gen_all' the
-            # decoder is trained to GENERATE the scene text (target below), using a
-            # finetune-shaped forward (question-only encoder). Target = OCR tokens of
-            # the (pollute-source) image joined in spotter order; this matches the OCR
-            # feature branch the decoder must learn to read from. See pretrain_decoder_plan.md.
-            _gen_mode = str(getattr(self, "pretrain_ablation_mode", "")).lower().strip() in ("gen", "gen_all")
-            gen_target_texts = []
-            # CLEAN single-set OCR branch fed to the read-scene-text gen forward
-            # (char/word from pad_ocr; det/rec/box come from ocr_info).
+            # Decoder pretrain = GROUNDED-CLOZE: in 'gen'/'gen_all' the decoder is
+            # trained to regenerate the CLEAN question words that also appear in the
+            # OCR (masked in the text branch), using a finetune-shaped forward. To
+            # recover them it must read the OCR feature branch → warms cross-attention
+            # with a CLEAN target (no OCR noise learned). See pretrain_decoder_plan.md.
+            _cloze_mode = str(getattr(self, "pretrain_ablation_mode", "")).lower().strip() in ("gen", "gen_all")
+            gen_masked_q_list = []   # encoder input: question with <extra_id_i> masks
+            gen_target_texts = []    # decoder target: "<extra_id_0> w0 ... <extra_id_k>"
+            gen_nmask_list = []      # #masked spans per sample (0 => no gen signal)
+            # CLEAN single-set OCR branch fed to the cloze gen forward (the decoder
+            # reads the masked word FROM here); char/word from pad_ocr, det/rec/box
+            # from ocr_info.
             gen_char_list, gen_char_mask_list, gen_word_ids_list, gen_map_list = [], [], [], []
 
             # QUAN TRỌNG: Nối OCR vào câu hỏi để làm OCR-Aware MLM
@@ -823,12 +893,13 @@ class ViT5VQADataCollator:
                 info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
                 norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
 
-                if _gen_mode:
-                    # Reading-order (spotter order) scene-text string as the decoder
-                    # generation target. Cap length to the answer-length regime.
-                    _rt = [t.strip() for t in raw_texts
-                           if isinstance(t, str) and t.strip() and t.strip() not in ("<pad>", "</s>")]
-                    gen_target_texts.append(" ".join(_rt[:48]))
+                if _cloze_mode:
+                    # Grounded-cloze: mask question words present in this image's OCR;
+                    # target = the clean question words (T5 sentinel format).
+                    masked_q, target_q, n_span = _build_grounded_cloze(qs[i], norm_tokens)
+                    gen_masked_q_list.append(masked_q)
+                    gen_target_texts.append(target_q)
+                    gen_nmask_list.append(n_span)
 
                 if use_ocr_aug:
                     pad_ocr, rel_ocr, o2r, r2o, _ = self._findRelatedOCR_adr(norm_tokens, current_max_len, adv_pro, self.contrastive_label_list, self.editlen)
@@ -836,8 +907,8 @@ class ViT5VQADataCollator:
                     char_a, mask_a, flat_ids_a, lens_a = self._add_cons_ocr_info(pad_ocr, current_max_len)
                     char_b, mask_b, flat_ids_b, lens_b = self._add_cons_ocr_info(rel_ocr, current_max_len)
 
-                    # --- Gen (read-scene-text) OCR branch: SINGLE CLEAN set ---
-                    if _gen_mode:
+                    # --- Cloze OCR branch (decoder reads masked word here): SINGLE CLEAN set ---
+                    if _cloze_mode:
                         gen_char_list.append(char_a)
                         gen_char_mask_list.append(mask_a)
                         gen_word_ids_list.append(flat_ids_a)
@@ -926,11 +997,12 @@ class ViT5VQADataCollator:
                 batch_dict["r2o_labels"] = None
                 batch_dict["twc_group_ids"] = None
 
-            if _gen_mode:
-                # Encoder input = QUESTION ONLY (q_tok, computed above) — matches the
-                # finetune text branch (no OCR-as-text), so the decoder must read the
-                # scene text from the OCR feature branch, not copy it. Target = OCR
-                # reading string; pad -> -100 so short targets don't dominate.
+            if _cloze_mode and any(n > 0 for n in gen_nmask_list):
+                # GROUNDED-CLOZE. Encoder input = question with OCR-overlapping words
+                # replaced by <extra_id_i> masks; decoder target = those CLEAN words
+                # (sentinel format). The masked words are absent from the text branch
+                # but present in the OCR feature branch, so the decoder must READ the
+                # OCR feature to recover them — warms cross-attention on a CLEAN target.
                 gen_cap = min(64, self.txt_max_len)
                 gen_tok = self.tokenizer(
                     gen_target_texts, padding="max_length", truncation=True,
@@ -938,13 +1010,22 @@ class ViT5VQADataCollator:
                 )
                 gen_labels = gen_tok.input_ids.clone()
                 gen_labels[gen_labels == self.pad_id] = -100
-                batch_dict["gen_input_ids"] = q_tok.input_ids.to(pixel_values.device)
-                batch_dict["gen_attention_mask"] = q_tok.attention_mask.to(pixel_values.device)
+                # Samples with NO overlapping word carry no grounding signal — fully
+                # ignore them (all -100) so the decoder isn't trained to emit a bare EOS.
+                for _bi, _ns in enumerate(gen_nmask_list):
+                    if _ns == 0:
+                        gen_labels[_bi] = -100
+                gen_in = self.tokenizer(
+                    gen_masked_q_list, padding="max_length", truncation=True,
+                    max_length=self.txt_max_len, return_tensors="pt",
+                )
+                batch_dict["gen_input_ids"] = gen_in.input_ids.to(pixel_values.device)
+                batch_dict["gen_attention_mask"] = gen_in.attention_mask.to(pixel_values.device)
                 batch_dict["gen_labels"] = gen_labels.to(pixel_values.device)
 
-                # Dedicated single-set CLEAN OCR branch for the read-scene-text gen forward;
-                # det/rec/box (visual) come from the shared ocr_info (model auto-crops to this
-                # word count). If unavailable, gen falls back to the shared twa_* in the trainer.
+                # Dedicated single-set CLEAN OCR branch the decoder reads the masked
+                # word from; det/rec/box (visual) come from the shared ocr_info (model
+                # auto-crops to this word count). Falls back to shared twa_* if absent.
                 if gen_word_ids_list:
                     batch_dict["gen_twa_ocr_char"] = torch.stack(gen_char_list).to(pixel_values.device)
                     batch_dict["gen_twa_ocr_char_mask"] = torch.stack(gen_char_mask_list).to(pixel_values.device)
