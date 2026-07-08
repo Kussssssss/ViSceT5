@@ -278,17 +278,31 @@ class OpenViVQAModel(PreTrainedModel):
                     text_mask = torch.cat([txt_mask.long().to(device), pad], dim=1)
                 else: text_mask = txt_mask.long().to(device)
             else: text_mask = torch.ones(B, T, dtype=torch.long, device=device)
-
-            qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
         else:
             # Baseline (Tắt QA): Không có câu hỏi định hướng
             D_txt = int(getattr(self.qa_clip.config, "instruction_dim", self.d_model))
             text_emb = torch.zeros(B, 0, D_txt, device=device, dtype=self.target_dtype)
             text_mask = torch.zeros(B, 0, dtype=torch.long, device=device)
-            qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
             T = 0
 
-        img_hs = qa_out.last_hidden_state
+        # PRETRAIN STABILITY: QA-CLIP vision is FROZEN (freeze_clip). Its custom
+        # attention occasionally emits NaN in the forward (nondeterministic); the
+        # fused_seq nan_to_num guard cleans the VALUE but the NaN still poisons the
+        # BACKWARD through this module, corrupting grads for vit5/visual_search. Since
+        # nothing here needs a gradient during pretrain, run it under no_grad and
+        # sanitize the output → the NaN can never reach the trainable modules. Gated by
+        # `_pretrain_stage` (set only in pretrain.py; stays set through the cloze forward
+        # which flips `pretrain=False`), so FINETUNE is completely untouched.
+        _frozen_pt = (bool(getattr(self, "_pretrain_stage", False))
+                      and bool(getattr(self.qa_clip.config, "freeze_clip", False)))
+        if _frozen_pt:
+            with torch.no_grad():
+                qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
+            img_hs = torch.nan_to_num(qa_out.last_hidden_state, nan=0.0, posinf=1e4, neginf=-1e4)
+        else:
+            qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
+            img_hs = qa_out.last_hidden_state
+
         img_tokens = img_hs[:, 1:, :].to(self.target_dtype)
         img_attn_mask = torch.ones(B, img_tokens.size(1), dtype=torch.long, device=device)
         out = {"img_tokens": img_tokens, "img_attn_mask": img_attn_mask}
@@ -305,7 +319,10 @@ class OpenViVQAModel(PreTrainedModel):
                 cls_to_patch = last_attn[:, :, 0, 1:]
                 patch_scores = cls_to_patch.mean(dim=1)
 
-            out["patch_scores"] = patch_scores.to(self.target_dtype)
+            patch_scores = patch_scores.to(self.target_dtype)
+            if _frozen_pt:
+                patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4)
+            out["patch_scores"] = patch_scores
             if return_attn: out["qa_attn_last"] = last_attn.detach().cpu()
         else:
             out["patch_scores"] = torch.ones(B, img_tokens.size(1), device=device, dtype=self.target_dtype)
