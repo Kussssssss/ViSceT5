@@ -363,7 +363,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
                     f"Batch Detail -> Acc(M+I):{mlm_itm_a:.3f}, Acc(TWC):{twc_a:.3f} | "
-                    f"Loss(M):{mlm_l:.3f}, Loss(I):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(GEN):{gen_l:.3f}"
+                    f"Loss(M):{mlm_l:.3f}, Loss(I):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(CLOZE):{gen_l:.3f}"
                 )
             else:
                 print(
@@ -375,10 +375,10 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             self._running_cnt = 0
 
     def _pretrain_gen_loss(self, model, inputs):
-        """Read-scene-text GENERATIVE loss for pretrain, computed WITHOUT modifying
-        models/: reuse the model's EXISTING finetune forward path (question-only
+        """Grounded-cloze DECODER loss for pretrain, computed WITHOUT modifying
+        models/: reuse the model's EXISTING finetune forward path (masked-question
         encoder + gen_labels) by temporarily flipping `pretrain`. This keeps the
-        gen objective a pure PRETRAIN-METHOD concern. Returns an in-graph loss
+        decoder objective a pure PRETRAIN-METHOD concern. Returns an in-graph loss
         tensor, or None if the collator didn't emit gen targets (non-gen modes).
         """
         if inputs.get("gen_labels") is None or inputs.get("gen_input_ids") is None:
@@ -392,8 +392,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         orig = getattr(base, "pretrain", False)
         base.pretrain = False
         try:
-            # Prefer the dedicated single-set CLEAN gen OCR branch (read-scene-text);
-            # fall back to the shared TWC branch if not provided.
+            # Prefer the dedicated single-set CLEAN OCR branch (the decoder reads the
+            # masked cloze word from here); fall back to the shared TWC branch.
             gen_out = model(
                 input_ids=inputs.get("gen_input_ids"),
                 attention_mask=inputs.get("gen_attention_mask"),

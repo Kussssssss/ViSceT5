@@ -145,9 +145,9 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     model.train()
     model.zero_grad(set_to_none=True)
     out = model(**batch)
-    # Read-scene-text GEN loss via the model's existing finetune path (pretrain flipped
-    # off) — same mechanism the trainer uses; keeps the gen objective in the pretrain
-    # method, not in models/. Only fires when the collator emitted gen targets.
+    # Grounded-cloze decoder loss via the model's existing finetune path (pretrain
+    # flipped off) — same mechanism the trainer uses; keeps the objective in the
+    # pretrain method, not in models/. Only fires when the collator emitted gen targets.
     if batch.get("gen_labels") is not None and batch.get("gen_input_ids") is not None:
         _op = model.pretrain
         model.pretrain = False
@@ -395,12 +395,12 @@ def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
     model.train()
 
 
-def _debug_gen_read(model, data_collator, dataset, device, n_show=5):
-    """Readable read-scene-text debug: run the gen forward and show the target OCR
-    reading vs the model's generated reading (how well the decoder reads scene text
-    from the image + OCR features)."""
+def _debug_gen_cloze(model, data_collator, dataset, device, n_show=5):
+    """Readable grounded-cloze debug: show the MASKED question (encoder input), the
+    CLEAN target words, and the model output — i.e. whether the decoder recovers the
+    OCR-overlapping words by reading the OCR feature branch."""
     print("\n" + "=" * 70)
-    print("🔧 [GEN DEBUG] read-scene-text: target vs model-output")
+    print("🔧 [CLOZE DEBUG] grounded-cloze: masked question → clean word (target vs output)")
     print("=" * 70)
     k = min(8, len(dataset))
     if k < 2:
@@ -436,15 +436,25 @@ def _debug_gen_read(model, data_collator, dataset, device, n_show=5):
         print("  (no logits)"); model.train(); return
     pred = logits.argmax(-1)
     labels = batch["gen_labels"]
-    print("  (input OCR = clean; target = OCR reading)")
-    for i in range(min(n_show, labels.size(0))):
+    gen_in = batch["gen_input_ids"]
+    print("  (masked words removed from the question; decoder must read them from OCR features)")
+    shown = 0
+    for i in range(labels.size(0)):
         pos = [p for p, t in enumerate(labels[i].tolist()) if t != -100]
         if not pos:
-            continue
+            continue  # no cloze span for this sample
+        masked_q = tok.decode([int(t) for t in gen_in[i].tolist() if int(t) != data_collator.pad_id],
+                              skip_special_tokens=False).strip()
         gold = tok.decode([int(labels[i][p]) for p in pos], skip_special_tokens=True).strip()
         prd = tok.decode([int(pred[i][p].item()) for p in pos], skip_special_tokens=True).strip()
-        print(f"  [sample {i}] target : {gold[:110]}")
-        print(f"              output : {prd[:110]}")
+        print(f"  [sample {i}] masked Q: {masked_q[:100]}")
+        print(f"              target  : {gold[:80]}")
+        print(f"              output  : {prd[:80]}")
+        shown += 1
+        if shown >= n_show:
+            break
+    if shown == 0:
+        print("  (no cloze spans in this batch — no question∩OCR overlap)")
     print("=" * 70 + "\n")
     model.train()
 
@@ -719,7 +729,7 @@ def main(args_list=None):
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
     print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
-          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | gen = read-scene-text")
+          f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | decoder = grounded-cloze")
 
     # 6. Trainer
     trainer = TaskSpecificTrainer(
@@ -781,10 +791,10 @@ def main(args_list=None):
     verify_metrics = trainer.evaluate()
 
     # Readable debug AFTER training (MOCK always; FULL only if TWC_TRAIN_LOG=1):
-    # (1) MLM masked-question → prediction; (2) gen read-scene-text target → output.
+    # (1) MLM masked-question → prediction; (2) grounded-cloze masked word → output.
     if pretrain_debug:
         _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
-        _debug_gen_read(model, data_collator, val_dataset, DEVICE)
+        _debug_gen_cloze(model, data_collator, val_dataset, DEVICE)
 
     # Save best
     trainer.save_model(training_args.output_dir)
