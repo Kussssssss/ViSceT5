@@ -864,11 +864,18 @@ class OpenViVQAModel(PreTrainedModel):
 
         # attn_summary, crop_tokens, crop_mask were already assigned in the use_vs block above
 
-        if torch.isnan(txt_emb_for_enc).any(): print("🚨 [FORWARD CHECK] txt_emb_for_enc has NaN")
-        if torch.isnan(img_pack["img_tokens"]).any(): print("🚨 [FORWARD CHECK] img_tokens has NaN")
-        if torch.isnan(ocr_fused_feat).any(): print("🚨 [FORWARD CHECK] ocr_fused_feat has NaN")
-        if torch.isnan(crop_tokens).any(): print("🚨 [FORWARD CHECK] crop_tokens has NaN")
-        if torch.isnan(attn_summary).any(): print("🚨 [FORWARD CHECK] attn_summary has NaN")
+        # Per-component non-finite diagnostic (NaN AND inf) — names the exact culprit
+        # feeding fused_seq + its magnitude, so the pretrain guard below is never a guess.
+        if getattr(self, "_pretrain_stage", False):
+            for _cn, _ct in (("txt_emb", txt_emb_for_enc), ("img_tokens", img_pack["img_tokens"]),
+                             ("ocr_fused_feat", ocr_fused_feat), ("crop_tokens", crop_tokens),
+                             ("attn_summary", attn_summary)):
+                if not torch.isfinite(_ct).all():
+                    _f = _ct.detach().float()
+                    _n_nan = int(torch.isnan(_f).sum()); _n_inf = int(torch.isinf(_f).sum())
+                    _fin = _f[torch.isfinite(_f)]
+                    _rng = (f"finite[min={_fin.min():.3g},max={_fin.max():.3g}]" if _fin.numel() else "all-nonfinite")
+                    print(f"🚨 [FORWARD CHECK] {_cn} non-finite: nan={_n_nan} inf={_n_inf} {_rng}")
 
         # CONCAT CHUỖI VÀO ENCODER: CHỈ CÓ 1 KHỐI ocr_fused_feat
         fused_seq = torch.cat(
