@@ -951,7 +951,14 @@ class OpenViVQAModel(PreTrainedModel):
             )
             if torch.isnan(outputs.logits).any(): print("🚨 [FORWARD CHECK] vit5 output logits has NaN")
             out_dict["textcls_scores"] = outputs.logits
-            out_dict["mlm_loss"] = outputs.loss
+            # Encoder-head MLM is dropped in cloze mode: cmb_text_mask_label is all -100,
+            # so the T5 loss averages over 0 valid tokens → NaN. mlm_loss is NOT used in
+            # the cloze total, so sanitize it to an in-graph 0 (avoids the NaN detector /
+            # any downstream propagation). Legacy MLM modes keep the real finite loss.
+            _mlm_l = outputs.loss
+            if _mlm_l is None or not torch.isfinite(_mlm_l):
+                _mlm_l = enc_out.last_hidden_state.sum() * 0.0
+            out_dict["mlm_loss"] = _mlm_l
 
             dec_last = outputs.decoder_hidden_states[-1]
             dec_first = dec_last[:, 0, :]
