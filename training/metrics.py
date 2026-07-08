@@ -180,10 +180,14 @@ def simple_pretrain_aggregator(eval_pred):
         if mean_vals.shape[0] >= 8:
             result["twc_pos_recall"] = float(mean_vals[6])
             result["twc_neg_recall"] = float(mean_vals[7])
+        # The masked-prediction is still MLM — just done generatively by the DECODER
+        # (span-infill) instead of an encoder head. So it is reported as loss_mlm/acc_mlm
+        # (the decoder values, vec idx8/idx9); the old encoder-head loss_mlm (idx3, ≡0)
+        # is not shown.
         if mean_vals.shape[0] >= 9:
-            result["loss_cloze"] = float(mean_vals[8])
+            result["loss_mlm"] = float(mean_vals[8])
         if mean_vals.shape[0] >= 10:
-            result["acc_cloze"] = float(mean_vals[9])
+            result["acc_mlm"] = float(mean_vals[9])
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
@@ -368,8 +372,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 print(
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
-                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f}, Acc(CLOZE):{cloze_a:.3f} | "
-                    f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(CLOZE):{gen_l:.3f}"
+                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f}, Acc(MLM):{cloze_a:.3f} | "
+                    f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(MLM):{gen_l:.3f}"
                 )
             else:
                 print(

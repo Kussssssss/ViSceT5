@@ -404,7 +404,7 @@ def _debug_gen_cloze(model, data_collator, dataset, device, n_show=5):
     CLEAN target words, and the model output — i.e. whether the decoder recovers the
     OCR-overlapping words by reading the OCR feature branch."""
     print("\n" + "=" * 70)
-    print("🔧 [CLOZE DEBUG] grounded-cloze: masked question → clean word (target vs output)")
+    print("🔎 [MLM DEBUG] decoder span-infill (MLM): masked question → predicted word (target vs output)")
     print("=" * 70)
     k = min(8, len(dataset))
     if k < 2:
@@ -734,9 +734,9 @@ def main(args_list=None):
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
     _cloze = str(mode).lower().strip() in ("gen", "gen_all")
     if _cloze:
-        print(">>> [pretrain] objective = ITM + TWC (encoder) + grounded-cloze span-infill "
-              "(DECODER, single masked-prediction; encoder-head MLM dropped) | "
-              "mask = OCR-overlap + random spans, distinct <extra_id_i>, question-only encoder")
+        print(">>> [pretrain] objective = MLM + ITM + TWC | MLM is now done by the DECODER "
+              "(span-infill: mask OCR-overlap + random words, distinct <extra_id_i>, regenerate "
+              "the masked words) instead of an encoder head — same task, decoder-based | question-only encoder")
     else:
         print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
               f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | (legacy encoder-MLM path)")
