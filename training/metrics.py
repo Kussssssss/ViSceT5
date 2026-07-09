@@ -188,6 +188,16 @@ def simple_pretrain_aggregator(eval_pred):
             result["loss_mlm"] = float(mean_vals[8])
         if mean_vals.shape[0] >= 10:
             result["acc_mlm"] = float(mean_vals[9])
+        # Grounded/random split: sum the per-batch token counts (idx10..13) → exact
+        # token-weighted accuracy. grounded = decoder recovered an OCR word (grounding);
+        # random = an LM-prior word.
+        if preds.shape[1] >= 14:
+            g_correct = float(np.sum(preds[:, 10])); g_total = float(np.sum(preds[:, 11]))
+            r_correct = float(np.sum(preds[:, 12])); r_total = float(np.sum(preds[:, 13]))
+            if g_total > 0:
+                result["acc_mlm_grounded"] = g_correct / g_total
+            if r_total > 0:
+                result["acc_mlm_random"] = r_correct / r_total
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
@@ -369,10 +379,16 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 itm_l, twc_l = batch_acc[4].item(), batch_acc[5].item()
                 gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0
                 cloze_a = batch_acc[9].item() if len(batch_acc) >= 10 else 0.0
+                mlm_gr = ""
+                if len(batch_acc) >= 14:
+                    gt, rt = batch_acc[11].item(), batch_acc[13].item()
+                    ag = batch_acc[10].item() / gt if gt > 0 else 0.0
+                    ar = batch_acc[12].item() / rt if rt > 0 else 0.0
+                    mlm_gr = f" [grounded:{ag:.3f} random:{ar:.3f}]"
                 print(
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
-                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f}, Acc(MLM):{cloze_a:.3f} | "
+                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f}, Acc(MLM):{cloze_a:.3f}{mlm_gr} | "
                     f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(MLM):{gen_l:.3f}"
                 )
             else:
@@ -388,9 +404,9 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         """Grounded-cloze DECODER loss for pretrain, computed WITHOUT modifying
         models/: reuse the model's EXISTING finetune forward path (masked-question
         encoder + gen_labels) by temporarily flipping `pretrain`. This keeps the
-        decoder objective a pure PRETRAIN-METHOD concern. Returns (loss, acc) — an
-        in-graph loss tensor and the teacher-forced token accuracy over the masked
-        (non -100) target positions — or (None, None) when no gen targets (non-gen modes).
+        decoder objective a pure PRETRAIN-METHOD concern. Returns (loss, stats) where
+        stats is a dict with the teacher-forced token accuracy and grounded/random
+        correct/total counts — or (None, None) when no gen targets (non-gen modes).
         """
         if inputs.get("gen_labels") is None or inputs.get("gen_input_ids") is None:
             return None, None
@@ -424,17 +440,34 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         if not isinstance(gen_out, dict):
             return None, None
         loss = gen_out.get("loss")
-        # Cloze accuracy: teacher-forced argmax vs gen_labels over masked positions.
-        acc = None
+        # MLM (decoder span-infill) accuracy: teacher-forced argmax vs gen_labels over
+        # masked positions, plus a GROUNDED-vs-RANDOM split (token counts, so the
+        # aggregator can token-weight them exactly). grounded = word was masked because
+        # it appears in the OCR (proves the decoder reads OCR); random = LM-prior word.
+        stats = None
         logits = gen_out.get("logits")
         labels = inputs.get("gen_labels")
         if logits is not None and labels is not None:
             with torch.no_grad():
                 pred = logits.argmax(-1)
                 m = labels != -100
-                acc = (pred[m] == labels[m]).float().mean() if bool(m.any()) \
-                    else torch.zeros((), device=logits.device)
-        return loss, acc
+                dev = logits.device
+                correct = (pred == labels) & m
+                acc = (correct.sum().float() / m.sum().clamp_min(1)) if bool(m.any()) \
+                    else torch.zeros((), device=dev)
+                mtype = inputs.get("gen_mlm_type")
+                if mtype is not None:
+                    gm = m & (mtype == 1)
+                    rm = m & (mtype == 0)
+                    g_total = gm.sum().float(); r_total = rm.sum().float()
+                    g_correct = (correct & gm).sum().float()
+                    r_correct = (correct & rm).sum().float()
+                else:
+                    z = torch.zeros((), device=dev)
+                    g_total = r_total = g_correct = r_correct = z
+                stats = {"acc": acc, "g_correct": g_correct, "g_total": g_total,
+                         "r_correct": r_correct, "r_total": r_total}
+        return loss, stats
 
     def compute_loss(self, model, inputs, return_outputs=False):
         if "tag_pollute" in inputs and inputs["tag_pollute"].ndim > 1:
@@ -445,11 +478,15 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         if getattr(model, "pretrain", False):
             loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
             acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
-            gen_loss, gen_acc = self._pretrain_gen_loss(model, inputs)
+            gen_loss, gen_stats = self._pretrain_gen_loss(model, inputs)
             if gen_loss is not None:
                 outputs["gen_loss"] = gen_loss
-            if gen_acc is not None:
-                outputs["gen_acc"] = gen_acc
+            if gen_stats is not None:
+                outputs["gen_acc"] = gen_stats["acc"]
+                outputs["gen_g_correct"] = gen_stats["g_correct"]
+                outputs["gen_g_total"] = gen_stats["g_total"]
+                outputs["gen_r_correct"] = gen_stats["r_correct"]
+                outputs["gen_r_total"] = gen_stats["r_total"]
             loss = loss_fn(inputs, outputs)
             self._log_pretrain_metrics(loss, inputs, outputs)
 
@@ -489,11 +526,15 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
                 acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
                 outputs = model(**inputs)
-                gen_loss, gen_acc = self._pretrain_gen_loss(model, inputs)
+                gen_loss, gen_stats = self._pretrain_gen_loss(model, inputs)
                 if gen_loss is not None:
                     outputs["gen_loss"] = gen_loss
-                if gen_acc is not None:
-                    outputs["gen_acc"] = gen_acc
+                if gen_stats is not None:
+                    outputs["gen_acc"] = gen_stats["acc"]
+                    outputs["gen_g_correct"] = gen_stats["g_correct"]
+                    outputs["gen_g_total"] = gen_stats["g_total"]
+                    outputs["gen_r_correct"] = gen_stats["r_correct"]
+                    outputs["gen_r_total"] = gen_stats["r_total"]
                 loss = loss_fn(inputs, outputs)
                 acc_tensor = acc_fn.calculate(inputs, outputs)
 
