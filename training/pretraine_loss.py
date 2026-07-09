@@ -37,6 +37,13 @@ class ViT5PretrainLoss(nn.Module):
             self.twc_pos_weight_cap = float(os.environ.get("TWC_POS_WEIGHT_CAP", "0"))
         except ValueError:
             self.twc_pos_weight_cap = 0.0
+        # ITM weight in the gen_all total. ITM (pollute) has been observed stuck at
+        # chance (loss ≈ ln2) — set env ITM_WEIGHT=0 to drop the dead-weight term, or a
+        # small value to keep it as a light regularizer. Default 1.0 = unchanged.
+        try:
+            self.itm_weight = float(os.environ.get("ITM_WEIGHT", "1"))
+        except ValueError:
+            self.itm_weight = 1.0
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
@@ -156,7 +163,7 @@ class ViT5PretrainLoss(nn.Module):
             # grounded-cloze (T5 span-infill) — which trains the decoder finetune uses.
             # Objective = ITM + TWC (encoder aux) + cloze (decoder). mlm_loss is 0 here
             # (cmb_text_mask_label all -1) and left out of the total by design.
-            total_loss = pollute_loss + contrastive_loss
+            total_loss = self.itm_weight * pollute_loss + contrastive_loss
             if gen_loss is not None:
                 total_loss = total_loss + gen_loss
             # else: batch produced no cloze span (rare with random-span fallback) →

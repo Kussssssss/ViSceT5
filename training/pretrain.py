@@ -463,6 +463,98 @@ def _debug_gen_cloze(model, data_collator, dataset, device, n_show=5):
     model.train()
 
 
+def _ablate_ocr_info(ocr_info):
+    """Return a copy of ocr_info with the VISUAL fields (det/rec/box) zeroed — used by
+    the OCR-ablation eval. Shapes preserved (only values zeroed) so the forward runs."""
+    if ocr_info is None:
+        return None
+    out = []
+    for d in ocr_info:
+        d2 = dict(d)
+        for k in ("det_features", "rec_features", "boxes", "boxes_word_all"):
+            v = d2.get(k)
+            if v is None:
+                continue
+            if torch.is_tensor(v):
+                d2[k] = torch.zeros_like(v)
+            else:
+                import numpy as _np
+                d2[k] = _np.zeros_like(v)
+        out.append(d2)
+    return out
+
+
+def _debug_ocr_ablation(model, data_collator, dataset, device, n_batch=12, bs=8):
+    """GROUNDING EVIDENCE: run the decoder MLM (cloze) forward with the OCR branch ON vs
+    ABLATED (char zeroed, word_ids -> pad, det/rec/box zeroed), and compare grounded vs
+    random token accuracy. If GROUNDED collapses when OCR is off (while RANDOM barely
+    moves) → the grounded words are recovered by READING the OCR, not by the LM prior."""
+    print("\n" + "=" * 70)
+    print("🧪 [OCR-ABLATION] does the decoder recover GROUNDED words by reading OCR?")
+    print("=" * 70)
+    tok_pad = data_collator.pad_id
+    model.eval()
+    orig = getattr(model, "pretrain", False)
+    model.pretrain = False
+
+    def _counts(batch, ablate):
+        gi, gl = batch.get("gen_input_ids"), batch.get("gen_labels")
+        mtype = batch.get("gen_mlm_type")
+        if gi is None or gl is None or mtype is None:
+            return None
+        char = batch.get("gen_twa_ocr_char", batch.get("twa_ocr_char"))
+        wid = batch.get("gen_twa_word_ids", batch.get("twa_word_ids"))
+        cmask = batch.get("gen_twa_ocr_char_mask", batch.get("twa_ocr_char_mask"))
+        o2w = batch.get("gen_ocr_to_word_map", batch.get("ocr_to_word_map"))
+        oinfo = batch.get("ocr_info")
+        if ablate:
+            char = torch.zeros_like(char) if char is not None else None
+            wid = torch.full_like(wid, tok_pad) if wid is not None else None
+            oinfo = _ablate_ocr_info(oinfo)
+        out = model(
+            input_ids=gi, attention_mask=batch.get("gen_attention_mask"),
+            pixel_values=batch.get("pixel_values"), pil_images=batch.get("pil_images"),
+            ocr_info=oinfo, ocr_mask_token=batch.get("ocr_mask_token"),
+            ocr_mask_box=batch.get("ocr_mask_box"), labels=gl,
+            twa_ocr_char=char, twa_ocr_char_mask=cmask, twa_word_ids=wid, ocr_to_word_map=o2w,
+        )
+        logits = out.get("logits")
+        if logits is None:
+            return None
+        pred = logits.argmax(-1)
+        m = gl != -100
+        eq = (pred == gl)
+        gm, rm = m & (mtype == 1), m & (mtype == 0)
+        return [float((eq & gm).sum()), float(gm.sum()), float((eq & rm).sum()), float(rm.sum())]
+
+    on = [0.0, 0.0, 0.0, 0.0]; off = [0.0, 0.0, 0.0, 0.0]
+    n = min(n_batch * bs, len(dataset))
+    with torch.no_grad():
+        for s in range(0, n, bs):
+            idx = list(range(s, min(s + bs, len(dataset))))
+            if len(idx) < 2:
+                break
+            batch = data_collator([dataset[i] for i in idx])
+            batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+            c_on = _counts(batch, ablate=False)
+            c_off = _counts(batch, ablate=True)
+            if c_on is None or c_off is None:
+                continue
+            on = [a + b for a, b in zip(on, c_on)]
+            off = [a + b for a, b in zip(off, c_off)]
+    model.pretrain = orig
+    model.train()
+
+    def _acc(c, i):  # correct/total for grounded (i=0) or random (i=2)
+        return (c[i] / c[i + 1]) if c[i + 1] > 0 else 0.0
+    g_on, g_off = _acc(on, 0), _acc(off, 0)
+    r_on, r_off = _acc(on, 2), _acc(off, 2)
+    print(f"  GROUNDED (OCR words): OCR-on={g_on:.3f}  OCR-off={g_off:.3f}  drop={g_on-g_off:+.3f}")
+    print(f"  RANDOM   (LM words) : OCR-on={r_on:.3f}  OCR-off={r_off:.3f}  drop={r_on-r_off:+.3f}")
+    print("  → large GROUNDED drop + small RANDOM drop = grounded words are read from OCR (grounding real).")
+    print("=" * 70 + "\n")
+
+
 def _diagnose_mlm_crutch(model, data_collator, dataset, device):
     """
     Measure the MLM "copy crutch": how much MLM relies on the OCR-FEATURE branch.
@@ -732,6 +824,25 @@ def main(args_list=None):
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
+
+    # ---- HARD-PRETRAIN knobs (v2, env-gated; defaults keep current behavior) ----
+    # Because ViT5 is already pretrained we can afford harder/adversarial pretext than
+    # TWA's conservative from-scratch ratios. All opt-in via env so the baseline run
+    # (and its checkpoint) is unaffected.
+    _adv = os.environ.get("TWC_ADV_PROB", "").strip()
+    if _adv:
+        data_collator.adv_probability_pretrain = float(_adv)  # ↑ = stronger OCR corruption (harder TWC positives)
+    _dupbox = os.environ.get("TWC_DUP_BOX", "").strip()
+    if _dupbox:
+        data_collator.twc_dup_box = _dupbox not in ("0", "false", "False")  # 0 = drop positional shortcut
+    _rand = os.environ.get("MLM_RAND_PROB", "").strip()
+    if _rand:
+        data_collator.mlm_rand_prob = float(_rand)  # ↑ = more random-masked words (harder MLM)
+    print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
+          f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
+          f"mlm_rand_prob={getattr(data_collator,'mlm_rand_prob',0.15)} "
+          f"itm_weight={os.environ.get('ITM_WEIGHT','1')}")
+
     _cloze = str(mode).lower().strip() in ("gen", "gen_all")
     if _cloze:
         print(">>> [pretrain] objective = MLM + ITM + TWC | MLM is now done by the DECODER "
@@ -808,6 +919,15 @@ def main(args_list=None):
             _debug_gen_cloze(model, data_collator, val_dataset, DEVICE)
         else:
             _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
+
+    # OCR-ablation grounding evidence — run in cloze modes even on the FULL run (cheap,
+    # one-time, ~12 batches) since it is the key proof that grounded acc comes from
+    # reading OCR. Disable with env OCR_ABLATION=0.
+    if _cloze and os.environ.get("OCR_ABLATION", "1") not in ("0", "false", "False"):
+        try:
+            _debug_ocr_ablation(model, data_collator, val_dataset, DEVICE)
+        except Exception as e:
+            print(f"⚠️ [OCR-ABLATION] skipped: {type(e).__name__}: {e}")
 
     # Save best
     trainer.save_model(training_args.output_dir)
