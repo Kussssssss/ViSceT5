@@ -75,9 +75,11 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
     masked_question : question with each masked run replaced by one <extra_id_i>.
     target          : "<extra_id_0> ... <extra_id_1> ... <extra_id_k>" (clean words).
     n_spans         : number of spans (0 only if the question has no content word).
+    span_types      : list[bool] per span — True = GROUNDED (contains an OCR-overlap
+                      word), False = RANDOM. Used to split accuracy grounded vs random.
     """
     if not isinstance(question, str):
-        return "", "", 0
+        return "", "", 0, []
     ocr_set: Set[str] = set()
     for t in ocr_norm_tokens:
         for sub in str(t).split():
@@ -89,42 +91,47 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
     is_content = [len(c) >= 3 and _remove_vietnamese_accents(c) not in _CLOZE_STOP for c in cores]
 
     to_mask = [False] * len(words)
+    grounded = [False] * len(words)  # per-word: masked because it is in the OCR
     # 1) grounded: content words present in OCR
     for i in range(len(words)):
         if is_content[i] and cores[i] in ocr_set:
             to_mask[i] = True
+            grounded[i] = True
     # 2) random: a few more content words (LM signal + full coverage)
     rng = random.Random(seed & 0xFFFFFFFF)
     for i in range(len(words)):
         if (not to_mask[i]) and is_content[i] and rng.random() < rand_prob:
-            to_mask[i] = True
+            to_mask[i] = True  # grounded stays False
     # 3) guarantee ≥1 span if any content word exists
     if not any(to_mask):
         cidx = [i for i in range(len(words)) if is_content[i]]
         if cidx:
             to_mask[rng.choice(cidx)] = True
     if not any(to_mask):
-        return question.strip(), "", 0
+        return question.strip(), "", 0, []
 
-    # Build input + target, MERGING consecutive masked words into one span.
-    in_parts, tgt_parts, sid, i = [], [], 0, 0
+    # Build input + target, MERGING consecutive masked words into one span. A merged
+    # span is GROUNDED if any of its words is an OCR-overlap word.
+    in_parts, tgt_parts, span_types, sid, i = [], [], [], 0, 0
     while i < len(words):
         if to_mask[i] and sid < max_spans:
-            run = []
+            run, run_grounded = [], False
             while i < len(words) and to_mask[i]:
                 run.append(_CLOZE_EDGE_PUNCT.sub("", words[i]))
+                run_grounded = run_grounded or grounded[i]
                 i += 1
             sent = f"<extra_id_{sid}>"
             in_parts.append(sent)
             tgt_parts.append(sent + " " + " ".join(run))
+            span_types.append(run_grounded)
             sid += 1
         else:
             in_parts.append(words[i])
             i += 1
     if sid == 0:
-        return question.strip(), "", 0
+        return question.strip(), "", 0, []
     target = " ".join(tgt_parts) + f" <extra_id_{sid}>"
-    return " ".join(in_parts), target, sid
+    return " ".join(in_parts), target, sid, span_types
 
 class ViT5VQADataCollator:
     def __init__(
@@ -864,6 +871,7 @@ class ViT5VQADataCollator:
             gen_masked_q_list = []   # encoder input: question with <extra_id_i> masks
             gen_target_texts = []    # decoder target: "<extra_id_0> w0 ... <extra_id_k>"
             gen_nmask_list = []      # #masked spans per sample (0 => no gen signal)
+            gen_span_types_list = [] # per-sample list[bool]: True=grounded span, False=random
             # CLEAN single-set OCR branch fed to the cloze gen forward (the decoder
             # reads the masked word FROM here); char/word from pad_ocr, det/rec/box
             # from ocr_info.
@@ -937,11 +945,12 @@ class ViT5VQADataCollator:
                 if _cloze_mode:
                     # T5 span-infill: mask OCR-overlap words (grounded) + a few random
                     # (LM signal); target = clean words in sentinel format.
-                    masked_q, target_q, n_span = _build_grounded_cloze(
+                    masked_q, target_q, n_span, span_types = _build_grounded_cloze(
                         qs[i], norm_tokens, seed=seeds[i] ^ 0xC10E)
                     gen_masked_q_list.append(masked_q)
                     gen_target_texts.append(target_q)
                     gen_nmask_list.append(n_span)
+                    gen_span_types_list.append(span_types)
 
                 if use_ocr_aug:
                     pad_ocr, rel_ocr, o2r, r2o, _ = self._findRelatedOCR_adr(norm_tokens, current_max_len, adv_pro, self.contrastive_label_list, self.editlen)
@@ -1057,6 +1066,26 @@ class ViT5VQADataCollator:
                 for _bi, _ns in enumerate(gen_nmask_list):
                     if _ns == 0:
                         gen_labels[_bi] = -100
+
+                # Per-target-token type for the grounded/random accuracy split:
+                #   1 = GROUNDED span token, 0 = RANDOM span token, -1 = sentinel/pad
+                # (excluded). Spans are delimited by the <extra_id_i> sentinels, in order.
+                if not hasattr(self, "_sentinel_ids"):
+                    self._sentinel_ids = {self.tokenizer.convert_tokens_to_ids(f"<extra_id_{k}>")
+                                          for k in range(0, 100)}
+                gen_type = torch.full_like(gen_labels, -1)
+                for _bi in range(gen_labels.size(0)):
+                    st = gen_span_types_list[_bi] if _bi < len(gen_span_types_list) else []
+                    if not st:
+                        continue
+                    span_ptr = -1
+                    for _pos, _tid in enumerate(gen_tok.input_ids[_bi].tolist()):
+                        if _tid in self._sentinel_ids:
+                            span_ptr += 1
+                        elif _tid != self.pad_id and 0 <= span_ptr < len(st):
+                            gen_type[_bi, _pos] = 1 if st[span_ptr] else 0
+                batch_dict["gen_mlm_type"] = gen_type.to(pixel_values.device)
+
                 gen_in = self.tokenizer(
                     gen_masked_q_list, padding="max_length", truncation=True,
                     max_length=self.txt_max_len, return_tensors="pt",
