@@ -221,6 +221,14 @@ class ViT5VQADataCollator:
 
         self.adv_probability_pretrain = float(getattr(self.cfg, "adv_probability_pretrain", getattr(self.cfg, "adv_probability", 0.35)))
         self.adv_probability_finetune = float(getattr(self.cfg, "adv_probability_finetune", getattr(self.cfg, "adv_probability", 1.0)))
+        # HARD-TWC knob (v2, default keeps TWA-aligned behavior): duplicate the box onto
+        # the augmented half so the augmented token shares its original's position.
+        # Setting False zeros the augmented boxes → removes the positional shortcut →
+        # TWC must match via TEXT (char) robustness only → a genuinely hard task.
+        self.twc_dup_box = True
+        # Fraction of (non-OCR-overlap) content words additionally masked at RANDOM in
+        # the decoder MLM span-infill (LM signal + coverage). ↑ = harder MLM.
+        self.mlm_rand_prob = 0.15
         self.contrastive_label_list = list(getattr(self.cfg, "contrastive_label_list", [0.9, 0.9]))
         self.editlen = int(getattr(self.cfg, "editlen", 2))
 
@@ -946,7 +954,8 @@ class ViT5VQADataCollator:
                     # T5 span-infill: mask OCR-overlap words (grounded) + a few random
                     # (LM signal); target = clean words in sentinel format.
                     masked_q, target_q, n_span, span_types = _build_grounded_cloze(
-                        qs[i], norm_tokens, seed=seeds[i] ^ 0xC10E)
+                        qs[i], norm_tokens, rand_prob=getattr(self, "mlm_rand_prob", 0.15),
+                        seed=seeds[i] ^ 0xC10E)
                     gen_masked_q_list.append(masked_q)
                     gen_target_texts.append(target_q)
                     gen_nmask_list.append(n_span)
@@ -976,7 +985,13 @@ class ViT5VQADataCollator:
                     for j, l in enumerate(torch.cat([lens_a, lens_b], dim=0)): indices_map.extend([j] * l.item())
                     ocr_to_word_map_list.append(torch.tensor(indices_map, dtype=torch.long))
 
-                    boxes_all = torch.cat([info["boxes"], info["boxes"]], dim=0)
+                    if getattr(self, "twc_dup_box", True):
+                        boxes_all = torch.cat([info["boxes"], info["boxes"]], dim=0)
+                    else:
+                        # HARD-TWC: augmented half gets ZERO boxes → no positional
+                        # shortcut, forcing text-based matching (parallels the zero-pad
+                        # det/rec of the augmented half).
+                        boxes_all = torch.cat([info["boxes"], torch.zeros_like(info["boxes"])], dim=0)
                     mask_all = torch.cat([info["word_mask"], info["word_mask"]], dim=0)
                     o2r_list.append(o2r); r2o_list.append(r2o)
 
