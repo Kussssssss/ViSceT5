@@ -450,21 +450,27 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         if logits is not None and labels is not None:
             with torch.no_grad():
                 pred = logits.argmax(-1)
-                m = labels != -100
                 dev = logits.device
-                correct = (pred == labels) & m
-                acc = (correct.sum().float() / m.sum().clamp_min(1)) if bool(m.any()) \
-                    else torch.zeros((), device=dev)
+                m = labels != -100
+                eq = (pred == labels)
                 mtype = inputs.get("gen_mlm_type")
                 if mtype is not None:
+                    # acc_mlm counts CONTENT tokens only (type != -1) — exclude the
+                    # structural <extra_id_i>/eos sentinels, which are trivially easy and
+                    # would inflate acc_mlm above both grounded/random. So acc_mlm is now
+                    # the token-weighted combination of grounded + random (lies between).
+                    content = m & (mtype != -1)
                     gm = m & (mtype == 1)
                     rm = m & (mtype == 0)
                     g_total = gm.sum().float(); r_total = rm.sum().float()
-                    g_correct = (correct & gm).sum().float()
-                    r_correct = (correct & rm).sum().float()
+                    g_correct = (eq & gm).sum().float()
+                    r_correct = (eq & rm).sum().float()
                 else:
+                    content = m
                     z = torch.zeros((), device=dev)
                     g_total = r_total = g_correct = r_correct = z
+                acc = ((eq & content).sum().float() / content.sum().clamp_min(1)) \
+                    if bool(content.any()) else torch.zeros((), device=dev)
                 stats = {"acc": acc, "g_correct": g_correct, "g_total": g_total,
                          "r_correct": r_correct, "r_total": r_total}
         return loss, stats
