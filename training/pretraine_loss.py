@@ -37,13 +37,15 @@ class ViT5PretrainLoss(nn.Module):
             self.twc_pos_weight_cap = float(os.environ.get("TWC_POS_WEIGHT_CAP", "0"))
         except ValueError:
             self.twc_pos_weight_cap = 0.0
-        # ITM weight in the gen_all total. ITM (pollute) has been observed stuck at
-        # chance (loss ≈ ln2) — set env ITM_WEIGHT=0 to drop the dead-weight term, or a
-        # small value to keep it as a light regularizer. Default 1.0 = unchanged.
+        # ITM weight in the gen_all total. ITM (pollute) stays stuck at chance (loss ≈
+        # ln2) — the image↔OCR mismatch it must detect needs fine visual grounding that
+        # the FROZEN coarse CLIP (+ no_grad/nan_to_num in pretrain) can't provide, and it
+        # reads only the decoder start-token hidden. Its head is also discarded at
+        # finetune. So DEFAULT it OFF (0) as dead weight; set ITM_WEIGHT=1 to restore.
         try:
-            self.itm_weight = float(os.environ.get("ITM_WEIGHT", "1"))
+            self.itm_weight = float(os.environ.get("ITM_WEIGHT", "0"))
         except ValueError:
-            self.itm_weight = 1.0
+            self.itm_weight = 0.0
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
