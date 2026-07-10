@@ -841,13 +841,15 @@ def main(args_list=None):
     print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
           f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
           f"mlm_rand_prob={getattr(data_collator,'mlm_rand_prob',0.15)} "
-          f"itm_weight={os.environ.get('ITM_WEIGHT','1')}")
+          f"itm_weight={os.environ.get('ITM_WEIGHT','0')}")
 
     _cloze = str(mode).lower().strip() in ("gen", "gen_all")
     if _cloze:
-        print(">>> [pretrain] objective = MLM + ITM + TWC | MLM is now done by the DECODER "
-              "(span-infill: mask OCR-overlap + random words, distinct <extra_id_i>, regenerate "
-              "the masked words) instead of an encoder head — same task, decoder-based | question-only encoder")
+        _itmw = os.environ.get("ITM_WEIGHT", "0")
+        print(f">>> [pretrain] objective = MLM (decoder span-infill) + TWC"
+              f"{' + ITM' if _itmw not in ('0','false','False') else ' (ITM off: dead at chance)'} "
+              "| MLM = mask OCR-overlap + random words, distinct <extra_id_i>, decoder regenerates "
+              "them (not an encoder head) | question-only encoder")
     else:
         print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
               f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | (legacy encoder-MLM path)")
