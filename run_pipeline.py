@@ -117,10 +117,28 @@ def run():
                     print(f">>> [finetune] num_train_epochs = {_fep}")
 
                 # Nạp trọng số PRETRAIN để finetune (warm-start):
-                #  MODEL_NAME_OR_PATH = thư mục local chứa model.safetensors của pretrain
-                #                       (vd tải checkpoint pretrain từ HF về).
+                #  PRETRAIN_HF_REPO   = HF repo id chứa checkpoint pretrain (vd
+                #                       'Kus669/ViSceT5-pretrain-genall'); tự tải về.
+                #                       PRETRAIN_HF_CKPT = subfolder (vd 'checkpoint-6591');
+                #                       bỏ trống = tự lấy checkpoint-XXXX mới nhất.
+                #  MODEL_NAME_OR_PATH = thư mục local chứa model.safetensors của pretrain.
                 #  PRETRAIN_WEIGHTS_ID = Drive id zip checkpoint pretrain (tự tải + nạp).
                 # Resume một lần finetune đang dở: RESUME_FROM_CHECKPOINT / RESUME_CHECKPOINT_ID.
+                _hf_repo = os.environ.get("PRETRAIN_HF_REPO", "").strip()
+                if _hf_repo and not os.environ.get("MODEL_NAME_OR_PATH", "").strip():
+                    from huggingface_hub import list_repo_files, snapshot_download
+                    _sub = os.environ.get("PRETRAIN_HF_CKPT", "").strip()
+                    if not _sub:
+                        _files = list_repo_files(_hf_repo)
+                        _cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
+                                      key=lambda x: int(x.split("-")[1]))
+                        _sub = _cks[-1] if _cks else ""
+                    _dl = os.path.join("./output/finetune", "pretrain_hf")
+                    print(f">>> [finetune] Tải checkpoint pretrain từ HF: {_hf_repo}/{_sub or '(root)'}")
+                    snapshot_download(_hf_repo, repo_type="model", local_dir=_dl,
+                                      allow_patterns=[f"{_sub}/*"] if _sub else None)
+                    os.environ["MODEL_NAME_OR_PATH"] = os.path.join(_dl, _sub) if _sub else _dl
+
                 for _fk, _fflag in [("MODEL_NAME_OR_PATH", "--model_name_or_path"),
                                     ("PRETRAIN_WEIGHTS_ID", "--pretrain_weights_id"),
                                     ("RESUME_FROM_CHECKPOINT", "--resume_from_checkpoint"),
