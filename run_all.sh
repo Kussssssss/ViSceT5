@@ -32,11 +32,17 @@ cd /workspace
 
 if [ -d "/workspace/ViSceT5" ]; then
     cd /workspace/ViSceT5
-    git pull
 else
     git clone https://github.com/Kussssssss/ViSceT5.git
     cd /workspace/ViSceT5
 fi
+# Các thay đổi (grounded-cloze, PRETRAIN_HF_REPO, ...) nằm ở nhánh exp/pretrain-gen-all,
+# KHÔNG phải main. Bắt buộc checkout đúng nhánh.
+BRANCH="${REPO_BRANCH:-exp/pretrain-gen-all}"
+git fetch origin
+git checkout "$BRANCH"
+git pull origin "$BRANCH"
+git log --oneline -1
 
 if [ ! -d "/workspace/myenv" ]; then
     python3 -m venv --system-site-packages /workspace/myenv
