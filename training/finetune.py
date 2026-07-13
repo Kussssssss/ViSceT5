@@ -205,6 +205,14 @@ def main(args_list=None):
             print(f"✅ Loaded {n_loaded}/{n_model} model tensors from checkpoint "
                   f"({len(new_state_dict)} in ckpt) | missing={len(res.missing_keys)} | "
                   f"unexpected={len(res.unexpected_keys)}")
+            # Tóm tắt số tensor ĐÃ NẠP theo module (để thấy rõ decoder/encoder/qa_clip...)
+            from collections import Counter as _Counter
+            def _grp(k):
+                if k.startswith("vit5.decoder"): return "vit5.decoder"
+                if k.startswith("vit5.encoder"): return "vit5.encoder"
+                return k.split(".")[0]
+            _by = _Counter(_grp(k) for k in new_state_dict)
+            print("   ✔️ loaded by module:", dict(sorted(_by.items(), key=lambda x: -x[1])))
             if res.missing_keys:
                 print("   ⚠️ missing (not in ckpt) e.g.:", res.missing_keys[:6])
             if res.unexpected_keys:
