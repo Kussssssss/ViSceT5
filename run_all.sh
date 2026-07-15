@@ -6,6 +6,7 @@
 #   bash run_all.sh mock            # quick MOCK/SMOKE pretrain (fast sanity test)
 #   bash run_all.sh finetune        # full finetune
 #   bash run_all.sh finetune mock   # mock finetune
+#   PREDICT_HF_REPO=<repo> bash run_all.sh predict   # sinh submission_{dev,test}.csv
 #
 # Args are order-independent. Environment overrides are also respected and take
 # precedence if already exported: STAGE, MOCK_TEST, HF_TOKEN, HF_REPO,
@@ -17,10 +18,10 @@ STAGE="${STAGE:-pretrain}"
 MOCK_TEST="${MOCK_TEST:-false}"
 for a in "$@"; do
   case "$(echo "$a" | tr '[:upper:]' '[:lower:]')" in
-    pretrain|finetune)            STAGE="$a" ;;
+    pretrain|finetune|predict)    STAGE="$a" ;;
     mock|mocktest|smoke|smoke_test) MOCK_TEST="true" ;;
     full)                          MOCK_TEST="false" ;;
-    *) echo "⚠️  Unknown arg '$a' (ignored). Use: [pretrain|finetune] [mock]";;
+    *) echo "⚠️  Unknown arg '$a' (ignored). Use: [pretrain|finetune|predict] [mock]";;
   esac
 done
 export STAGE MOCK_TEST

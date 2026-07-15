@@ -111,10 +111,24 @@ def run():
             try:
                 sys.argv = ["predict.py"]
                 #  PREDICT_SPLIT      = dev | test | both (mặc định both)
-                #  PREDICT_CKPT_DIR   = thư mục bundle finetune (mặc định tự dò)
+                #  PREDICT_HF_REPO    = HF repo chứa bundle finetune (model.safetensors +
+                #                       config.json + tokenizer). Tự tải về rồi predict.
+                #  PREDICT_HF_CKPT    = (tùy chọn) thư mục con checkpoint-XXXX trong repo.
+                #  PREDICT_CKPT_DIR   = thư mục bundle finetune LOCAL (ưu tiên hơn HF nếu set).
                 #  PREDICT_BATCH_SIZE / PREDICT_NUM_BEAMS = tinh chỉnh generation
                 sys.argv.extend(["--split", os.environ.get("PREDICT_SPLIT", "both").strip()])
                 _pck = os.environ.get("PREDICT_CKPT_DIR", "").strip()
+                _hf_repo = os.environ.get("PREDICT_HF_REPO", "").strip()
+                if not _pck and _hf_repo:
+                    from huggingface_hub import snapshot_download
+                    _sub = os.environ.get("PREDICT_HF_CKPT", "").strip()
+                    _dl = os.path.join("./output", "finetune_hf")
+                    print(f">>> [predict] Tải bundle finetune từ HF: {_hf_repo}/{_sub or '(root)'}")
+                    snapshot_download(
+                        repo_id=_hf_repo, repo_type="model", local_dir=_dl,
+                        allow_patterns=[f"{_sub}/*"] if _sub else None,
+                    )
+                    _pck = os.path.join(_dl, _sub) if _sub else _dl
                 if _pck:
                     sys.argv.extend(["--ckpt_dir", _pck])
                 _pbs = os.environ.get("PREDICT_BATCH_SIZE", "").strip()
@@ -199,7 +213,12 @@ def run():
                 print(f"Creating repository '{hf_repo}' if it doesn't exist...")
                 api.create_repo(repo_id=hf_repo, repo_type="model", exist_ok=True)
                 
-                output_dir = "./output/pretrain" if stage == "pretrain" else "./output/finetune"
+                if stage == "pretrain":
+                    output_dir = "./output/pretrain"
+                elif stage == "predict":
+                    output_dir = "./output"   # gồm submission_*.csv để tải về
+                else:
+                    output_dir = "./output/finetune"
                 os.makedirs(output_dir, exist_ok=True)
                 # Ghi thông tin meta chạy để thư mục không bao giờ rỗng khi upload test
                 with open(os.path.join(output_dir, "run_info.json"), "w", encoding="utf-8") as f:
