@@ -96,13 +96,22 @@ class MMCLIPAttention(CLIPAttention):
                      full_key_mask = full_key_mask[:, :src_len]
 
             key_padding_mask = full_key_mask[:, None, None, :].to(torch.bool)
-            attn_weights = attn_weights.masked_fill(~key_padding_mask, torch.finfo(attn_weights.dtype).min)
+            # NaN ROOT FIX: use a large-but-FINITE negative (not torch.finfo.min).
+            # finfo(float32).min = -3.4e38; softmax's internal (x - x.max()) then does
+            # finfo.min - real_max → OVERFLOWS to -inf, and a fully-masked row gives
+            # 0/0 = NaN — the nondeterministic NaN that forced vision to stay frozen.
+            # -1e9 masks just as hard (exp(-1e9)≈0) but never overflows on subtraction.
+            attn_weights = attn_weights.masked_fill(~key_padding_mask, -1e9)
 
         attn_weights = attn_weights[:, :, mm_len:, :]
         q_len = attn_weights.size(2)
 
         attn_weights = attn_weights.view(bsz * self.num_heads, q_len, src_len)
+        # Stabilize (subtract row-max) + guard any fully-masked row (→ uniform-then-zero)
+        # so softmax can never produce NaN even when a query attends to no valid key.
+        attn_weights = attn_weights - attn_weights.amax(dim=-1, keepdim=True)
         attn_weights = F.softmax(attn_weights, dim=-1)
+        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
 
         if output_attentions:
             attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, q_len, src_len)
