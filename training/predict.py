@@ -84,6 +84,47 @@ def resolve_ckpt_dir(user_dir: str) -> str:
     )
 
 
+def load_dfs_via_hub(dataset_name="ViTextVQA", data_dir="./datasets"):
+    """Chuẩn bị dataset (tải + giải nén ảnh/OCR/JSON nếu chưa có) và trả về
+    dict {'train','validation','test'} DataFrame. Nhờ mapper đã lưu `id`, mỗi df
+    có sẵn cột `id` (submission ID) + image_path/ocr_path đã phân giải, ĐÚNG thứ
+    tự annotation — không cần merged CSV, không lo reorder/trùng khoá.
+    prepare() là idempotent: nếu ảnh/OCR đã giải nén thì bỏ qua tải lại."""
+    import yaml
+    from data.dataset_hub import DatasetHubLoader
+    raw_dir = os.path.join(data_dir, "raw")
+    out_dir = os.path.join(data_dir, "processed")
+    hub = DatasetHubLoader(raw_dir, out_dir)
+    cfg_path = f"configs/data/{dataset_name}.yaml"
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        ds = yaml.safe_load(f)
+    hub.register_dataset(
+        dataset_name=ds["dataset_name"], task_type="VQA",
+        image_zip_id=ds["image"].get("drive_id"), image_dir_override="",
+        ocr_zip_id=ds["ocr"].get("drive_id"), ocr_dir_override="",
+        splits={s: {"id": ds["dataset"][s].get("drive_id") or ds["dataset"][s].get("dir"),
+                    "url": None} for s in ["train", "validation", "test"]},
+    )
+    hub.prepare(dataset_name)
+    return hub.load_task(dataset_name)
+
+
+def df_from_hub(dfs, split):
+    """Lấy df cho split từ dict Hub, chuẩn hoá cột answer (test = rỗng để không
+    tính nhầm EM trên placeholder)."""
+    key = "validation" if split in ("dev", "val") else "test"
+    df = dfs[key].copy()
+    if "id" not in df.columns:
+        raise KeyError("df thiếu cột 'id' — mapper chưa được cập nhật?")
+    if split == "test":
+        df["answer"] = ""
+    else:
+        df["answer"] = df["answer"].fillna("").astype(str)
+    print(f"[{split}] Hub -> {len(df)} dòng | id duy nhất: {df['id'].nunique()} | "
+          f"thiếu image_path: {df['image_path'].isna().sum()}")
+    return df
+
+
 def build_eval_df(split: str, json_path: str, merged_csv: str,
                   image_dir: str, ocr_dir: str) -> pd.DataFrame:
     """Dựng DataFrame theo ĐÚNG thứ tự annotation trong JSON, mỗi dòng mang `id`
@@ -230,9 +271,14 @@ def main():
     ap.add_argument("--max_new_tokens", type=int, default=0,
                     help="0 = dùng generation_max_new_tokens của config (mặc định)")
     ap.add_argument("--out_dir", default=OUTPUT_PATH)
-    ap.add_argument("--json_dir", default="datasets/processed/ViTextVQA")
-    ap.add_argument("--image_dir", default="", help="fallback nếu thiếu CSV merged")
-    ap.add_argument("--ocr_dir", default="", help="fallback nếu thiếu CSV merged")
+    ap.add_argument("--data_dir", default="./datasets",
+                    help="Thư mục dataset cho Hub (tự tải/giải nén ảnh+OCR+JSON)")
+    ap.add_argument("--no_hub", action="store_true",
+                    help="Không dùng Hub; đọc JSON + merged CSV local (offline)")
+    ap.add_argument("--json_dir", default="datasets/processed/ViTextVQA",
+                    help="[fallback --no_hub] thư mục chứa ViTextVQA_*.json")
+    ap.add_argument("--image_dir", default="", help="[fallback] nếu thiếu CSV merged")
+    ap.add_argument("--ocr_dir", default="", help="[fallback] nếu thiếu CSV merged")
     ap.add_argument("--no_em", action="store_true", help="Bỏ tính EM cục bộ trên dev")
     args = ap.parse_args()
 
@@ -287,11 +333,27 @@ def main():
     if hasattr(collator, "set_mode"):
         collator.set_mode(pretrain=False, mask_prob=0.0)
 
+    # Nguồn dữ liệu chính: DatasetHubLoader (tự tải/giải nén, df có sẵn `id`).
+    # Bỏ qua nếu người dùng ép offline bằng --no_hub (dùng JSON + merged CSV local).
+    dfs_hub = None
+    if not args.no_hub:
+        try:
+            dfs_hub = load_dfs_via_hub(data_dir=args.data_dir)
+            if "id" not in dfs_hub["test"].columns:
+                print("⚠️  df từ Hub thiếu cột 'id' — chuyển sang fallback JSON/CSV.")
+                dfs_hub = None
+        except Exception as e:
+            print(f"⚠️  Chuẩn bị dataset qua Hub thất bại ({e}); fallback JSON/CSV local.")
+            dfs_hub = None
+
     outs = []
     for sp in splits:
-        json_path = os.path.join(args.json_dir, f"ViTextVQA_{SPLIT_TO_JSON[sp]}.json")
-        merged_csv = os.path.join(OUTPUT_PATH, f"{SPLIT_TO_CSV[sp]}.csv")
-        df = build_eval_df(sp, json_path, merged_csv, args.image_dir, args.ocr_dir)
+        if dfs_hub is not None:
+            df = df_from_hub(dfs_hub, sp)
+        else:
+            json_path = os.path.join(args.json_dir, f"ViTextVQA_{SPLIT_TO_JSON[sp]}.json")
+            merged_csv = os.path.join(OUTPUT_PATH, f"{SPLIT_TO_CSV[sp]}.csv")
+            df = build_eval_df(sp, json_path, merged_csv, args.image_dir, args.ocr_dir)
         out_csv = os.path.join(args.out_dir, f"submission_{sp}.csv")
         outs.append(run_split(
             model, tokenizer, collator, df, sp, out_csv,
