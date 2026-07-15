@@ -170,11 +170,12 @@ def simple_pretrain_aggregator(eval_pred):
         # reported (a permanent-0 column is misleading). Masked-prediction quality is
         # loss_cloze; acc slot is ITM alone. loss_mlm stays available in the raw vector
         # (idx3) for legacy modes but is omitted from the displayed metrics.
+        # ITM (pollute) is the dead binary head (ITM_WEIGHT=0), replaced by ITC — so
+        # acc_itm/loss_itm are NOT shown (they'd sit at chance and confuse). The
+        # alignment objective now is ITC, reported with BOTH loss_itc + acc_itc below.
         result = {
             "pretrain_acc": float(mean_vals[0]),
-            "acc_itm": float(mean_vals[1]),
             "acc_twc": float(mean_vals[2]),
-            "loss_itm": float(mean_vals[4]),
             "loss_twc": float(mean_vals[5]),
         }
         if mean_vals.shape[0] >= 8:
@@ -200,6 +201,8 @@ def simple_pretrain_aggregator(eval_pred):
                 result["acc_mlm_random"] = r_correct / r_total
         if mean_vals.shape[0] >= 15:
             result["loss_itc"] = float(mean_vals[14])
+        if mean_vals.shape[0] >= 16:
+            result["acc_itc"] = float(mean_vals[15])
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
@@ -409,11 +412,12 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             current_epoch = self.state.epoch or 0.0
 
             if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) >= 6:
-                itm_a, twc_a = batch_acc[1].item(), batch_acc[2].item()
-                itm_l, twc_l = batch_acc[4].item(), batch_acc[5].item()
+                twc_a = batch_acc[2].item()
+                twc_l = batch_acc[5].item()
                 gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0
                 cloze_a = batch_acc[9].item() if len(batch_acc) >= 10 else 0.0
                 itc_l = batch_acc[14].item() if len(batch_acc) >= 15 else 0.0
+                itc_a = batch_acc[15].item() if len(batch_acc) >= 16 else 0.0
                 mlm_gr = ""
                 if len(batch_acc) >= 14:
                     gt, rt = batch_acc[11].item(), batch_acc[13].item()
@@ -423,8 +427,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 print(
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
-                    f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f}, Acc(MLM):{cloze_a:.3f}{mlm_gr} | "
-                    f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(MLM):{gen_l:.3f}, Loss(ITC):{itc_l:.3f}"
+                    f"Batch Detail -> Acc(TWC):{twc_a:.3f}, Acc(MLM):{cloze_a:.3f}{mlm_gr}, Acc(ITC):{itc_a:.3f} | "
+                    f"Loss(TWC):{twc_l:.3f}, Loss(MLM):{gen_l:.3f}, Loss(ITC):{itc_l:.3f}"
                 )
             else:
                 print(

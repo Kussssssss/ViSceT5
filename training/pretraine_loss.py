@@ -165,6 +165,7 @@ class ViT5PretrainLoss(nn.Module):
         # ITC (Image-Text Contrastive, image↔question): in-batch symmetric InfoNCE.
         # Aligns image and question in a shared space (ALBEF align-before-fuse). Opt-in.
         itc_loss = None
+        itc_acc = None
         _iv, _tv = model_output.get("itc_img_vec"), model_output.get("itc_txt_vec")
         if self.itc_weight > 0 and _iv is not None and _tv is not None and _iv.size(0) > 1:
             _sc = model_output.get("itc_logit_scale")
@@ -172,6 +173,11 @@ class ViT5PretrainLoss(nn.Module):
             _logits = _sc * (_iv @ _tv.t())            # (B, B): image i ↔ question j
             _tgt = torch.arange(_logits.size(0), device=_logits.device)
             itc_loss = 0.5 * (F.cross_entropy(_logits, _tgt) + F.cross_entropy(_logits.t(), _tgt))
+            # ITC retrieval accuracy: image_i's top-1 text == i (both directions).
+            with torch.no_grad():
+                _i2t = (_logits.argmax(dim=1) == _tgt).float().mean()
+                _t2i = (_logits.argmax(dim=0) == _tgt).float().mean()
+                itc_acc = 0.5 * (_i2t + _t2i)
 
         if mode in ["full", "all"]:
             total_loss = mlm_loss + pollute_loss + contrastive_loss
@@ -218,6 +224,9 @@ class ViT5PretrainLoss(nn.Module):
         )
         model_output["loss_itc"] = (
             itc_loss.detach() if itc_loss is not None else mlm_loss.detach() * 0.0
+        )
+        model_output["acc_itc"] = (
+            itc_acc.detach() if itc_acc is not None else mlm_loss.detach() * 0.0
         )
         return total_loss
 
@@ -352,6 +361,7 @@ class GlobalPretrainAccuracy(BaseMetric):
         g_correct, g_total = _f("gen_g_correct"), _f("gen_g_total")
         r_correct, r_total = _f("gen_r_correct"), _f("gen_r_total")
         loss_itc = _f("loss_itc")
+        acc_itc = _f("acc_itc")
 
         # 3. Tính Total Acc tùy mode
         if self.mode in ("gen", "gen_all"):
@@ -370,17 +380,17 @@ class GlobalPretrainAccuracy(BaseMetric):
             acc_slot1 = (mlm_acc + itm_acc) / 2.0
             total_acc = (mlm_acc + itm_acc + twc_acc) / 3.0
 
-        # TRẢ VỀ 1 TENSOR CHỨA 15 GIÁ TRỊ ĐỂ TRAINER THU THẬP
+        # TRẢ VỀ 1 TENSOR CHỨA 16 GIÁ TRỊ ĐỂ TRAINER THU THẬP
         # [0] total_acc  [1] acc_slot1 (ITM-only in cloze; (MLM+ITM)/2 legacy)  [2] twc_acc
         # [3] loss_mlm (0 in cloze) [4] loss_itm [5] loss_twc  [6] twc_pos_recall
         # [7] twc_neg_recall  [8] loss_gen (=decoder MLM loss)  [9] mlm_acc
         # [10] g_correct [11] g_total [12] r_correct [13] r_total (grounded/random counts)
-        # [14] loss_itc (image↔question contrastive; 0 when ITC off)
+        # [14] loss_itc (image↔question contrastive; 0 when ITC off)  [15] acc_itc (retrieval)
         device = model_output["textcls_scores"].device
         return torch.tensor(
             [total_acc, acc_slot1, twc_acc,
              loss_mlm, loss_itm, loss_twc,
              twc_pos_recall, twc_neg_recall, loss_gen, cloze_acc,
-             g_correct, g_total, r_correct, r_total, loss_itc],
+             g_correct, g_total, r_correct, r_total, loss_itc, acc_itc],
             device=device
         )
