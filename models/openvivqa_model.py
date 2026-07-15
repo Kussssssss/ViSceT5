@@ -204,6 +204,16 @@ class OpenViVQAModel(PreTrainedModel):
 
         self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-12).to(torch.float32)
 
+        # ITC (Image-Text Contrastive) heads — align image ↔ question in a shared space
+        # (ALBEF "align-before-fuse"). PRETRAIN-ONLY (stamped only in the pretrain block),
+        # discarded at finetune. Shapes a joint image-question space; and when vision is
+        # UNFROZEN it gives the (otherwise frozen coarse) CLIP a gradient to learn
+        # scene-text-relevant visual features — addressing the frozen-vision ceiling.
+        self.itc_dim = 256
+        self.itc_img_proj = nn.Linear(self.d_model, self.itc_dim)
+        self.itc_txt_proj = nn.Linear(self.d_model, self.itc_dim)
+        self.itc_logit_scale = nn.Parameter(torch.tensor(2.659))  # exp≈14.3 (CLIP-style)
+
         # ── TWC Projection Heads ────────────────────────────────────────────────
         # TWC (theo notebook gốc / TWA paper): similarity tính trực tiếp trên
         # word-feature đã L2-normalize từ encoder — KHÔNG dùng projection head riêng.
@@ -293,8 +303,12 @@ class OpenViVQAModel(PreTrainedModel):
         # sanitize the output → the NaN can never reach the trainable modules. Gated by
         # `_pretrain_stage` (set only in pretrain.py; stays set through the cloze forward
         # which flips `pretrain=False`), so FINETUNE is completely untouched.
+        # no_grad+sanitize the vision ONLY when it is truly frozen in pretrain. If vision
+        # is being UNFROZEN (_vision_trainable), let grads flow (ITC/unfreeze needs them);
+        # the NaN root fix in MMCLIPAttention + the fused_seq guard keep it stable.
         _frozen_pt = (bool(getattr(self, "_pretrain_stage", False))
-                      and bool(getattr(self.qa_clip.config, "freeze_clip", False)))
+                      and bool(getattr(self.qa_clip.config, "freeze_clip", False))
+                      and not bool(getattr(self, "_vision_trainable", False)))
         if _frozen_pt:
             with torch.no_grad():
                 qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
@@ -963,6 +977,18 @@ class OpenViVQAModel(PreTrainedModel):
             dec_last = outputs.decoder_hidden_states[-1]
             dec_first = dec_last[:, 0, :]
             out_dict["pollutecls_scores"] = self.pollute_head(dec_first.float())
+
+            # ITC vectors: masked-mean pool image tokens + question embeds → project → L2.
+            # (When vision is unfrozen, img_tokens carries grad → ITC shapes CLIP.)
+            _im = img_pack["img_attn_mask"].unsqueeze(-1).to(img_pack["img_tokens"].dtype)
+            _img_pooled = (img_pack["img_tokens"] * _im).sum(1) / _im.sum(1).clamp_min(1e-6)
+            _tm = txt_attn_mask_for_enc.unsqueeze(-1).to(txt_emb_for_enc.dtype)
+            _txt_pooled = (txt_emb_for_enc * _tm).sum(1) / _tm.sum(1).clamp_min(1e-6)
+            _iv = self.itc_img_proj(_img_pooled.float())
+            _tv = self.itc_txt_proj(_txt_pooled.float())
+            out_dict["itc_img_vec"] = _iv / _iv.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            out_dict["itc_txt_vec"] = _tv / _tv.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+            out_dict["itc_logit_scale"] = self.itc_logit_scale
 
             out_dict["contrastive_scores"] = None
             out_dict["o2r_block"] = None

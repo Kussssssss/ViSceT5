@@ -46,6 +46,12 @@ class ViT5PretrainLoss(nn.Module):
             self.itm_weight = float(os.environ.get("ITM_WEIGHT", "0"))
         except ValueError:
             self.itm_weight = 0.0
+        # ITC (Image-Text Contrastive, image↔question) weight. Opt-in (default 0);
+        # set ITC_WEIGHT>0 to enable align-before-fuse. Pairs with vision unfreeze.
+        try:
+            self.itc_weight = float(os.environ.get("ITC_WEIGHT", "0"))
+        except ValueError:
+            self.itc_weight = 0.0
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
@@ -156,6 +162,17 @@ class ViT5PretrainLoss(nn.Module):
         # branch. See pretrain_decoder_plan.md. (key name 'gen_loss' kept for compat.)
         gen_loss = model_output.get("gen_loss", None)
 
+        # ITC (Image-Text Contrastive, image↔question): in-batch symmetric InfoNCE.
+        # Aligns image and question in a shared space (ALBEF align-before-fuse). Opt-in.
+        itc_loss = None
+        _iv, _tv = model_output.get("itc_img_vec"), model_output.get("itc_txt_vec")
+        if self.itc_weight > 0 and _iv is not None and _tv is not None and _iv.size(0) > 1:
+            _sc = model_output.get("itc_logit_scale")
+            _sc = _sc.exp().clamp(max=100.0) if torch.is_tensor(_sc) else 14.3
+            _logits = _sc * (_iv @ _tv.t())            # (B, B): image i ↔ question j
+            _tgt = torch.arange(_logits.size(0), device=_logits.device)
+            itc_loss = 0.5 * (F.cross_entropy(_logits, _tgt) + F.cross_entropy(_logits.t(), _tgt))
+
         if mode in ["full", "all"]:
             total_loss = mlm_loss + pollute_loss + contrastive_loss
 
@@ -168,6 +185,8 @@ class ViT5PretrainLoss(nn.Module):
             total_loss = self.itm_weight * pollute_loss + contrastive_loss
             if gen_loss is not None:
                 total_loss = total_loss + gen_loss
+            if itc_loss is not None:
+                total_loss = total_loss + self.itc_weight * itc_loss
             # else: batch produced no cloze span (rare with random-span fallback) →
             # train encoder aux (ITM+TWC) only; decoder skips this batch.
 
@@ -196,6 +215,9 @@ class ViT5PretrainLoss(nn.Module):
         model_output["loss_twc"] = contrastive_loss.detach()
         model_output["loss_gen"] = (
             gen_loss.detach() if gen_loss is not None else mlm_loss.detach() * 0.0
+        )
+        model_output["loss_itc"] = (
+            itc_loss.detach() if itc_loss is not None else mlm_loss.detach() * 0.0
         )
         return total_loss
 
@@ -329,6 +351,7 @@ class GlobalPretrainAccuracy(BaseMetric):
             return v.item() if torch.is_tensor(v) else (float(v) if v is not None else 0.0)
         g_correct, g_total = _f("gen_g_correct"), _f("gen_g_total")
         r_correct, r_total = _f("gen_r_correct"), _f("gen_r_total")
+        loss_itc = _f("loss_itc")
 
         # 3. Tính Total Acc tùy mode
         if self.mode in ("gen", "gen_all"):
@@ -347,16 +370,17 @@ class GlobalPretrainAccuracy(BaseMetric):
             acc_slot1 = (mlm_acc + itm_acc) / 2.0
             total_acc = (mlm_acc + itm_acc + twc_acc) / 3.0
 
-        # TRẢ VỀ 1 TENSOR CHỨA 14 GIÁ TRỊ ĐỂ TRAINER THU THẬP
+        # TRẢ VỀ 1 TENSOR CHỨA 15 GIÁ TRỊ ĐỂ TRAINER THU THẬP
         # [0] total_acc  [1] acc_slot1 (ITM-only in cloze; (MLM+ITM)/2 legacy)  [2] twc_acc
         # [3] loss_mlm (0 in cloze) [4] loss_itm [5] loss_twc  [6] twc_pos_recall
         # [7] twc_neg_recall  [8] loss_gen (=decoder MLM loss)  [9] mlm_acc
         # [10] g_correct [11] g_total [12] r_correct [13] r_total (grounded/random counts)
+        # [14] loss_itc (image↔question contrastive; 0 when ITC off)
         device = model_output["textcls_scores"].device
         return torch.tensor(
             [total_acc, acc_slot1, twc_acc,
              loss_mlm, loss_itm, loss_twc,
              twc_pos_recall, twc_neg_recall, loss_gen, cloze_acc,
-             g_correct, g_total, r_correct, r_total],
+             g_correct, g_total, r_correct, r_total, loss_itc],
             device=device
         )
