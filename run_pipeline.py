@@ -106,6 +106,32 @@ def run():
             except Exception as e:
                 print(f"❌ Error during pretraining: {e}")
                 raise e
+        elif stage == "predict":
+            print("\n>>> [Step 3] Starting Predict (sinh file nộp ID,Answer)...")
+            try:
+                sys.argv = ["predict.py"]
+                #  PREDICT_SPLIT      = dev | test | both (mặc định both)
+                #  PREDICT_CKPT_DIR   = thư mục bundle finetune (mặc định tự dò)
+                #  PREDICT_BATCH_SIZE / PREDICT_NUM_BEAMS = tinh chỉnh generation
+                sys.argv.extend(["--split", os.environ.get("PREDICT_SPLIT", "both").strip()])
+                _pck = os.environ.get("PREDICT_CKPT_DIR", "").strip()
+                if _pck:
+                    sys.argv.extend(["--ckpt_dir", _pck])
+                _pbs = os.environ.get("PREDICT_BATCH_SIZE", "").strip()
+                if _pbs:
+                    sys.argv.extend(["--batch_size", _pbs])
+                _pnb = os.environ.get("PREDICT_NUM_BEAMS", "").strip()
+                if _pnb:
+                    sys.argv.extend(["--num_beams", _pnb])
+                print(f">>> [predict] argv = {sys.argv}")
+
+                from training import predict
+                importlib.reload(predict)
+                predict.main()
+                print(">>> Predict finished successfully.")
+            except Exception as e:
+                print(f"❌ Error during predict: {e}")
+                raise e
         else:
             print("\n>>> [Step 3] Starting Finetune Training...")
             try:

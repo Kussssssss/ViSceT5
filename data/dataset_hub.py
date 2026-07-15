@@ -222,6 +222,7 @@ def _default_vqa_mapper(
         rows.append({
             "dataset": None,
             "split": split_name,
+            "id": ann.get("id"),          # annotation/question id — submission ID (ID,Answer)
             "image_id": img_id,
             "image_filename": filename,
             "question": question,
