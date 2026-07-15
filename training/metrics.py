@@ -278,6 +278,38 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         self._running_cnt = 0
         self._last_log_step = -1
 
+    def create_optimizer(self):
+        """Differential LR (TWA-style): scale the LR of the unfrozen QA-CLIP vision
+        params by env VISION_LR_SCALE (e.g. 0.1) so pretrained CLIP features aren't
+        destroyed when vision is unfrozen; everything else keeps the base LR. Only
+        active when VISION_LR_SCALE != 1 (a pretrain-only knob) — finetune and normal
+        pretrain fall back to the standard single-LR optimizer, so both are unchanged."""
+        if self.optimizer is not None:
+            return self.optimizer
+        try:
+            _vlr = float(os.environ.get("VISION_LR_SCALE", "1"))
+        except ValueError:
+            _vlr = 1.0
+        if _vlr == 1.0:
+            return super().create_optimizer()
+        from transformers.trainer_pt_utils import get_parameter_names
+        from transformers.pytorch_utils import ALL_LAYERNORM_LAYERS
+        model = self.model
+        decay = {n for n in get_parameter_names(model, ALL_LAYERNORM_LAYERS) if "bias" not in n}
+        base, wd = self.args.learning_rate, self.args.weight_decay
+        named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+
+        def _grp(is_v, is_d):
+            ps = [p for n, p in named if (("qa_clip" in n) == is_v) and ((n in decay) == is_d)]
+            return {"params": ps, "weight_decay": wd if is_d else 0.0,
+                    "lr": base * (_vlr if is_v else 1.0)}
+        groups = [_grp(v, d) for v in (True, False) for d in (True, False)]
+        groups = [g for g in groups if g["params"]]
+        _nv = sum(p.numel() for n, p in named if "qa_clip" in n)
+        print(f">>> [pretrain] differential LR: qa_clip(vision) lr×{_vlr} (~{_nv:,} params) | rest lr×1")
+        self.optimizer = torch.optim.AdamW(groups, lr=base, betas=(0.9, 0.999), eps=1e-8)
+        return self.optimizer
+
     def training_step(self, model, inputs):
         # Detect weights that are ALREADY corrupted (means a previous step slipped
         # a bad update through — should not happen once the guard below works).
