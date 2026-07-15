@@ -198,6 +198,8 @@ def simple_pretrain_aggregator(eval_pred):
                 result["acc_mlm_grounded"] = g_correct / g_total
             if r_total > 0:
                 result["acc_mlm_random"] = r_correct / r_total
+        if mean_vals.shape[0] >= 15:
+            result["loss_itc"] = float(mean_vals[14])
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
@@ -379,6 +381,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 itm_l, twc_l = batch_acc[4].item(), batch_acc[5].item()
                 gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0
                 cloze_a = batch_acc[9].item() if len(batch_acc) >= 10 else 0.0
+                itc_l = batch_acc[14].item() if len(batch_acc) >= 15 else 0.0
                 mlm_gr = ""
                 if len(batch_acc) >= 14:
                     gt, rt = batch_acc[11].item(), batch_acc[13].item()
@@ -389,7 +392,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                     f"[Pretrain] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
                     f"Batch Detail -> Acc(ITM):{itm_a:.3f}, Acc(TWC):{twc_a:.3f}, Acc(MLM):{cloze_a:.3f}{mlm_gr} | "
-                    f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(MLM):{gen_l:.3f}"
+                    f"Loss(ITM):{itm_l:.3f}, Loss(TWC):{twc_l:.3f}, Loss(MLM):{gen_l:.3f}, Loss(ITC):{itc_l:.3f}"
                 )
             else:
                 print(

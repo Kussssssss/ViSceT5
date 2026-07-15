@@ -797,8 +797,12 @@ def main(args_list=None):
                 for _p in _pln.parameters():
                     if not _p.requires_grad:
                         _p.requires_grad = True; _cnt += _p.numel()
+            # Tell the forward NOT to no_grad/detach QA-CLIP (grads must flow to the
+            # unfrozen layers). NaN root fix + fused_seq guard keep it stable; the
+            # training_step qa_clip grad-clip prevents explosion.
+            model._vision_trainable = True
             print(f"🧊➡️🔥 [pretrain] vision unfreeze: last {_k}/{len(_layers)} CLIP-vision "
-                  f"layers (+post_layernorm) → +{_cnt:,} params trainable.")
+                  f"layers (+post_layernorm) → +{_cnt:,} params trainable. (grads ON)")
         except Exception as _e:
             print(f"⚠️ [pretrain] vision unfreeze skipped ({_e}).")
 
