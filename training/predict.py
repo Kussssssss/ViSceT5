@@ -285,7 +285,11 @@ def main():
     ap.add_argument("--split", choices=["dev", "val", "test", "both"], default="dev",
                     help="dev=validation (public LB), test=private LB, both=cả hai")
     ap.add_argument("--ckpt_dir", default="",
-                    help="Thư mục bundle finetune (mặc định tự dò pinned_best_ckpt/best_bundle/finetune)")
+                    help="Thư mục bundle finetune LOCAL (ưu tiên hơn --hf_repo nếu set)")
+    ap.add_argument("--hf_repo", default="",
+                    help="HF repo chứa bundle finetune (vd Kus669/ViSceT5-finetune-frompretrain-8400) — tự tải về")
+    ap.add_argument("--hf_ckpt", default="",
+                    help="Thư mục con checkpoint trong repo HF (vd checkpoint-21975)")
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--num_beams", type=int, default=4)
     ap.add_argument("--max_new_tokens", type=int, default=0,
@@ -311,7 +315,23 @@ def main():
 
     splits = ["dev", "test"] if args.split == "both" else [args.split]
 
-    ckpt_dir = resolve_ckpt_dir(args.ckpt_dir)
+    # Tải bundle finetune từ HF nếu không có --ckpt_dir local
+    ckpt_arg = args.ckpt_dir
+    if not ckpt_arg and args.hf_repo:
+        from huggingface_hub import snapshot_download
+        dl = os.path.join(OUTPUT_PATH, "finetune_hf")
+        # Chỉ tải file cần cho inference (bỏ optimizer.pt/scheduler/rng/trainer_state nặng)
+        _need = ["config.json", "generation_config.json", "*.safetensors",
+                 "tokenizer*", "special_tokens_map.json", "vocab*", "spiece*",
+                 "image_processor/*"]
+        prefix = f"{args.hf_ckpt}/" if args.hf_ckpt else ""
+        pat = [prefix + p for p in _need]
+        print(f">>> Tải bundle từ HF: {args.hf_repo}/{args.hf_ckpt or '(root)'} (chỉ file inference)")
+        snapshot_download(repo_id=args.hf_repo, repo_type="model",
+                          local_dir=dl, allow_patterns=pat)
+        ckpt_arg = os.path.join(dl, args.hf_ckpt) if args.hf_ckpt else dl
+
+    ckpt_dir = resolve_ckpt_dir(ckpt_arg)
     print(f">>> Bundle: {ckpt_dir}")
 
     vision_ocr = Vision_Encode_Ocr_Feature(DEFAULT_OCR_CONFIG)
