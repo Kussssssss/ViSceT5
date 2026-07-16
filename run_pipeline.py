@@ -137,6 +137,13 @@ def run():
                 _pnb = os.environ.get("PREDICT_NUM_BEAMS", "").strip()
                 if _pnb:
                     sys.argv.extend(["--num_beams", _pnb])
+                # Kaggle: trỏ vào data attach (tránh gdown Drive)
+                for _ek, _eflag in [("PREDICT_IMAGE_DIR", "--image_dir_override"),
+                                    ("PREDICT_OCR_DIR", "--ocr_dir_override"),
+                                    ("PREDICT_JSON_DIR", "--json_src_dir")]:
+                    _ev = os.environ.get(_ek, "").strip()
+                    if _ev:
+                        sys.argv.extend([_eflag, _ev])
                 print(f">>> [predict] argv = {sys.argv}")
 
                 from training import predict
