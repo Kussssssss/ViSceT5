@@ -220,14 +220,38 @@ def _to_dev(x):
     return x.to(DEVICE) if isinstance(x, torch.Tensor) else x
 
 
+def _em_f1(preds, labels):
+    """Nhân bản Y HỆT training.metrics.compute_f1_em (single-reference, cùng
+    _normalize_txt) để local EM/F1 trùng với eval khi finetune — không import
+    metrics (tránh phụ thuộc pycocoevalcap)."""
+    import collections
+    ems, f1s = [], []
+    for p, l in zip(preds, labels):
+        p = _norm_em(p); l = _norm_em(l)
+        ems.append(1.0 if p == l else 0.0)
+        pt, lt = p.split(), l.split()
+        if not pt or not lt:
+            f1s.append(0.0); continue
+        common = collections.Counter(pt) & collections.Counter(lt)
+        ns = sum(common.values())
+        if ns == 0:
+            f1s.append(0.0); continue
+        prec, rec = ns / len(pt), ns / len(lt)
+        f1s.append(2 * prec * rec / (prec + rec))
+    k = max(len(ems), 1)
+    return sum(f1s) / k, sum(ems) / k
+
+
 @torch.inference_mode()
 def run_split(model, tokenizer, collator, df, split, out_csv,
               batch_size, num_beams, max_new_tokens, report_em):
     dataset = ViT5VQADataset(df)
     ids = df["id"].tolist()
-    gts = df["answer"].tolist()
     n = len(dataset)
-    preds = []
+    pad_id = tokenizer.pad_token_id or 0
+    csv_preds = []          # đã chuẩn hoá nhẹ để GHI file nộp
+    raw_preds = []          # decode thô — cơ sở tính EM (giống eval)
+    label_texts = []        # decode từ labels collator (round-trip) — giống eval
 
     print("=" * 72)
     print(f"PREDICT [{split}] n={n} bs={batch_size} beams={num_beams} "
@@ -260,23 +284,33 @@ def run_split(model, tokenizer, collator, df, split, out_csv,
             num_beams=num_beams,
         )
         decoded = tokenizer.batch_decode(gen_out, skip_special_tokens=True)
-        preds.extend(_norm_answer(t) for t in decoded)
+        raw_preds.extend(decoded)
+        csv_preds.extend(_norm_answer(t) for t in decoded)
+
+        # decode labels do collator sinh (round-trip qua tokenizer) — Y HỆT eval
+        lbl = batch.get("labels")
+        if lbl is not None:
+            lbl = lbl.detach().clone()
+            lbl[lbl == -100] = pad_id
+            label_texts.extend(tokenizer.batch_decode(lbl, skip_special_tokens=True))
 
         done = min(start + batch_size, n)
         if (start // batch_size) % 20 == 0 or done == n:
             print(f"  {done}/{n} ...")
 
-    assert len(preds) == n == len(ids), f"len mismatch: preds={len(preds)} ids={len(ids)}"
+    assert len(csv_preds) == n == len(ids), f"len mismatch: preds={len(csv_preds)} ids={len(ids)}"
 
-    sub = pd.DataFrame({"ID": ids, "Answer": preds})
+    sub = pd.DataFrame({"ID": ids, "Answer": csv_preds})
     os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
     sub.to_csv(out_csv, index=False, encoding="utf-8")
     print(f"✅ Ghi {len(sub)} dòng -> {out_csv}")
     print(sub.head(5).to_string(index=False))
 
-    if report_em and any(g for g in gts):
-        em = sum(1.0 for p, g in zip(preds, gts) if _norm_em(p) == _norm_em(g)) / n
-        print(f"📊 [{split}] EM cục bộ (so với answers trong JSON) = {em:.4f} ({em*100:.2f}%)")
+    # EM/F1 cục bộ: pred THÔ vs label round-trip, cùng công thức compute_f1_em -> khớp eval
+    if report_em and len(label_texts) == n and any(t.strip() for t in label_texts):
+        f1, em = _em_f1(raw_preds, label_texts)
+        print(f"📊 [{split}] EM={em:.4f} ({em*100:.2f}%) | F1={f1:.4f}  "
+              f"(khớp eval: nhãn round-trip + công thức đồng nhất; dùng --batch_size 4 để khớp tuyệt đối)")
     return out_csv
 
 
