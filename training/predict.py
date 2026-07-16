@@ -84,12 +84,18 @@ def resolve_ckpt_dir(user_dir: str) -> str:
     )
 
 
-def load_dfs_via_hub(dataset_name="ViTextVQA", data_dir="./datasets"):
-    """Chuẩn bị dataset (tải + giải nén ảnh/OCR/JSON nếu chưa có) và trả về
-    dict {'train','validation','test'} DataFrame. Nhờ mapper đã lưu `id`, mỗi df
-    có sẵn cột `id` (submission ID) + image_path/ocr_path đã phân giải, ĐÚNG thứ
-    tự annotation — không cần merged CSV, không lo reorder/trùng khoá.
-    prepare() là idempotent: nếu ảnh/OCR đã giải nén thì bỏ qua tải lại."""
+def load_dfs_via_hub(dataset_name="ViTextVQA", data_dir="./datasets",
+                     image_dir_override="", ocr_dir_override="", json_src_dir=""):
+    """Chuẩn bị dataset và trả về dict {'train','validation','test'} DataFrame.
+    Nhờ mapper đã lưu `id`, mỗi df có sẵn cột `id` (submission ID) + image_path/
+    ocr_path đã phân giải, ĐÚNG thứ tự annotation — không cần merged CSV.
+    prepare() idempotent: ảnh/OCR đã có thì bỏ qua tải lại.
+
+    Kaggle (data attach ở /kaggle/input, tránh gdown Drive):
+      - image_dir_override / ocr_dir_override: trỏ thẳng thư mục ảnh / OCR đã attach.
+      - json_src_dir: thư mục chứa ViTextVQA_*.json đã attach → copy vào out_dir
+        để prepare() KHÔNG tải JSON qua mạng."""
+    import shutil
     import yaml
     from data.dataset_hub import DatasetHubLoader
     raw_dir = os.path.join(data_dir, "raw")
@@ -98,10 +104,24 @@ def load_dfs_via_hub(dataset_name="ViTextVQA", data_dir="./datasets"):
     cfg_path = f"configs/data/{dataset_name}.yaml"
     with open(cfg_path, "r", encoding="utf-8") as f:
         ds = yaml.safe_load(f)
+
+    # Kaggle: nạp JSON attach sẵn để bỏ qua tải mạng
+    if json_src_dir:
+        ds_out = os.path.join(out_dir, dataset_name)
+        os.makedirs(ds_out, exist_ok=True)
+        for s in ["train", "validation", "test"]:
+            src = os.path.join(json_src_dir, f"{dataset_name}_{s}.json")
+            dst = os.path.join(ds_out, f"{dataset_name}_{s}.json")
+            if os.path.exists(src) and not os.path.exists(dst):
+                shutil.copy(src, dst)
+                print(f"   copy JSON attach: {src} -> {dst}")
+
     hub.register_dataset(
         dataset_name=ds["dataset_name"], task_type="VQA",
-        image_zip_id=ds["image"].get("drive_id"), image_dir_override="",
-        ocr_zip_id=ds["ocr"].get("drive_id"), ocr_dir_override="",
+        image_zip_id=ds["image"].get("drive_id"),
+        image_dir_override=image_dir_override or "",
+        ocr_zip_id=ds["ocr"].get("drive_id"),
+        ocr_dir_override=ocr_dir_override or "",
         splits={s: {"id": ds["dataset"][s].get("drive_id") or ds["dataset"][s].get("dir"),
                     "url": None} for s in ["train", "validation", "test"]},
     )
@@ -275,6 +295,13 @@ def main():
                     help="Thư mục dataset cho Hub (tự tải/giải nén ảnh+OCR+JSON)")
     ap.add_argument("--no_hub", action="store_true",
                     help="Không dùng Hub; đọc JSON + merged CSV local (offline)")
+    # Kaggle: trỏ thẳng vào data đã attach (tránh gdown Drive)
+    ap.add_argument("--image_dir_override", default="",
+                    help="[Kaggle] thư mục ảnh đã attach, vd /kaggle/input/.../st_images")
+    ap.add_argument("--ocr_dir_override", default="",
+                    help="[Kaggle] thư mục OCR .npy đã attach, vd /kaggle/input/.../swintextspotter")
+    ap.add_argument("--json_src_dir", default="",
+                    help="[Kaggle] thư mục chứa ViTextVQA_*.json đã attach")
     ap.add_argument("--json_dir", default="datasets/processed/ViTextVQA",
                     help="[fallback --no_hub] thư mục chứa ViTextVQA_*.json")
     ap.add_argument("--image_dir", default="", help="[fallback] nếu thiếu CSV merged")
@@ -338,7 +365,12 @@ def main():
     dfs_hub = None
     if not args.no_hub:
         try:
-            dfs_hub = load_dfs_via_hub(data_dir=args.data_dir)
+            dfs_hub = load_dfs_via_hub(
+                data_dir=args.data_dir,
+                image_dir_override=args.image_dir_override,
+                ocr_dir_override=args.ocr_dir_override,
+                json_src_dir=args.json_src_dir,
+            )
             if "id" not in dfs_hub["test"].columns:
                 print("⚠️  df từ Hub thiếu cột 'id' — chuyển sang fallback JSON/CSV.")
                 dfs_hub = None
