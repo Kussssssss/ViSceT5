@@ -52,6 +52,18 @@ class ViT5PretrainLoss(nn.Module):
             self.itc_weight = float(os.environ.get("ITC_WEIGHT", "0"))
         except ValueError:
             self.itc_weight = 0.0
+        # ITC memory queue (MoCo-style negatives, NO momentum encoder): keep the last
+        # K L2-normalized image/text vectors as extra negatives. With per_device
+        # batch 4, in-batch ITC has only 3 negatives → trivially separable (acc≈0.94
+        # at epoch 1) → weak alignment signal; a queue makes it a real task. Slightly
+        # stale negatives are the standard, acceptable trade-off at low LR.
+        # Env ITC_QUEUE=K (0/unset = off = pure in-batch, current behavior).
+        try:
+            self.itc_queue_size = int(float(os.environ.get("ITC_QUEUE", "0") or 0))
+        except ValueError:
+            self.itc_queue_size = 0
+        self._itc_img_q = None   # (≤K, D) detached, CPU
+        self._itc_txt_q = None
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
@@ -170,14 +182,31 @@ class ViT5PretrainLoss(nn.Module):
         if self.itc_weight > 0 and _iv is not None and _tv is not None and _iv.size(0) > 1:
             _sc = model_output.get("itc_logit_scale")
             _sc = _sc.exp().clamp(max=100.0) if torch.is_tensor(_sc) else 14.3
-            _logits = _sc * (_iv @ _tv.t())            # (B, B): image i ↔ question j
-            _tgt = torch.arange(_logits.size(0), device=_logits.device)
-            itc_loss = 0.5 * (F.cross_entropy(_logits, _tgt) + F.cross_entropy(_logits.t(), _tgt))
-            # ITC retrieval accuracy: image_i's top-1 text == i (both directions).
+            _l_i2t = _sc * (_iv @ _tv.t())             # (B, B): image i ↔ question j
+            _l_t2i = _sc * (_tv @ _iv.t())
+            # Queue negatives on TRAIN forwards only (grad on): eval acc_itc stays
+            # pure in-batch → comparable across steps/runs; queue never sees eval vecs.
+            _use_q = (self.itc_queue_size > 0 and _iv.requires_grad
+                      and self._itc_txt_q is not None and self._itc_txt_q.size(0) > 0)
+            if _use_q:
+                _qi = self._itc_img_q.to(device=_iv.device, dtype=_iv.dtype)
+                _qt = self._itc_txt_q.to(device=_tv.device, dtype=_tv.dtype)
+                _l_i2t = torch.cat([_l_i2t, _sc * (_iv @ _qt.t())], dim=1)  # B×(B+K)
+                _l_t2i = torch.cat([_l_t2i, _sc * (_tv @ _qi.t())], dim=1)
+            _tgt = torch.arange(_l_i2t.size(0), device=_l_i2t.device)
+            itc_loss = 0.5 * (F.cross_entropy(_l_i2t, _tgt) + F.cross_entropy(_l_t2i, _tgt))
+            # ITC retrieval accuracy: top-1 over B(+K) candidates, both directions.
             with torch.no_grad():
-                _i2t = (_logits.argmax(dim=1) == _tgt).float().mean()
-                _t2i = (_logits.argmax(dim=0) == _tgt).float().mean()
+                _i2t = (_l_i2t.argmax(dim=1) == _tgt).float().mean()
+                _t2i = (_l_t2i.argmax(dim=1) == _tgt).float().mean()
                 itc_acc = 0.5 * (_i2t + _t2i)
+                if self.itc_queue_size > 0 and _iv.requires_grad:
+                    _di = _iv.detach().float().cpu()
+                    _dt = _tv.detach().float().cpu()
+                    self._itc_img_q = _di if self._itc_img_q is None else \
+                        torch.cat([self._itc_img_q, _di], 0)[-self.itc_queue_size:]
+                    self._itc_txt_q = _dt if self._itc_txt_q is None else \
+                        torch.cat([self._itc_txt_q, _dt], 0)[-self.itc_queue_size:]
 
         if mode in ["full", "all"]:
             total_loss = mlm_loss + pollute_loss + contrastive_loss

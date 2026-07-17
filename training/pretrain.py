@@ -842,10 +842,23 @@ def main(args_list=None):
     _rand = os.environ.get("MLM_RAND_PROB", "").strip()
     if _rand:
         data_collator.mlm_rand_prob = float(_rand)  # ↑ = more random-masked words (harder MLM)
+    # ---- v3 transfer knobs (env-gated; defaults keep v2 behavior) ----
+    _gts = os.environ.get("GEN_TARGET_STYLE", "").strip().lower()
+    if _gts:
+        # 'sentinel' (T5 span-infill) | 'qa' (single grounded span, RAW target =
+        # finetune's answer format — fixes the sentinel verbosity transfer gap).
+        data_collator.gen_target_style = _gts
+    _ipol = os.environ.get("ITM_POLLUTE", "").strip()
+    if _ipol:
+        # 0 = no OCR swap (use when ITM_WEIGHT=0): image<->OCR matched for 100% samples.
+        data_collator.itm_pollute = _ipol not in ("0", "false", "False")
     print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
           f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
           f"mlm_rand_prob={getattr(data_collator,'mlm_rand_prob',0.15)} "
-          f"itm_weight={os.environ.get('ITM_WEIGHT','0')}")
+          f"itm_weight={os.environ.get('ITM_WEIGHT','0')} | "
+          f"gen_style={getattr(data_collator,'gen_target_style','sentinel')} "
+          f"itm_pollute={getattr(data_collator,'itm_pollute',True)} "
+          f"itc_queue={os.environ.get('ITC_QUEUE','0')}")
 
     _cloze = str(mode).lower().strip() in ("gen", "gen_all")
     if _cloze:
