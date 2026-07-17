@@ -195,10 +195,10 @@ def simple_pretrain_aggregator(eval_pred):
         if preds.shape[1] >= 14:
             g_correct = float(np.sum(preds[:, 10])); g_total = float(np.sum(preds[:, 11]))
             r_correct = float(np.sum(preds[:, 12])); r_total = float(np.sum(preds[:, 13]))
-            if g_total > 0:
-                result["acc_mlm_grounded"] = g_correct / g_total
-            if r_total > 0:
-                result["acc_mlm_random"] = r_correct / r_total
+            # ALWAYS emit both keys (0.0 when no tokens) so
+            # metric_for_best_model='acc_mlm_grounded' can never hit a missing key.
+            result["acc_mlm_grounded"] = (g_correct / g_total) if g_total > 0 else 0.0
+            result["acc_mlm_random"] = (r_correct / r_total) if r_total > 0 else 0.0
         if mean_vals.shape[0] >= 15:
             result["loss_itc"] = float(mean_vals[14])
         if mean_vals.shape[0] >= 16:

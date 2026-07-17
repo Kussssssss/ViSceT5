@@ -49,6 +49,18 @@ _CLOZE_STOP: Set[str] = set(
     chi ban toi ta ho no chung minh cua_no dau bao_nhieu the_nao""".split()
 )
 
+# ACCENTED stop list for the 'qa' cloze style. The accent-STRIPPED test above has
+# harmful collisions: 'thuốc'→'thuoc'≈'thuộc', 'bảo'→'bao', 'bán/bàn'→'ban',
+# 'nhà'→'nha' — i.e. the very scene-text/answer-like words grounding needs get
+# excluded. Testing the accented core against an accented function-word list keeps
+# real content words maskable. (sentinel style keeps the old list → resume-safe.)
+_CLOZE_STOP_QA: Set[str] = set(
+    """là và của có những các này đó ở cho với được gì nào bao nhiêu khi thì mà hay hoặc
+    một cái con người trong trên dưới ngoài đây kia ai sao tại vì để đã đang sẽ bị do từ đến
+    ra vào lên xuống không cũng như thế bởi rằng thuộc bằng qua lại chỉ nhé ơi vậy em anh
+    chị bạn tôi ta họ nó chúng mình đâu""".split()
+)
+
 _CLOZE_EDGE_PUNCT = re.compile(r"^[^0-9a-zA-ZÀ-ỹ]+|[^0-9a-zA-ZÀ-ỹ]+$")
 
 
@@ -59,7 +71,8 @@ def _cloze_core(word: str) -> str:
 
 
 def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
-                          rand_prob: float = 0.15, seed: int = 0):
+                          rand_prob: float = 0.15, seed: int = 0,
+                          style: str = "sentinel"):
     """Return (masked_question, target, n_spans) — the SINGLE T5 span-infilling
     objective for the decoder (this replaces the old encoder-head MLM).
 
@@ -77,6 +90,15 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
     n_spans         : number of spans (0 only if the question has no content word).
     span_types      : list[bool] per span — True = GROUNDED (contains an OCR-overlap
                       word), False = RANDOM. Used to split accuracy grounded vs random.
+
+    style='qa' (v3, ANSWER-SHAPED cloze): mask exactly ONE span and the target is the
+    RAW masked words (no sentinels) — i.e. the decoder emits a short content phrase
+    then EOS, byte-identical to finetune's answer format. This kills the
+    sentinel-format/verbosity transfer gap (A/B showed over-generation ratio ~1.13
+    from sentinel-infill pretrain). Span priority: one GROUNDED run (consecutive
+    OCR-overlap words, e.g. a multi-word brand); if the question has no OCR overlap,
+    ONE random content word (LM signal). The grounding mechanism is unchanged —
+    recovering the word still requires reading the OCR feature branch.
     """
     if not isinstance(question, str):
         return "", "", 0, []
@@ -88,7 +110,11 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
 
     words = question.strip().split()
     cores = [_cloze_core(w) for w in words]
-    is_content = [len(c) >= 3 and _remove_vietnamese_accents(c) not in _CLOZE_STOP for c in cores]
+    if style == "qa":
+        # accented stop test (see _CLOZE_STOP_QA) — no thuốc/bảo/bán collisions
+        is_content = [len(c) >= 3 and c not in _CLOZE_STOP_QA for c in cores]
+    else:
+        is_content = [len(c) >= 3 and _remove_vietnamese_accents(c) not in _CLOZE_STOP for c in cores]
 
     to_mask = [False] * len(words)
     grounded = [False] * len(words)  # per-word: masked because it is in the OCR
@@ -97,8 +123,36 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
         if is_content[i] and cores[i] in ocr_set:
             to_mask[i] = True
             grounded[i] = True
-    # 2) random: a few more content words (LM signal + full coverage)
     rng = random.Random(seed & 0xFFFFFFFF)
+
+    if style == "qa":
+        # ANSWER-SHAPED single-span cloze (see docstring). Grounded runs first.
+        runs, i = [], 0
+        while i < len(words):
+            if grounded[i]:
+                j = i
+                while j + 1 < len(words) and grounded[j + 1]:
+                    j += 1
+                runs.append((i, j))
+                i = j + 1
+            else:
+                i += 1
+        if runs:
+            s, e = runs[rng.randrange(len(runs))]
+            g_span = True
+        else:
+            cidx = [k for k in range(len(words)) if is_content[k]]
+            if not cidx:
+                return question.strip(), "", 0, []
+            s = e = rng.choice(cidx)
+            g_span = False
+        tgt_words = [_CLOZE_EDGE_PUNCT.sub("", w) for w in words[s:e + 1]]
+        masked = words[:s] + ["<extra_id_0>"] + words[e + 1:]
+        # RAW target — no sentinel, so the decoder's output distribution matches
+        # finetune answers (short phrase + EOS).
+        return " ".join(masked), " ".join(tgt_words), 1, [g_span]
+
+    # 2) random: a few more content words (LM signal + full coverage)
     for i in range(len(words)):
         if (not to_mask[i]) and is_content[i] and rng.random() < rand_prob:
             to_mask[i] = True  # grounded stays False
@@ -229,6 +283,13 @@ class ViT5VQADataCollator:
         # Fraction of (non-OCR-overlap) content words additionally masked at RANDOM in
         # the decoder MLM span-infill (LM signal + coverage). ↑ = harder MLM.
         self.mlm_rand_prob = 0.15
+        # v3 knobs (env-gated in pretrain.py; defaults = current behavior):
+        #  gen_target_style: 'sentinel' (T5 span-infill, multi-span) | 'qa' (single
+        #  grounded-priority span, RAW target -> matches finetune's answer format).
+        self.gen_target_style = "sentinel"
+        #  itm_pollute: False = disable the ITM OCR-swap (use when ITM_WEIGHT=0) so
+        #  image<->OCR stays matched for 100% of samples (cloze/TWC/ITC consistency).
+        self.itm_pollute = True
         self.contrastive_label_list = list(getattr(self.cfg, "contrastive_label_list", [0.9, 0.9]))
         self.editlen = int(getattr(self.cfg, "editlen", 2))
 
@@ -848,7 +909,9 @@ class ViT5VQADataCollator:
             pollute_indices, tag_pollute_list = list(range(B)), [0] * B
 
             # Logic tạo ITM Pollute (Tráo ảnh)
-            if B > 1:
+            if not getattr(self, "itm_pollute", True):
+                pass  # ITM_POLLUTE=0: no OCR swap — 100% samples image<->OCR matched
+            elif B > 1:
                 for i, s in enumerate(seeds):
                     if s & 1 == 0: pollute_indices[i] = i; tag_pollute_list[i] = 0
                     else:
@@ -955,7 +1018,8 @@ class ViT5VQADataCollator:
                     # (LM signal); target = clean words in sentinel format.
                     masked_q, target_q, n_span, span_types = _build_grounded_cloze(
                         qs[i], norm_tokens, rand_prob=getattr(self, "mlm_rand_prob", 0.15),
-                        seed=seeds[i] ^ 0xC10E)
+                        seed=seeds[i] ^ 0xC10E,
+                        style=getattr(self, "gen_target_style", "sentinel"))
                     gen_masked_q_list.append(masked_q)
                     gen_target_texts.append(target_q)
                     gen_nmask_list.append(n_span)
@@ -1089,16 +1153,29 @@ class ViT5VQADataCollator:
                     self._sentinel_ids = {self.tokenizer.convert_tokens_to_ids(f"<extra_id_{k}>")
                                           for k in range(0, 100)}
                 gen_type = torch.full_like(gen_labels, -1)
-                for _bi in range(gen_labels.size(0)):
-                    st = gen_span_types_list[_bi] if _bi < len(gen_span_types_list) else []
-                    if not st:
-                        continue
-                    span_ptr = -1
-                    for _pos, _tid in enumerate(gen_tok.input_ids[_bi].tolist()):
-                        if _tid in self._sentinel_ids:
-                            span_ptr += 1
-                        elif _tid != self.pad_id and 0 <= span_ptr < len(st):
-                            gen_type[_bi, _pos] = 1 if st[span_ptr] else 0
+                if getattr(self, "gen_target_style", "sentinel") == "qa":
+                    # RAW single-span target (no sentinels): every content token takes
+                    # the span's type; only pad/eos stay excluded (-1).
+                    _eos = self.tokenizer.eos_token_id
+                    for _bi in range(gen_labels.size(0)):
+                        st = gen_span_types_list[_bi] if _bi < len(gen_span_types_list) else []
+                        if not st or gen_nmask_list[_bi] == 0:
+                            continue
+                        _t = 1 if st[0] else 0
+                        for _pos, _tid in enumerate(gen_tok.input_ids[_bi].tolist()):
+                            if _tid != self.pad_id and _tid != _eos:
+                                gen_type[_bi, _pos] = _t
+                else:
+                    for _bi in range(gen_labels.size(0)):
+                        st = gen_span_types_list[_bi] if _bi < len(gen_span_types_list) else []
+                        if not st:
+                            continue
+                        span_ptr = -1
+                        for _pos, _tid in enumerate(gen_tok.input_ids[_bi].tolist()):
+                            if _tid in self._sentinel_ids:
+                                span_ptr += 1
+                            elif _tid != self.pad_id and 0 <= span_ptr < len(st):
+                                gen_type[_bi, _pos] = 1 if st[span_ptr] else 0
                 batch_dict["gen_mlm_type"] = gen_type.to(pixel_values.device)
 
                 gen_in = self.tokenizer(
