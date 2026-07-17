@@ -286,16 +286,21 @@ class PreTrainMLMAccuracy(BaseMetric):
 
 class PreTrainTWCAccuracy(BaseMetric):
     """
-    Retrieval-based TWC accuracy, aligned with the softmax (InfoNCE) objective.
+    Retrieval-based TWC accuracy, aligned with the ranking goal of TWC.
 
-    For each REAL original OCR token (row, PAD excluded), we take the highest-
-    similarity augmented token (argmax over valid columns) and count it correct
-    if that column is a true positive (label > 0.5). This directly measures
-    whether the model ranks a token's own augmented counterpart above all the
-    in-batch negatives — the actual goal of TWC. Returns:
-        (retrieval_acc, top1_pos_rate, top1_neg_rate)
-    where the latter two are the row-wise top-1 hit/miss rates kept for the
-    8-element diagnostic vector (twc_pos_recall / twc_neg_recall slots).
+    acc: for each REAL original OCR token (row, PAD excluded), take the highest-
+    similarity augmented token (argmax over valid columns); correct if that column
+    is a true positive (label > 0.5) — does the model rank a token's own augmented
+    counterpart above all in-batch negatives?
+
+    pos/neg recall: TRUE cell-level recalls at the BCE decision threshold
+    (sigmoid>0.5 ⇔ logit>0), over cells whose row AND col are real (non-PAD):
+        pos_recall = P(logit > 0 | label > 0.5)   — positives detected
+        neg_recall = P(logit < 0 | label == 0)    — negatives rejected
+    (Trước đây 2 slot này bị stamp bằng (acc, 1-acc) — trùng thông tin và gây
+    hiểu sai; nay là recall thật, khớp đúng tên trường twc_pos/neg_recall.)
+
+    Returns (retrieval_acc, pos_recall, neg_recall).
     """
     def __init__(self):
         super().__init__("twc_acc")
@@ -319,9 +324,16 @@ class PreTrainTWCAccuracy(BaseMetric):
         pred = masked[rows].argmax(dim=1)           # top-1 column per valid row
         hit = (o2r[rows, pred] > 0.5).float()       # is the top-1 a true positive?
         retrieval_acc = hit.mean().item()
-        pos_rate = retrieval_acc                    # fraction of rows whose top-1 is positive
-        neg_rate = 1.0 - retrieval_acc              # fraction whose top-1 is a negative/wrong
-        return retrieval_acc, pos_rate, neg_rate
+
+        # True cell-level recalls at the BCE threshold. Only cells with BOTH ends
+        # real: torch.block_diag zero-fills cross-sample cells for PAD rows/cols too,
+        # so gate on valid row & col (mirrors create_batch_labels' -1 propagation).
+        cell_valid = valid.unsqueeze(0) & valid.unsqueeze(1)
+        pos_m = cell_valid & (o2r > 0.5)
+        neg_m = cell_valid & (o2r == 0.0)
+        pos_recall = (logits[pos_m] > 0).float().mean().item() if bool(pos_m.any()) else 0.0
+        neg_recall = (logits[neg_m] < 0).float().mean().item() if bool(neg_m.any()) else 0.0
+        return retrieval_acc, pos_recall, neg_recall
 
 
 # HÀM METRIC TỔNG - TỰ ĐỘNG ĐIỀU HƯỚNG THEO ABLATION MODE
