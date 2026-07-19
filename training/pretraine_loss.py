@@ -64,6 +64,17 @@ class ViT5PretrainLoss(nn.Module):
             self.itc_queue_size = 0
         self._itc_img_q = None   # (≤K, D) detached, CPU
         self._itc_txt_q = None
+        # FALSE-NEGATIVE mask cho câu hỏi TEMPLATE (đặc thù ViTextVQA: rất nhiều ảnh
+        # khác nhau mang câu hỏi gần-y-hệt "cửa hàng này tên gì ?"). Candidate j có
+        # text ≈ text của query i KHÔNG phải negative thật — nếu vẫn phạt, ITC học
+        # phân biệt tuỳ tiện giữa các câu identical → đặc trưng nhiễu. Loại các cell
+        # đó khỏi mẫu số (logit = -inf) khi cos(text_i, text_j) > tau; positive của
+        # chính nó luôn giữ. Queue lưu (img, txt) THEO CẶP nên 1 mask text↔text dùng
+        # cho cả 2 chiều. Env ITC_DUP_TAU (0/unset = off = behavior cũ; v3 dùng 0.98).
+        try:
+            self.itc_dup_tau = float(os.environ.get("ITC_DUP_TAU", "0") or 0)
+        except ValueError:
+            self.itc_dup_tau = 0.0
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
@@ -188,11 +199,22 @@ class ViT5PretrainLoss(nn.Module):
             # pure in-batch → comparable across steps/runs; queue never sees eval vecs.
             _use_q = (self.itc_queue_size > 0 and _iv.requires_grad
                       and self._itc_txt_q is not None and self._itc_txt_q.size(0) > 0)
+            _cand_txt = _tv  # paired text of every candidate (batch [+ queue])
             if _use_q:
                 _qi = self._itc_img_q.to(device=_iv.device, dtype=_iv.dtype)
                 _qt = self._itc_txt_q.to(device=_tv.device, dtype=_tv.dtype)
                 _l_i2t = torch.cat([_l_i2t, _sc * (_iv @ _qt.t())], dim=1)  # B×(B+K)
                 _l_t2i = torch.cat([_l_t2i, _sc * (_tv @ _qi.t())], dim=1)
+                _cand_txt = torch.cat([_tv, _qt], dim=0)
+            # Dup-question mask (see __init__): candidate whose paired text ≈ query
+            # text is a FALSE negative for both directions → exclude from softmax.
+            if self.itc_dup_tau > 0:
+                _Bq = _tv.size(0)
+                with torch.no_grad():
+                    _dup = (_tv.detach() @ _cand_txt.detach().t()) > self.itc_dup_tau
+                    _dup[:, :_Bq].fill_diagonal_(False)   # keep own positive
+                _l_i2t = _l_i2t.masked_fill(_dup, float("-inf"))
+                _l_t2i = _l_t2i.masked_fill(_dup, float("-inf"))
             _tgt = torch.arange(_l_i2t.size(0), device=_l_i2t.device)
             itc_loss = 0.5 * (F.cross_entropy(_l_i2t, _tgt) + F.cross_entropy(_l_t2i, _tgt))
             # ITC retrieval accuracy: top-1 over B(+K) candidates, both directions.
