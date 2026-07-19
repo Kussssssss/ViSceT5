@@ -65,16 +65,20 @@ class ViT5PretrainLoss(nn.Module):
         self._itc_img_q = None   # (≤K, D) detached, CPU
         self._itc_txt_q = None
         # FALSE-NEGATIVE mask cho câu hỏi TEMPLATE (đặc thù ViTextVQA: rất nhiều ảnh
-        # khác nhau mang câu hỏi gần-y-hệt "cửa hàng này tên gì ?"). Candidate j có
-        # text ≈ text của query i KHÔNG phải negative thật — nếu vẫn phạt, ITC học
-        # phân biệt tuỳ tiện giữa các câu identical → đặc trưng nhiễu. Loại các cell
-        # đó khỏi mẫu số (logit = -inf) khi cos(text_i, text_j) > tau; positive của
-        # chính nó luôn giữ. Queue lưu (img, txt) THEO CẶP nên 1 mask text↔text dùng
-        # cho cả 2 chiều. Env ITC_DUP_TAU (0/unset = off = behavior cũ; v3 dùng 0.98).
+        # khác nhau mang câu hỏi Y HỆT "cửa hàng này tên gì ?"). Candidate j có text
+        # TRÙNG text của query i KHÔNG phải negative thật — nếu vẫn phạt, ITC học
+        # phân biệt tuỳ tiện giữa các chuỗi identical → đặc trưng nhiễu.
+        # CÁCH LÀM: so TRÙNG CHÍNH XÁC bằng hash token-ids của câu hỏi (bất biến với
+        # training). KHÔNG dùng cosine trên vector text đang học — mock đã chứng minh
+        # model GIAN LẬN được: co cụm mọi vector text → mọi negative cos>tau → bị mask
+        # sạch → loss_itc=0/acc=1 miễn phí (degenerate). Hash thì không thể cheat.
+        # Queue lưu (img, txt, key) THEO CẶP nên 1 mask key↔key dùng cho cả 2 chiều;
+        # positive của chính nó luôn giữ. Env ITC_DUP_TAU (>0 = bật; 0/unset = off).
         try:
             self.itc_dup_tau = float(os.environ.get("ITC_DUP_TAU", "0") or 0)
         except ValueError:
             self.itc_dup_tau = 0.0
+        self._itc_key_q = None   # (≤K,) int64 hash của câu hỏi, thẳng hàng với 2 queue
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
@@ -197,24 +201,36 @@ class ViT5PretrainLoss(nn.Module):
             _l_t2i = _sc * (_tv @ _iv.t())
             # Queue negatives on TRAIN forwards only (grad on): eval acc_itc stays
             # pure in-batch → comparable across steps/runs; queue never sees eval vecs.
+            # Exact-duplicate keys (hash of clean-question token ids; pad=0 stripped).
+            # Training-invariant → un-cheatable (see __init__).
+            _keys = None
+            if self.itc_dup_tau > 0:
+                _q_ids = sample_list.get("mlm_input_ids")
+                if _q_ids is not None and _q_ids.size(0) == _iv.size(0):
+                    _keys = torch.tensor(
+                        [hash(tuple(int(t) for t in row[row != 0]))
+                         for row in _q_ids.detach().cpu()], dtype=torch.long)
             _use_q = (self.itc_queue_size > 0 and _iv.requires_grad
                       and self._itc_txt_q is not None and self._itc_txt_q.size(0) > 0)
-            _cand_txt = _tv  # paired text of every candidate (batch [+ queue])
+            _cand_keys = _keys  # paired question-key of every candidate (batch [+ queue])
             if _use_q:
                 _qi = self._itc_img_q.to(device=_iv.device, dtype=_iv.dtype)
                 _qt = self._itc_txt_q.to(device=_tv.device, dtype=_tv.dtype)
                 _l_i2t = torch.cat([_l_i2t, _sc * (_iv @ _qt.t())], dim=1)  # B×(B+K)
                 _l_t2i = torch.cat([_l_t2i, _sc * (_tv @ _qi.t())], dim=1)
-                _cand_txt = torch.cat([_tv, _qt], dim=0)
-            # Dup-question mask (see __init__): candidate whose paired text ≈ query
-            # text is a FALSE negative for both directions → exclude from softmax.
-            if self.itc_dup_tau > 0:
+                if _keys is not None and self._itc_key_q is not None \
+                        and self._itc_key_q.size(0) == _qt.size(0):
+                    _cand_keys = torch.cat([_keys, self._itc_key_q], dim=0)
+            # Dup-question mask: candidate whose paired question is the SAME STRING as
+            # the query's is a FALSE negative for both directions → drop from softmax.
+            if _keys is not None and _cand_keys is not None:
                 _Bq = _tv.size(0)
-                with torch.no_grad():
-                    _dup = (_tv.detach() @ _cand_txt.detach().t()) > self.itc_dup_tau
-                    _dup[:, :_Bq].fill_diagonal_(False)   # keep own positive
-                _l_i2t = _l_i2t.masked_fill(_dup, float("-inf"))
-                _l_t2i = _l_t2i.masked_fill(_dup, float("-inf"))
+                _dup = _keys.unsqueeze(1).eq(_cand_keys.unsqueeze(0))
+                _dup[:, :_Bq].fill_diagonal_(False)   # keep own positive
+                _dup = _dup.to(_l_i2t.device)
+                if _dup.size(1) == _l_i2t.size(1):
+                    _l_i2t = _l_i2t.masked_fill(_dup, float("-inf"))
+                    _l_t2i = _l_t2i.masked_fill(_dup, float("-inf"))
             _tgt = torch.arange(_l_i2t.size(0), device=_l_i2t.device)
             itc_loss = 0.5 * (F.cross_entropy(_l_i2t, _tgt) + F.cross_entropy(_l_t2i, _tgt))
             # ITC retrieval accuracy: top-1 over B(+K) candidates, both directions.
@@ -229,6 +245,11 @@ class ViT5PretrainLoss(nn.Module):
                         torch.cat([self._itc_img_q, _di], 0)[-self.itc_queue_size:]
                     self._itc_txt_q = _dt if self._itc_txt_q is None else \
                         torch.cat([self._itc_txt_q, _dt], 0)[-self.itc_queue_size:]
+                    # keys enqueued in lockstep with the vector queues (fallback 0-keys
+                    # keep alignment even if mlm_input_ids was absent this batch)
+                    _dk = _keys if _keys is not None else torch.zeros(_di.size(0), dtype=torch.long)
+                    self._itc_key_q = _dk if self._itc_key_q is None else \
+                        torch.cat([self._itc_key_q, _dk], 0)[-self.itc_queue_size:]
 
         if mode in ["full", "all"]:
             total_loss = mlm_loss + pollute_loss + contrastive_loss
