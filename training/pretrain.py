@@ -259,6 +259,19 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
             chk("[TWC] labels have negatives (==0)", bool((o2r == 0.0).any()))
         chk("[TWC] loss_twc finite & > 0", lt is not None and bool(torch.isfinite(lt).all()) and lt.item() > 0)
 
+    # ── ITC checks (opt-in objective; only when ITC_WEIGHT>0) ──────────────
+    _itcw = float(os.environ.get("ITC_WEIGHT", "0") or 0)
+    if _itcw > 0:
+        _li, _ai = out.get("loss_itc"), out.get("acc_itc")
+        _qn = getattr(loss_fn, "_itc_txt_q", None)
+        print(f"[diag] ITC: loss={float(_li):.4f} acc={float(_ai):.3f} "
+              f"queue={_qn.size(0) if _qn is not None else 0} "
+              f"dup_tau={getattr(loss_fn, 'itc_dup_tau', 0)} "
+              f"text_pool={getattr(model, '_itc_text_pool', 'embed')}")
+        chk("[ITC] itc vectors produced",
+            out.get("itc_img_vec") is not None and out.get("itc_txt_vec") is not None)
+        chk("[ITC] loss_itc finite", _li is not None and bool(torch.isfinite(_li).all()))
+
     # ── GEN checks (only when a generative decoder objective is active) ────
     if gen_on:
         gl = out.get("gen_loss")
@@ -852,13 +865,21 @@ def main(args_list=None):
     if _ipol:
         # 0 = no OCR swap (use when ITM_WEIGHT=0): image<->OCR matched for 100% samples.
         data_collator.itm_pollute = _ipol not in ("0", "false", "False")
+    _itp = os.environ.get("ITC_TEXT_POOL", "").strip().lower()
+    if _itp:
+        # 'embed' (default, static input embeddings) | 'encoder' (v3: pool the vit5
+        # encoder output → real sentence vector, ITC also shapes the text encoder).
+        # Pretrain-only attribute (like _vision_trainable); finetune never sets it.
+        model._itc_text_pool = _itp
     print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
           f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
           f"mlm_rand_prob={getattr(data_collator,'mlm_rand_prob',0.15)} "
           f"itm_weight={os.environ.get('ITM_WEIGHT','0')} | "
           f"gen_style={getattr(data_collator,'gen_target_style','sentinel')} "
           f"itm_pollute={getattr(data_collator,'itm_pollute',True)} "
-          f"itc_queue={os.environ.get('ITC_QUEUE','0')}")
+          f"itc_queue={os.environ.get('ITC_QUEUE','0')} "
+          f"itc_dup_tau={os.environ.get('ITC_DUP_TAU','0')} "
+          f"itc_text_pool={getattr(model,'_itc_text_pool','embed')}")
 
     _cloze = str(mode).lower().strip() in ("gen", "gen_all")
     if _cloze:

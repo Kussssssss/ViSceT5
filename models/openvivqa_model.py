@@ -976,12 +976,21 @@ class OpenViVQAModel(PreTrainedModel):
             dec_first = dec_last[:, 0, :]
             out_dict["pollutecls_scores"] = self.pollute_head(dec_first.float())
 
-            # ITC vectors: masked-mean pool image tokens + question embeds → project → L2.
+            # ITC vectors: masked-mean pool image tokens + question text → project → L2.
             # (When vision is unfrozen, img_tokens carries grad → ITC shapes CLIP.)
             _im = img_pack["img_attn_mask"].unsqueeze(-1).to(img_pack["img_tokens"].dtype)
             _img_pooled = (img_pack["img_tokens"] * _im).sum(1) / _im.sum(1).clamp_min(1e-6)
             _tm = txt_attn_mask_for_enc.unsqueeze(-1).to(txt_emb_for_enc.dtype)
-            _txt_pooled = (txt_emb_for_enc * _tm).sum(1) / _tm.sum(1).clamp_min(1e-6)
+            if getattr(self, "_itc_text_pool", "embed") == "encoder":
+                # v3: pool the CONTEXTUAL question encoding (vit5 encoder output —
+                # already computed above for QA-CLIP, zero extra cost). A real
+                # sentence vector instead of a bag of static embeddings; ITC then
+                # also shapes the text ENCODER (ALBEF-style align-before-fuse).
+                # Pretrain-only attr set by pretrain.py; finetune never sets it.
+                _txt_src = txt_hidden_states
+            else:
+                _txt_src = txt_emb_for_enc
+            _txt_pooled = (_txt_src * _tm).sum(1) / _tm.sum(1).clamp_min(1e-6)
             _iv = self.itc_img_proj(_img_pooled.float())
             _tv = self.itc_txt_proj(_txt_pooled.float())
             out_dict["itc_img_vec"] = _iv / _iv.norm(dim=-1, keepdim=True).clamp_min(1e-6)
