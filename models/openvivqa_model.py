@@ -459,16 +459,12 @@ class OpenViVQAModel(PreTrainedModel):
                     if det_word_all.size(0) > N_word:
                         det_word_all = det_word_all[:N_word]
                     else:
-                        # OCR-aug branch [clean;noisy] has N_word = 2·cml but det/rec are
-                        # single-set (cml). Do NOT tile det/rec onto the augmented half:
-                        # sharing identical appearance features makes TWC trivial — the
-                        # augmented token would match its original via the SAME box+det+rec
-                        # (retrieval ~0.99, contrastive saturates, loss_twc blows up). TWC
-                        # must learn error-tolerance from the TEXT, so the augmented half is
-                        # left without appearance features (zero-pad). Gen branch is
-                        # single-set (N_word = cml) → this padding never triggers there.
-                        pad_d = torch.zeros(N_word - det_word_all.size(0), det_word_all.size(-1), device=device, dtype=self.target_dtype)
-                        det_word_all = torch.cat([det_word_all, pad_d], dim=0)
+                        # FIX: Nếu N_word gấp đôi det_word_all (do Augmentation), copy bản gốc thay vì Zero Pad
+                        if N_word == 2 * det_word_all.size(0):
+                            det_word_all = torch.cat([det_word_all, det_word_all], dim=0)
+                        else:
+                            pad_d = torch.zeros(N_word - det_word_all.size(0), det_word_all.size(-1), device=device, dtype=self.target_dtype)
+                            det_word_all = torch.cat([det_word_all, pad_d], dim=0)
 
                 # Map det sang token level
                 det_tok_i = det_word_all[map_clamped] * valid.unsqueeze(-1)
@@ -487,10 +483,12 @@ class OpenViVQAModel(PreTrainedModel):
                     if rec_word_all.size(0) > N_word:
                         rec_word_all = rec_word_all[:N_word]
                     else:
-                        # See det note: do NOT tile rec onto the augmented half (keeps TWC
-                        # from matching via shared appearance). Zero-pad the augmented half.
-                        pad_r = torch.zeros(N_word - rec_word_all.size(0), rec_word_all.size(-1), device=device, dtype=self.target_dtype)
-                        rec_word_all = torch.cat([rec_word_all, pad_r], dim=0)
+                        # FIX: Nếu N_word gấp đôi rec_word_all, copy bản gốc thay vì Zero Pad
+                        if N_word == 2 * rec_word_all.size(0):
+                            rec_word_all = torch.cat([rec_word_all, rec_word_all], dim=0)
+                        else:
+                            pad_r = torch.zeros(N_word - rec_word_all.size(0), rec_word_all.size(-1), device=device, dtype=self.target_dtype)
+                            rec_word_all = torch.cat([rec_word_all, pad_r], dim=0)
 
                 # Map rec sang token level
                 rec_tok_i = rec_word_all[map_clamped] * valid.unsqueeze(-1)
