@@ -994,11 +994,22 @@ class OpenViVQAModel(PreTrainedModel):
                 # word set and costs one lookup (no extra forward). Pretrain-only attr
                 # set by pretrain.py; finetune never reaches this block.
                 _half_w = twa_ocr_char.size(1) // 2 if o2r_labels is not None else twa_ocr_char.size(1)
+                _pad_tok = int(self.config.pad_token_id or 0)
                 _tok_ok = ((ocr_map >= 0) & (ocr_map < _half_w)
-                           & (word_ids_for_ocr != int(self.config.pad_token_id))).unsqueeze(-1)
+                           & (word_ids_for_ocr != _pad_tok)).unsqueeze(-1)
+                # Per-sample fallback: ảnh không có từ OCR sạch nào (mask rỗng) thì dùng
+                # mọi token non-pad — KHÔNG BAO GIỜ pool ra vector 0 (vector 0 → mọi
+                # text vec identical → softmax uniform → loss ≡ ln(N), grad ≡ 0).
+                _cnt = _tok_ok.sum(1)  # (B, 1)
+                if bool((_cnt == 0).any()):
+                    _fb = (word_ids_for_ocr != _pad_tok).unsqueeze(-1)
+                    _tok_ok = torch.where((_cnt == 0).view(-1, 1, 1), _fb, _tok_ok)
                 _ocr_emb = self.vit5.get_input_embeddings()(word_ids_for_ocr).to(dtype=self.target_dtype)
                 _tm = _tok_ok.to(_ocr_emb.dtype)
                 _txt_pooled = (_ocr_emb * _tm).sum(1) / _tm.sum(1).clamp_min(1e-6)
+                # diag (verify đọc): số token sạch được pool + norm vector text
+                out_dict["itc_dbg_tokok"] = _tok_ok.detach().sum(1).squeeze(-1)
+                out_dict["itc_dbg_txt_norm"] = _txt_pooled.detach().norm(dim=-1)
             else:
                 _tm = txt_attn_mask_for_enc.unsqueeze(-1).to(txt_emb_for_enc.dtype)
                 if getattr(self, "_itc_text_pool", "embed") == "encoder":
