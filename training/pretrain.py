@@ -272,6 +272,39 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
         chk("[ITC] itc vectors produced",
             out.get("itc_img_vec") is not None and out.get("itc_txt_vec") is not None)
         chk("[ITC] loss_itc finite", _li is not None and bool(torch.isfinite(_li).all()))
+        # ── ITC DEEP-DIAG: định vị degenerate (mock v4 từng đo loss ≡ ln(N), grad ≡ 0
+        # — chữ ký của logits uniform). In đủ để chỉ mặt: stale module / scale chết /
+        # text-vec co cụm / mask rỗng.
+        _ivv, _tvv = out.get("itc_img_vec"), out.get("itc_txt_vec")
+        if _ivv is not None and _tvv is not None:
+            import math as _math
+            import inspect as _inspect
+            _ivd, _tvd = _ivv.detach().float(), _tvv.detach().float()
+            _Bv = _tvd.size(0)
+            _eye = torch.eye(_Bv, dtype=torch.bool, device=_tvd.device)
+            _ct = (_tvd @ _tvd.t()).masked_fill(_eye, float("nan"))
+            _ci = (_ivd @ _ivd.t()).masked_fill(_eye, float("nan"))
+            _rawsc = float(model.itc_logit_scale.detach()) if hasattr(model, "itc_logit_scale") else float("nan")
+            _expsc = _math.exp(min(_rawsc, 100.0)) if _rawsc == _rawsc else float("nan")
+            _lg = _expsc * (_ivd @ _tvd.t())
+            _spread = float((_lg.max(1).values - _lg.min(1).values).mean())
+            def _rng(m):
+                v = m[~torch.isnan(m)]
+                return f"[{float(v.min()):.3f},{float(v.max()):.3f}]" if v.numel() else "[-]"
+            print(f"[diag] ITC-deep: raw_scale={_rawsc:.3f} (exp={_expsc:.2f}) | "
+                  f"cos_txt offdiag {_rng(_ct)} | cos_img offdiag {_rng(_ci)} | "
+                  f"row-logit-spread={_spread:.4f} (≈0 = uniform/DEGENERATE)")
+            _tk, _tn = out.get("itc_dbg_tokok"), out.get("itc_dbg_txt_norm")
+            if _tk is not None:
+                print(f"[diag] ITC-ocr: clean-token/sample={[int(x) for x in _tk.tolist()]} | "
+                      f"txt_pooled norm={[round(float(x), 2) for x in _tn.tolist()]}")
+            _fsrc = _inspect.getsource(type(model).forward)
+            _has_ocr_branch = "_itc_text_source" in _fsrc
+            print(f"[diag] ITC: model.forward có nhánh ocr: {_has_ocr_branch} "
+                  f"(False = MODULE CŨ trong kernel — Runtime>Restart rồi chạy lại!)")
+            chk("[ITC] model forward is v4 (ocr-branch present)", _has_ocr_branch)
+            chk("[ITC] logits NOT degenerate (row-spread > 1e-3)", _spread > 1e-3,
+                f"spread={_spread:.2e}; nếu fail xem cos_txt/cos_img và raw_scale ở trên")
 
     # ── GEN checks (only when a generative decoder objective is active) ────
     if gen_on:
