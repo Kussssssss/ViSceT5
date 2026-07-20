@@ -267,7 +267,8 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
         print(f"[diag] ITC: loss={float(_li):.4f} acc={float(_ai):.3f} "
               f"queue={_qn.size(0) if _qn is not None else 0} "
               f"dup_tau={getattr(loss_fn, 'itc_dup_tau', 0)} "
-              f"text_pool={getattr(model, '_itc_text_pool', 'embed')}")
+              f"text_pool={getattr(model, '_itc_text_pool', 'embed')} "
+              f"text_source={getattr(model, '_itc_text_source', 'question')}")
         chk("[ITC] itc vectors produced",
             out.get("itc_img_vec") is not None and out.get("itc_txt_vec") is not None)
         chk("[ITC] loss_itc finite", _li is not None and bool(torch.isfinite(_li).all()))
@@ -871,6 +872,12 @@ def main(args_list=None):
         # encoder output → real sentence vector, ITC also shapes the text encoder).
         # Pretrain-only attribute (like _vision_trainable); finetune never sets it.
         model._itc_text_pool = _itp
+    _its = os.environ.get("ITC_TEXT_SOURCE", "").strip().lower()
+    if _its:
+        # 'question' (v3) | 'ocr' (v4: image↔chuỗi-OCR — câu hỏi template không đủ
+        # thông tin đặc-định-ảnh nên ITC ghim ln(4); chuỗi OCR định danh ảnh duy nhất
+        # → học được + ép CLIP mở băng học đọc scene text). Pretrain-only attr.
+        model._itc_text_source = _its
     print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
           f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
           f"mlm_rand_prob={getattr(data_collator,'mlm_rand_prob',0.15)} "
@@ -879,7 +886,8 @@ def main(args_list=None):
           f"itm_pollute={getattr(data_collator,'itm_pollute',True)} "
           f"itc_queue={os.environ.get('ITC_QUEUE','0')} "
           f"itc_dup_tau={os.environ.get('ITC_DUP_TAU','0')} "
-          f"itc_text_pool={getattr(model,'_itc_text_pool','embed')}")
+          f"itc_text_pool={getattr(model,'_itc_text_pool','embed')} "
+          f"itc_text_source={getattr(model,'_itc_text_source','question')}")
 
     _cloze = str(mode).lower().strip() in ("gen", "gen_all")
     if _cloze:

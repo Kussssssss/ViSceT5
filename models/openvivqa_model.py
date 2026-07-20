@@ -976,21 +976,40 @@ class OpenViVQAModel(PreTrainedModel):
             dec_first = dec_last[:, 0, :]
             out_dict["pollutecls_scores"] = self.pollute_head(dec_first.float())
 
-            # ITC vectors: masked-mean pool image tokens + question text → project → L2.
+            # ITC vectors: masked-mean pool image tokens + text side → project → L2.
             # (When vision is unfrozen, img_tokens carries grad → ITC shapes CLIP.)
             _im = img_pack["img_attn_mask"].unsqueeze(-1).to(img_pack["img_tokens"].dtype)
             _img_pooled = (img_pack["img_tokens"] * _im).sum(1) / _im.sum(1).clamp_min(1e-6)
-            _tm = txt_attn_mask_for_enc.unsqueeze(-1).to(txt_emb_for_enc.dtype)
-            if getattr(self, "_itc_text_pool", "embed") == "encoder":
-                # v3: pool the CONTEXTUAL question encoding (vit5 encoder output —
-                # already computed above for QA-CLIP, zero extra cost). A real
-                # sentence vector instead of a bag of static embeddings; ITC then
-                # also shapes the text ENCODER (ALBEF-style align-before-fuse).
-                # Pretrain-only attr set by pretrain.py; finetune never sets it.
-                _txt_src = txt_hidden_states
+            if getattr(self, "_itc_text_source", "question") == "ocr":
+                # v4: text side = CLEAN OCR string (bag of static embeddings of the
+                # original-half OCR word tokens). WHY: questions are generic templates
+                # ("cửa hàng này tên gì?") with ~zero image-specific info — image↔question
+                # mutual information is so low that vs a 4096-queue the optimizer's best
+                # move was collapsing logit_scale → eval loss pinned at ln(4) (measured,
+                # v3 full run, epoch 2.9). The OCR string UNIQUELY identifies the image,
+                # so image↔OCR is learnable at any queue size AND trains the unfrozen
+                # CLIP to encode scene text — the frozen-vision root cause. No leakage:
+                # the image side never sees the OCR string (QA-CLIP = pixels + question
+                # instruction); a bag-of-embeddings is appropriate for an unordered OCR
+                # word set and costs one lookup (no extra forward). Pretrain-only attr
+                # set by pretrain.py; finetune never reaches this block.
+                _half_w = twa_ocr_char.size(1) // 2 if o2r_labels is not None else twa_ocr_char.size(1)
+                _tok_ok = ((ocr_map >= 0) & (ocr_map < _half_w)
+                           & (word_ids_for_ocr != int(self.config.pad_token_id))).unsqueeze(-1)
+                _ocr_emb = self.vit5.get_input_embeddings()(word_ids_for_ocr).to(dtype=self.target_dtype)
+                _tm = _tok_ok.to(_ocr_emb.dtype)
+                _txt_pooled = (_ocr_emb * _tm).sum(1) / _tm.sum(1).clamp_min(1e-6)
             else:
-                _txt_src = txt_emb_for_enc
-            _txt_pooled = (_txt_src * _tm).sum(1) / _tm.sum(1).clamp_min(1e-6)
+                _tm = txt_attn_mask_for_enc.unsqueeze(-1).to(txt_emb_for_enc.dtype)
+                if getattr(self, "_itc_text_pool", "embed") == "encoder":
+                    # v3: pool the CONTEXTUAL question encoding (vit5 encoder output —
+                    # already computed above for QA-CLIP, zero extra cost). A real
+                    # sentence vector instead of a bag of static embeddings; ITC then
+                    # also shapes the text ENCODER (ALBEF-style align-before-fuse).
+                    _txt_src = txt_hidden_states
+                else:
+                    _txt_src = txt_emb_for_enc
+                _txt_pooled = (_txt_src * _tm).sum(1) / _tm.sum(1).clamp_min(1e-6)
             _iv = self.itc_img_proj(_img_pooled.float())
             _tv = self.itc_txt_proj(_txt_pooled.float())
             out_dict["itc_img_vec"] = _iv / _iv.norm(dim=-1, keepdim=True).clamp_min(1e-6)
