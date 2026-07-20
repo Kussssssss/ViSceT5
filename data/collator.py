@@ -1094,6 +1094,12 @@ class ViT5VQADataCollator:
                     mask_all = info["word_mask"]
 
                 info["boxes_word_all"] = boxes_all; info["word_mask_all"] = mask_all
+                # ITC same-image key: đường dẫn ảnh CỦA CHÍNH sample (ảnh trong
+                # pixel_values — carrier của image_id), KHÔNG phải nguồn OCR pollute.
+                # Loss dùng để loại "câu hỏi anh em" / bản trùng cùng-ảnh (1 ảnh ~3
+                # câu hỏi thành 3 sample) khỏi negative của ITC — chúng vẫn thuộc về
+                # ảnh đó, phạt là false-negative.
+                info["itc_image_path"] = paths[i]
                 ocr_info_list.append(info)
                 ocr_mask_token_list.append(mask_all.clone()); ocr_mask_box_list.append(mask_all.clone())
 

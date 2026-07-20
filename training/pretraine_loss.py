@@ -78,7 +78,16 @@ class ViT5PretrainLoss(nn.Module):
             self.itc_dup_tau = float(os.environ.get("ITC_DUP_TAU", "0") or 0)
         except ValueError:
             self.itc_dup_tau = 0.0
-        self._itc_key_q = None   # (≤K,) int64 hash của câu hỏi, thẳng hàng với 2 queue
+        # v4: nguồn text của ITC — 'question' (v3) | 'ocr' (image↔chuỗi-OCR; xem model).
+        # Quyết định text-key dùng cho dup-mask: hash câu hỏi vs hash OCR-word-ids.
+        self.itc_text_source = os.environ.get("ITC_TEXT_SOURCE", "question").strip().lower()
+        self._itc_key_q = None    # (≤K,) int64 hash NỘI DUNG text-side, thẳng hàng 2 queue
+        # v4: same-image mask — 1 ảnh ~3 câu hỏi thành 3 sample; khi anchor là (ảnh X,
+        # text1) mà sample anh em của CÙNG X nằm trong queue thì nó KHÔNG phải negative
+        # (vẫn thuộc về X — ~22% anchor dính với queue 4096 trên 35k sample). Quan hệ
+        # của sample anh em vẫn được HỌC khi chính nó làm anchor; mask chỉ gỡ gradient
+        # mâu thuẫn. Key = hash(image_path từ collator) — training-invariant, không cheat.
+        self._itc_ikey_q = None   # (≤K,) int64 hash ảnh, thẳng hàng 2 queue
 
     def forward(self, sample_list, model_output):
         for k, v in model_output.items():
@@ -201,36 +210,72 @@ class ViT5PretrainLoss(nn.Module):
             _l_t2i = _sc * (_tv @ _iv.t())
             # Queue negatives on TRAIN forwards only (grad on): eval acc_itc stays
             # pure in-batch → comparable across steps/runs; queue never sees eval vecs.
-            # Exact-duplicate keys (hash of clean-question token ids; pad=0 stripped).
-            # Training-invariant → un-cheatable (see __init__).
-            _keys = None
+            # FALSE-NEGATIVE keys — training-invariant hashes → un-cheatable (see
+            # __init__). Two keys, masked as a UNION:
+            #   text-key : hash NỘI DUNG text-side (question ids, hoặc clean-OCR word
+            #              ids khi ITC_TEXT_SOURCE=ocr) — bản trùng nguyên văn.
+            #   image-key: hash image_path — sample anh em CÙNG ẢNH (1 ảnh ~3 câu hỏi).
+            _keys = _ikeys = None
             if self.itc_dup_tau > 0:
-                _q_ids = sample_list.get("mlm_input_ids")
-                if _q_ids is not None and _q_ids.size(0) == _iv.size(0):
-                    _keys = torch.tensor(
-                        [hash(tuple(int(t) for t in row[row != 0]))
-                         for row in _q_ids.detach().cpu()], dtype=torch.long)
+                _B0 = _iv.size(0)
+                if self.itc_text_source == "ocr":
+                    _wid = sample_list.get("twa_word_ids")
+                    _wmap = sample_list.get("ocr_to_word_map")
+                    _char = sample_list.get("twa_ocr_char")
+                    if _wid is not None and _wmap is not None and _wid.size(0) == _B0:
+                        _half = (_char.size(1) // 2
+                                 if (_char is not None and sample_list.get("o2r_labels") is not None)
+                                 else (int(_wmap.max().item()) + 1 if _wmap.numel() else 0))
+                        _wid_c = _wid.detach().cpu(); _wmap_c = _wmap.detach().cpu()
+                        _keys = torch.tensor(
+                            [hash(tuple(int(t) for t, m in zip(_wid_c[b], _wmap_c[b])
+                                        if 0 <= int(m) < _half and int(t) != 0))
+                             for b in range(_B0)], dtype=torch.long)
+                else:
+                    _q_ids = sample_list.get("mlm_input_ids")
+                    if _q_ids is not None and _q_ids.size(0) == _B0:
+                        _keys = torch.tensor(
+                            [hash(tuple(int(t) for t in row[row != 0]))
+                             for row in _q_ids.detach().cpu()], dtype=torch.long)
+                _oinfo = sample_list.get("ocr_info")
+                if isinstance(_oinfo, (list, tuple)) and len(_oinfo) == _B0:
+                    _paths = [d.get("itc_image_path") if isinstance(d, dict) else None
+                              for d in _oinfo]
+                    if all(p is not None for p in _paths):
+                        _ikeys = torch.tensor([hash(str(p)) for p in _paths], dtype=torch.long)
             _use_q = (self.itc_queue_size > 0 and _iv.requires_grad
                       and self._itc_txt_q is not None and self._itc_txt_q.size(0) > 0)
-            _cand_keys = _keys  # paired question-key of every candidate (batch [+ queue])
             if _use_q:
                 _qi = self._itc_img_q.to(device=_iv.device, dtype=_iv.dtype)
                 _qt = self._itc_txt_q.to(device=_tv.device, dtype=_tv.dtype)
                 _l_i2t = torch.cat([_l_i2t, _sc * (_iv @ _qt.t())], dim=1)  # B×(B+K)
                 _l_t2i = torch.cat([_l_t2i, _sc * (_tv @ _qi.t())], dim=1)
-                if _keys is not None and self._itc_key_q is not None \
-                        and self._itc_key_q.size(0) == _qt.size(0):
-                    _cand_keys = torch.cat([_keys, self._itc_key_q], dim=0)
-            # Dup-question mask: candidate whose paired question is the SAME STRING as
-            # the query's is a FALSE negative for both directions → drop from softmax.
-            if _keys is not None and _cand_keys is not None:
-                _Bq = _tv.size(0)
-                _dup = _keys.unsqueeze(1).eq(_cand_keys.unsqueeze(0))
-                _dup[:, :_Bq].fill_diagonal_(False)   # keep own positive
+            # Union dup-mask: candidate trùng NỘI DUNG text HOẶC trùng ẢNH với query là
+            # false negative ở CẢ 2 chiều → loại khỏi softmax; positive của chính nó giữ.
+            _Bq = _tv.size(0)
+            _ncand = _l_i2t.size(1)
+
+            def _mk_dup(bk, qk):
+                # bk: (B,) key của batch | qk: key trong queue (thẳng hàng vector queue)
+                if bk is None:
+                    return None
+                ck = bk
+                if _ncand > _Bq:
+                    if qk is None or qk.size(0) != _ncand - _Bq:
+                        return None  # queue lệch hàng → bỏ mask này (an toàn)
+                    ck = torch.cat([bk, qk], dim=0)
+                d = bk.unsqueeze(1).eq(ck.unsqueeze(0))
+                d &= bk.unsqueeze(1) != 0         # key 0 = unknown → không bao giờ mask
+                d[:, :_Bq].fill_diagonal_(False)  # giữ positive của chính nó
+                return d
+
+            _dup_t = _mk_dup(_keys, self._itc_key_q if _use_q else None)
+            _dup_i = _mk_dup(_ikeys, self._itc_ikey_q if _use_q else None)
+            _dup = _dup_t if _dup_i is None else (_dup_i if _dup_t is None else (_dup_t | _dup_i))
+            if _dup is not None:
                 _dup = _dup.to(_l_i2t.device)
-                if _dup.size(1) == _l_i2t.size(1):
-                    _l_i2t = _l_i2t.masked_fill(_dup, float("-inf"))
-                    _l_t2i = _l_t2i.masked_fill(_dup, float("-inf"))
+                _l_i2t = _l_i2t.masked_fill(_dup, float("-inf"))
+                _l_t2i = _l_t2i.masked_fill(_dup, float("-inf"))
             _tgt = torch.arange(_l_i2t.size(0), device=_l_i2t.device)
             itc_loss = 0.5 * (F.cross_entropy(_l_i2t, _tgt) + F.cross_entropy(_l_t2i, _tgt))
             # ITC retrieval accuracy: top-1 over B(+K) candidates, both directions.
@@ -245,11 +290,14 @@ class ViT5PretrainLoss(nn.Module):
                         torch.cat([self._itc_img_q, _di], 0)[-self.itc_queue_size:]
                     self._itc_txt_q = _dt if self._itc_txt_q is None else \
                         torch.cat([self._itc_txt_q, _dt], 0)[-self.itc_queue_size:]
-                    # keys enqueued in lockstep with the vector queues (fallback 0-keys
-                    # keep alignment even if mlm_input_ids was absent this batch)
+                    # keys enqueued in lockstep with the vector queues (fallback key 0 =
+                    # "unknown"; _mk_dup never masks on key 0 so alignment stays safe)
                     _dk = _keys if _keys is not None else torch.zeros(_di.size(0), dtype=torch.long)
                     self._itc_key_q = _dk if self._itc_key_q is None else \
                         torch.cat([self._itc_key_q, _dk], 0)[-self.itc_queue_size:]
+                    _dik = _ikeys if _ikeys is not None else torch.zeros(_di.size(0), dtype=torch.long)
+                    self._itc_ikey_q = _dik if self._itc_ikey_q is None else \
+                        torch.cat([self._itc_ikey_q, _dik], 0)[-self.itc_queue_size:]
 
         if mode in ["full", "all"]:
             total_loss = mlm_loss + pollute_loss + contrastive_loss
