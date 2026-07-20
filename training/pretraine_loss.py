@@ -203,6 +203,13 @@ class ViT5PretrainLoss(nn.Module):
         itc_loss = None
         itc_acc = None
         _iv, _tv = model_output.get("itc_img_vec"), model_output.get("itc_txt_vec")
+        # Belt-and-suspenders: vision tràn số nondeterministic có thể lọt NaN/inf vào
+        # itc vecs — bỏ ITC batch đó (0, in-graph) thay vì NaN hoá cả total loss
+        # (grad-guard sẽ phải zero SẠCH grads của step = phí cả batch).
+        if (_iv is not None and _tv is not None
+                and not (bool(torch.isfinite(_iv).all()) and bool(torch.isfinite(_tv).all()))):
+            print("⚠️ [ITC] non-finite itc vectors (vision overflow) — ITC skips this batch (0).")
+            _iv = _tv = None
         if self.itc_weight > 0 and _iv is not None and _tv is not None and _iv.size(0) > 1:
             _sc = model_output.get("itc_logit_scale")
             _sc = _sc.exp().clamp(max=100.0) if torch.is_tensor(_sc) else 14.3

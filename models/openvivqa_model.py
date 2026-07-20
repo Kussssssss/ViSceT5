@@ -316,6 +316,14 @@ class OpenViVQAModel(PreTrainedModel):
         else:
             qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
             img_hs = qa_out.last_hidden_state
+            if getattr(self, "_pretrain_stage", False):
+                # UNFROZEN pretrain: QA-CLIP's RANDOM-INIT instruction adapters (layers
+                # 6-9 stay frozen when only the last 2 are unfrozen) can overflow
+                # (~1e36 → inf; measured in v4 mock: attn_summary inf, itc_img_vec NaN).
+                # Sanitize + clamp WITHOUT detaching — grads still flow to the unfrozen
+                # layers; clamp also tames the huge-but-finite flavor that collapses
+                # normalized vectors. Finetune never sets _pretrain_stage → untouched.
+                img_hs = torch.nan_to_num(img_hs, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
 
         img_tokens = img_hs[:, 1:, :].to(self.target_dtype)
         img_attn_mask = torch.ones(B, img_tokens.size(1), dtype=torch.long, device=device)
@@ -334,8 +342,10 @@ class OpenViVQAModel(PreTrainedModel):
                 patch_scores = cls_to_patch.mean(dim=1)
 
             patch_scores = patch_scores.to(self.target_dtype)
-            if _frozen_pt:
-                patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4)
+            if getattr(self, "_pretrain_stage", False):
+                # covers BOTH frozen (_frozen_pt) and unfrozen pretrain — attention
+                # scores from the overflowing adapters poison visual_search otherwise
+                patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
             out["patch_scores"] = patch_scores
             if return_attn: out["qa_attn_last"] = last_attn.detach().cpu()
         else:
