@@ -316,13 +316,19 @@ class OpenViVQAModel(PreTrainedModel):
         else:
             qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
             img_hs = qa_out.last_hidden_state
-            if getattr(self, "_pretrain_stage", False):
+            if getattr(self, "_pretrain_stage", False) or bool(getattr(self.config, "clamp_vision", False)):
                 # UNFROZEN pretrain: QA-CLIP's RANDOM-INIT instruction adapters (layers
                 # 6-9 stay frozen when only the last 2 are unfrozen) can overflow
                 # (~1e36 → inf; measured in v4 mock: attn_summary inf, itc_img_vec NaN).
                 # Sanitize + clamp WITHOUT detaching — grads still flow to the unfrozen
                 # layers; clamp also tames the huge-but-finite flavor that collapses
-                # normalized vectors. Finetune never sets _pretrain_stage → untouched.
+                # normalized vectors.
+                # config.clamp_vision: weights PRETRAINED under this clamp expect it as
+                # part of the forward function — finetune-from-pretrain without it gets
+                # exploding activations (measured: grad_norm=inf every step in v4-A vs
+                # 0/447 inf in v3-A). The flag lives in config so it persists through
+                # save/load into finetune AND predict automatically. Scratch finetune
+                # (default config, no flag) stays byte-identical.
                 img_hs = torch.nan_to_num(img_hs, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
 
         img_tokens = img_hs[:, 1:, :].to(self.target_dtype)
@@ -342,9 +348,10 @@ class OpenViVQAModel(PreTrainedModel):
                 patch_scores = cls_to_patch.mean(dim=1)
 
             patch_scores = patch_scores.to(self.target_dtype)
-            if getattr(self, "_pretrain_stage", False):
+            if getattr(self, "_pretrain_stage", False) or bool(getattr(self.config, "clamp_vision", False)):
                 # covers BOTH frozen (_frozen_pt) and unfrozen pretrain — attention
-                # scores from the overflowing adapters poison visual_search otherwise
+                # scores from the overflowing adapters poison visual_search otherwise;
+                # clamp_vision: same guard when finetuning/inferring FROM such weights
                 patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
             out["patch_scores"] = patch_scores
             if return_attn: out["qa_attn_last"] = last_attn.detach().cpu()

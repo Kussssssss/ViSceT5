@@ -819,6 +819,10 @@ def main(args_list=None):
     # numerical guard (fused_seq nan_to_num) activates even inside the gen forward
     # (which flips self.pretrain=False). Finetune never sets this → forward untouched.
     model._pretrain_stage = True
+    # Persisted flag: weights are trained UNDER the vision clamp → any later stage
+    # (finetune/predict) loading this checkpoint must keep the clamp (part of the
+    # learned function). Lives in config so it survives save/load automatically.
+    model.config.clamp_vision = True
     model.config.pretrain = True
     model.config.pretrain_ablation_mode = mode
     model.config.use_twc = use_twc
