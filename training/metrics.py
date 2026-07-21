@@ -343,13 +343,34 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             print(f"⚠️  [GradGuard] step {self.state.global_step}: sanitized non-finite grads "
                   f"(zeroed) in submodules {bad} — watch which one recurs to find the source.")
 
-        # PRETRAIN-ONLY vision grad clip. The newly-unfrozen CLIP-vision layers can
-        # produce huge gradients that dominate the GLOBAL clip (max_grad_norm) and
-        # STARVE vit5/OCR of updates (→ loss_mlm/loss_gen stall). Clip qa_clip grads
-        # to a small norm HERE, before the global clip, so vision fine-tunes gently
-        # without hijacking the step. Gated to pretrain so finetune (shared trainer)
-        # is untouched.
-        if getattr(model, "pretrain", False):
+        # Env-gated grad diagnostics (GRAD_DIAG=1): when the RAW total grad-norm is
+        # about to overflow fp32 (what HF logs as grad_norm=inf), name the top
+        # submodules by norm — fp64 accumulation so the diag itself can't overflow.
+        # Runs BEFORE the vision pre-clip below to show the true source.
+        if os.environ.get("GRAD_DIAG", "").strip() in ("1", "true", "True"):
+            _per = {}
+            _tot = 0.0
+            for _n, _p in model.named_parameters():
+                if _p.grad is None:
+                    continue
+                _s = float(_p.grad.detach().double().pow(2).sum())
+                _k = _n.split(".")[0]
+                _per[_k] = _per.get(_k, 0.0) + _s
+                _tot += _s
+            if not (_tot < 3.0e38):  # sẽ hiển thị inf ở log HF (fp32 overflow) / NaN
+                _top = sorted(_per.items(), key=lambda kv: -kv[1])[:5]
+                print(f"🧭 [GradDiag] step {self.state.global_step}: tổng ||g||²(fp64)={_tot:.3e} → nguồn: "
+                      + ", ".join(f"{k}||g||={v ** 0.5:.3e}" for k, v in _top))
+
+        # Vision grad pre-clip. The unfrozen/adapter CLIP params can produce huge
+        # gradients that overflow the GLOBAL norm (grad_norm=inf → clip coef 0 →
+        # whole step silently no-ops) or starve vit5/OCR. Clip qa_clip grads to a
+        # small norm HERE, before the global clip. Active in (a) pretrain — where it
+        # always ran — and (b) any stage whose weights were TRAINED under this rule
+        # (config.clamp_vision, i.e. finetune-from-v4 warm starts): the guard travels
+        # with the weights. Scratch finetune (no flag) is untouched.
+        if getattr(model, "pretrain", False) or bool(
+                getattr(getattr(model, "config", None), "clamp_vision", False)):
             _vparams = [p for n, p in model.named_parameters()
                         if p.grad is not None and "qa_clip" in n]
             if _vparams:
