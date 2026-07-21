@@ -183,6 +183,14 @@ def main(args_list=None):
         except Exception as _e:
             print(f"ℹ️ Could not read config.json ({_e}); using default OpenViVQAConfig().")
             config = OpenViVQAConfig()
+        # Warm-start từ checkpoint PRETRAIN: trọng số vision được train DƯỚI clamp
+        # ±1e4 (v4) — finetune không clamp sẽ nổ gradient (đo được: grad_norm=inf
+        # mọi step ở v4-A, trong khi v3-A 0/447 inf). Bật cờ cho checkpoint pretrain
+        # cũ chưa mang sẵn clamp_vision trong config; scratch (không ckpt) không đổi.
+        if bool(getattr(config, "pretrain", False)) and not hasattr(config, "clamp_vision"):
+            config.clamp_vision = True
+            print("🛡️ [finetune] warm-start từ pretrain-ckpt → bật config.clamp_vision "
+                  "(giữ đúng hàm forward mà trọng số đã học)")
     else:
         tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
         config = OpenViVQAConfig()
