@@ -28,7 +28,11 @@ export STAGE MOCK_TEST
 echo "▶ [Vast.ai] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST"
 
 # ---- environment bootstrap ----
-apt-get update && apt-get install -y python3-venv git
+# fail-fast apt (xem setup.sh): tránh treo ở "Waiting for headers" khi host Vast
+# không ra được archive.ubuntu.com. python3/git thường có sẵn trên image pytorch.
+APT_OPTS="-o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20"
+apt-get $APT_OPTS update || true
+apt-get $APT_OPTS install -y python3-venv git || true
 cd /workspace
 
 if [ -d "/workspace/ViSceT5" ]; then
