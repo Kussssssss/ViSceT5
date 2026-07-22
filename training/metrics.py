@@ -206,9 +206,23 @@ def simple_pretrain_aggregator(eval_pred):
         return result
 
 def build_compute_metrics_finetune(tokenizer_for_metrics):
-    bleu_metric = Bleu()
-    cider_metric = Cider()
-    ptb_tokenizer = PTBTokenizer()
+    # BLEU/CIDEr chạy qua PTBTokenizer = subprocess JAVA. Trên host mạng yếu (Vast)
+    # cài openjdk có thể thất bại → java không có → .tokenize() ném lỗi. EM/F1 (chỉ số
+    # leaderboard ViTextVQA) KHÔNG cần java. Nên nếu java vắng, TẮT MỀM BLEU/CIDEr và
+    # vẫn trả EM/F1 — finetune eval không bao giờ crash vì thiếu java.
+    import shutil
+    _java_ok = shutil.which("java") is not None
+    bleu_metric = cider_metric = ptb_tokenizer = None
+    if _java_ok:
+        try:
+            bleu_metric = Bleu()
+            cider_metric = Cider()
+            ptb_tokenizer = PTBTokenizer()
+        except Exception as _e:
+            print(f"⚠️ [metrics] BLEU/CIDEr init lỗi ({_e}) → chỉ dùng EM/F1.")
+            bleu_metric = cider_metric = ptb_tokenizer = None
+    else:
+        print("⚠️ [metrics] không thấy 'java' → BLEU/CIDEr TẮT, chỉ báo EM/F1 (đủ cho leaderboard).")
 
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
@@ -242,30 +256,28 @@ def build_compute_metrics_finetune(tokenizer_for_metrics):
             labels_proc, skip_special_tokens=True
         )
 
-        # EM/F1 theo ViTextVQA
+        # EM/F1 theo ViTextVQA (KHÔNG cần java — luôn tính được)
         f1, em = compute_f1_em(pred_texts, label_texts)
+        res = {"em": float(em), "f1": float(f1)}
 
-        # Chuẩn hoá cho BLEU / CIDEr
-        pred_texts_n = [_normalize_txt(x) for x in pred_texts]
-        label_texts_n = [_normalize_txt(x) for x in label_texts]
-
-        gts = {i: [{"caption": label_texts_n[i]}] for i in range(len(label_texts_n))}
-        gens = {i: [{"caption": pred_texts_n[i]}] for i in range(len(pred_texts_n))}
-        gts_tok = ptb_tokenizer.tokenize(gts)
-        gens_tok = ptb_tokenizer.tokenize(gens)
-
-        bleu_scores, _ = bleu_metric.compute_score(gts_tok, gens_tok)
-        cider_score, _ = cider_metric.compute_score(gts_tok, gens_tok)
-
-        res = {
-            "bleu1": float(bleu_scores[0]),
-            "bleu2": float(bleu_scores[1]),
-            "bleu3": float(bleu_scores[2]),
-            "bleu4": float(bleu_scores[3]),
-            "cider": float(cider_score),
-            "em": float(em),
-            "f1": float(f1),
-        }
+        # BLEU/CIDEr chỉ khi có java (xem build_compute_metrics_finetune)
+        if ptb_tokenizer is not None:
+            try:
+                pred_texts_n = [_normalize_txt(x) for x in pred_texts]
+                label_texts_n = [_normalize_txt(x) for x in label_texts]
+                gts = {i: [{"caption": label_texts_n[i]}] for i in range(len(label_texts_n))}
+                gens = {i: [{"caption": pred_texts_n[i]}] for i in range(len(pred_texts_n))}
+                gts_tok = ptb_tokenizer.tokenize(gts)
+                gens_tok = ptb_tokenizer.tokenize(gens)
+                bleu_scores, _ = bleu_metric.compute_score(gts_tok, gens_tok)
+                cider_score, _ = cider_metric.compute_score(gts_tok, gens_tok)
+                res.update({
+                    "bleu1": float(bleu_scores[0]), "bleu2": float(bleu_scores[1]),
+                    "bleu3": float(bleu_scores[2]), "bleu4": float(bleu_scores[3]),
+                    "cider": float(cider_score),
+                })
+            except Exception as _e:
+                print(f"⚠️ [metrics] BLEU/CIDEr lỗi runtime ({_e}) → chỉ báo EM/F1 lần này.")
         dbg(f"[metrics] {res}")
         return res
 
