@@ -163,6 +163,17 @@ def run():
                     sys.argv.extend(["--num_train_epochs", _fep])
                     print(f">>> [finetune] num_train_epochs = {_fep}")
 
+                # Đổi DATASET để finetune (mặc định ViTextVQA trong finetune.yaml):
+                #  DATASET_NAME = ViTextVQA | ViOCRVQA | OpenViVQA (phải có configs/data/<ten>.yaml)
+                #  DATA_DIR     = thư mục dataset (mặc định ./datasets)
+                # Cache CSV đã mang tên dataset (merged_*_<ten>.csv) nên đổi qua lại an toàn.
+                for _dk, _dflag in [("DATASET_NAME", "--dataset_name"),
+                                    ("DATA_DIR", "--data_dir")]:
+                    _dv = os.environ.get(_dk, "").strip()
+                    if _dv:
+                        sys.argv.extend([_dflag, _dv])
+                        print(f">>> [finetune] {_dflag} = {_dv}")
+
                 # Nạp trọng số PRETRAIN để finetune (warm-start):
                 #  PRETRAIN_HF_REPO   = HF repo id chứa checkpoint pretrain (vd
                 #                       'Kus669/ViSceT5-pretrain-genall'); tự tải về.

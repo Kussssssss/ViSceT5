@@ -100,11 +100,21 @@ def main(args_list=None):
     # 1. Prepare Data
     print(f">>> Preparing Dataset: {data_args.dataset_name}")
     from configs.base_config import OUTPUT_PATH
-    train_csv = os.path.join(OUTPUT_PATH, "merged_train.csv")
-    val_csv = os.path.join(OUTPUT_PATH, "merged_val.csv")
-    
+    _ds = data_args.dataset_name
+    # DATASET-AWARE cache: tên file mang tên dataset để đổi dataset KHÔNG bị cache cũ
+    # (vd merged_train.csv của ViTextVQA) che mất → tránh âm thầm train nhầm dữ liệu.
+    train_csv = os.path.join(OUTPUT_PATH, f"merged_train_{_ds}.csv")
+    val_csv = os.path.join(OUTPUT_PATH, f"merged_val_{_ds}.csv")
+    # Back-compat: cache cũ KHÔNG hậu tố là của ViTextVQA — chỉ dùng cho đúng nó.
+    _legacy_tr = os.path.join(OUTPUT_PATH, "merged_train.csv")
+    _legacy_va = os.path.join(OUTPUT_PATH, "merged_val.csv")
+    if (not (os.path.exists(train_csv) and os.path.exists(val_csv))
+            and _ds == "ViTextVQA"
+            and os.path.exists(_legacy_tr) and os.path.exists(_legacy_va)):
+        train_csv, val_csv = _legacy_tr, _legacy_va
+
     if os.path.exists(train_csv) and os.path.exists(val_csv):
-        print(f"ℹ️ Found prepared CSV cache in {OUTPUT_PATH}. Loading directly...")
+        print(f"ℹ️ Found prepared CSV cache for {_ds}: {os.path.basename(train_csv)}. Loading directly...")
         train_df = pd.read_csv(train_csv)
         val_df = pd.read_csv(val_csv)
     else:
@@ -142,6 +152,13 @@ def main(args_list=None):
         except Exception as e:
             print(f"❌ Failed to load dataset {data_args.dataset_name} from Hub: {e}")
             return
+        # Ghi cache dataset-aware để lần chạy sau nạp thẳng (không prepare lại).
+        try:
+            train_df.to_csv(os.path.join(OUTPUT_PATH, f"merged_train_{_ds}.csv"), index=False)
+            val_df.to_csv(os.path.join(OUTPUT_PATH, f"merged_val_{_ds}.csv"), index=False)
+            print(f"💾 Đã lưu cache: merged_train_{_ds}.csv / merged_val_{_ds}.csv")
+        except Exception as _e:
+            print(f"ℹ️ Không ghi được cache CSV ({_e}); không sao, sẽ prepare lại lần sau.")
 
     if training_args.smoke_test:
         print("🚨 RUNNING IN SMOKE TEST MODE: Truncating dataset and reducing training steps.")
