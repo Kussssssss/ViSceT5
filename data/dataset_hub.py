@@ -285,6 +285,11 @@ class DatasetHubLoader:
         for split, conf in spec["splits"].items():
             id_ = conf.get("id")
             url = conf.get("url")
+            # Bỏ qua split không có nguồn (id/url rỗng) — vd test bị gỡ khi id sai/thiếu.
+            # Không raise, chỉ skip → build_df sẽ không có split đó (finetune chỉ cần train/val).
+            if not (id_ and str(id_).strip()) and not url:
+                print(f"ℹ️ [Hub] Bỏ qua split '{split}' (không có drive_id/url).")
+                continue
             out_p = os.path.join(out_dir, f"{dataset_name}_{split}.json")
             _maybe_download(id_, url, out_p)
             ann_out[split] = out_p
@@ -351,7 +356,13 @@ class DatasetHubLoader:
         mapper = spec["mapper_fn"]
         rows = []
         for split, json_path in ann.items():
-            data = _load_json(json_path)
+            # Bỏ qua split có JSON hỏng (vd file tải nhầm không phải JSON) thay vì
+            # crash cả build — split khác vẫn dùng được (finetune chỉ cần train/val).
+            try:
+                data = _load_json(json_path)
+            except Exception as e:
+                print(f"⚠️ [Hub] Bỏ qua split '{split}': đọc JSON lỗi ({type(e).__name__}: {e}).")
+                continue
             rows.extend(mapper(data, img_dir, split, ocr_dir))
         df = pd.DataFrame(rows)
         if "dataset" in df.columns:

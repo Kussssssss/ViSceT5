@@ -1,4 +1,8 @@
 dataset_name: OpenViVQA
+# LƯU Ý: id 'test' cũ (10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc) tải về 1.66GB — KHÔNG phải
+# JSON annotation (chỉ vài MB) mà chính là ZIP ẢNH → yaml gốc gán nhãn SAI. Đã chuyển
+# id đó sang 'image' (đúng vai trò). 'test' để trống → finetune bỏ qua (chỉ cần
+# train+val); khi nào có id JSON test THẬT (public) thì điền lại để predict/eval test.
 dataset:
   train:
     dir: ""
@@ -8,10 +12,11 @@ dataset:
     drive_id: "1uo-HI_vrT2UGZEDP6NNivw2Dx16Q-Dbr"
   test:
     dir: ""
-    drive_id: "10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc"
+    drive_id: ""
 image:
   dir: ""
-  drive_id: "12w-9Nlq2cM3qQY_8k1k2d0n5UqL3z0hH"
+  # primary = link bạn cung cấp (file 1.66GB = ảnh); backup = id 'image' cũ (đang private/quota)
+  drive_id: "10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc, 12w-9Nlq2cM3qQY_8k1k2d0n5UqL3z0hH"
 ocr:
   dir: ""
   drive_id: "1Jk0Gl04Xlsc1U86XcTaRbsF6EUvHxgFx"
