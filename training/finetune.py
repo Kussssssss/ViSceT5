@@ -305,6 +305,38 @@ def main(args_list=None):
         compute_metrics=compute_metrics_fn,
     )
 
+    # ── Upload TỪNG checkpoint NGAY khi lưu (chống mất dữ liệu khi Vast bị reclaim) ──
+    # Bài học: run_pipeline chỉ upload SAU khi train xong (bước 3.5); finetune crash
+    # hoặc máy interruptible bị chiếm giữa chừng → mất trắng dù đã set HF_REPO. Callback
+    # này push checkpoint mới nhất lên HF ngay mỗi lần Trainer save (dùng HfApi.upload_folder
+    # thuần API — KHÔNG cần git-lfs). Gated bằng env HF_TOKEN+HF_REPO; không set thì bỏ qua.
+    _hf_tok = os.environ.get("HF_TOKEN", "").strip()
+    _hf_repo = os.environ.get("HF_REPO", "").strip()
+    if _hf_tok and _hf_repo:
+        from transformers.trainer_callback import TrainerCallback
+        from huggingface_hub import HfApi
+        class _PushEachCheckpoint(TrainerCallback):
+            def __init__(self, repo, token, out_dir):
+                self.api = HfApi(token=token); self.repo = repo; self.out = out_dir
+                self.api.create_repo(repo_id=repo, repo_type="model", exist_ok=True)
+            def on_save(self, args, state, control, **kw):
+                ck = os.path.join(self.out, f"checkpoint-{state.global_step}")
+                if not os.path.isdir(ck):
+                    return
+                try:
+                    # bỏ optimizer.pt (nặng, không cần cho inference) để upload nhanh/nhẹ
+                    self.api.upload_folder(folder_path=ck, path_in_repo=f"checkpoint-{state.global_step}",
+                                           repo_id=self.repo, repo_type="model",
+                                           ignore_patterns=["optimizer.pt", "rng_state*.pth", "scheduler.pt"])
+                    print(f"☁️ [HF] đã push checkpoint-{state.global_step} → {self.repo}")
+                except Exception as e:
+                    print(f"⚠️ [HF] push checkpoint-{state.global_step} lỗi: {e}")
+        try:
+            trainer.add_callback(_PushEachCheckpoint(_hf_repo, _hf_tok, training_args.output_dir))
+            print(f"☁️ [HF] bật auto-push mỗi checkpoint → {_hf_repo} (chống mất khi reclaim)")
+        except Exception as _e:
+            print(f"ℹ️ [HF] không bật được auto-push callback ({_e}); vẫn có upload cuối ở run_pipeline.")
+
     print(">>> Starting Finetune...")
     if training_args.resume_from_checkpoint:
         from training.metrics import seed_train_metrics_from_checkpoint

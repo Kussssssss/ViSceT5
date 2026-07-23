@@ -216,8 +216,14 @@ def run():
                 finetune.main()
                 print(">>> Training finished successfully.")
             except Exception as e:
+                # KHÔNG re-raise: đi tiếp tới bước 3.5 để upload BẤT KỲ output đã lưu
+                # (checkpoint từng epoch) trước khi finally auto-stop máy — tránh mất
+                # trắng khi finetune crash giữa chừng (callback per-checkpoint là lớp
+                # chính; đây là backstop cho phần còn lại trong output_dir).
+                import traceback
                 print(f"❌ Error during training: {e}")
-                raise e
+                traceback.print_exc()
+                print(">>> Vẫn thử upload output đã lưu (nếu có) ở bước 3.5...")
 
         # 3.5. Tự động upload checkpoint lên Hugging Face Hub (nếu được cấu hình)
         try:
