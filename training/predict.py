@@ -324,6 +324,8 @@ def main():
                     help="HF repo chứa bundle finetune (vd Kus669/ViSceT5-finetune-frompretrain-8400) — tự tải về")
     ap.add_argument("--hf_ckpt", default="",
                     help="Thư mục con checkpoint trong repo HF (vd checkpoint-21975)")
+    ap.add_argument("--dataset", default="ViTextVQA",
+                    help="Tên dataset (phải có configs/data/<ten>.yaml): ViTextVQA | ViOCRVQA | OpenViVQA")
     ap.add_argument("--batch_size", type=int, default=8)
     ap.add_argument("--num_beams", type=int, default=4)
     ap.add_argument("--max_new_tokens", type=int, default=0,
@@ -420,6 +422,7 @@ def main():
     if not args.no_hub:
         try:
             dfs_hub = load_dfs_via_hub(
+                dataset_name=args.dataset,
                 data_dir=args.data_dir,
                 image_dir_override=args.image_dir_override,
                 ocr_dir_override=args.ocr_dir_override,
@@ -437,10 +440,18 @@ def main():
         if dfs_hub is not None:
             df = df_from_hub(dfs_hub, sp)
         else:
-            json_path = os.path.join(args.json_dir, f"ViTextVQA_{SPLIT_TO_JSON[sp]}.json")
-            merged_csv = os.path.join(OUTPUT_PATH, f"{SPLIT_TO_CSV[sp]}.csv")
+            _jdir = args.json_dir if args.dataset == "ViTextVQA" else f"datasets/processed/{args.dataset}"
+            json_path = os.path.join(_jdir, f"{args.dataset}_{SPLIT_TO_JSON[sp]}.json")
+            merged_csv = os.path.join(OUTPUT_PATH, f"{SPLIT_TO_CSV[sp]}.csv") if args.dataset == "ViTextVQA" else ""
             df = build_eval_df(sp, json_path, merged_csv, args.image_dir, args.ocr_dir)
-        out_csv = os.path.join(args.out_dir, f"submission_{sp}.csv")
+        # split rỗng (vd OpenViVQA test bị blank vì id sai) → báo rõ, bỏ qua
+        if df is None or len(df) == 0:
+            print(f"⚠️ [{sp}] KHÔNG có dữ liệu cho dataset '{args.dataset}' "
+                  f"(split '{SPLIT_TO_JSON[sp]}' rỗng — thiếu JSON id?). Bỏ qua.")
+            continue
+        # tên file mang tên dataset để không đè submission của dataset khác
+        _tag = "" if args.dataset == "ViTextVQA" else f"{args.dataset}_"
+        out_csv = os.path.join(args.out_dir, f"submission_{_tag}{sp}.csv")
         outs.append(run_split(
             model, tokenizer, collator, df, sp, out_csv,
             args.batch_size, beams, max_new, report_em=not args.no_em,
