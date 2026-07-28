@@ -324,6 +324,10 @@ def main():
                     help="HF repo chứa bundle finetune (vd Kus669/ViSceT5-finetune-frompretrain-8400) — tự tải về")
     ap.add_argument("--hf_ckpt", default="",
                     help="Thư mục con checkpoint trong repo HF (vd checkpoint-21975)")
+    ap.add_argument("--drive_folder", default="",
+                    help="Link (hoặc id) folder Google Drive chứa checkpoint (config.json + "
+                         "model.safetensors + tokenizer). Folder PHẢI 'Anyone with the link'. "
+                         "Ưu tiên: --ckpt_dir > --drive_folder > --hf_repo")
     ap.add_argument("--dataset", default="ViTextVQA",
                     help="Tên dataset (phải có configs/data/<ten>.yaml): ViTextVQA | ViOCRVQA | OpenViVQA")
     ap.add_argument("--batch_size", type=int, default=8)
@@ -351,8 +355,34 @@ def main():
 
     splits = ["dev", "test"] if args.split == "both" else [args.split]
 
-    # Tải bundle finetune từ HF nếu không có --ckpt_dir local
+    # Ưu tiên nguồn checkpoint: --ckpt_dir (local) > --drive_folder (Google Drive) > --hf_repo (HF)
     ckpt_arg = args.ckpt_dir
+    if not ckpt_arg and args.drive_folder:
+        import gdown
+        _url = args.drive_folder.strip()
+        if "drive.google.com" not in _url:  # cho phép truyền id trần
+            _url = f"https://drive.google.com/drive/folders/{_url}"
+        dl = os.path.join(OUTPUT_PATH, "drive_ckpt")
+        os.makedirs(dl, exist_ok=True)
+        print(f">>> Tải checkpoint từ Google Drive folder: {_url}")
+        try:
+            files = gdown.download_folder(url=_url, output=dl, quiet=False, use_cookies=False)
+        except Exception as e:
+            raise RuntimeError(
+                f"Không tải được folder Drive ({e}). Kiểm tra folder đã đặt "
+                "'Anyone with the link' chưa (private thì gdown không lấy được)."
+            )
+        if not files:
+            raise RuntimeError("Folder Drive rỗng hoặc không truy cập được.")
+        # gdown giữ cấu trúc trong output; tìm thư mục chứa config.json + *.safetensors
+        _paths = [getattr(f, "local_path", None) or getattr(f, "path", None) or str(f) for f in files]
+        _dirs = {os.path.dirname(p) for p in _paths if p}
+        ckpt_arg = dl
+        for d in sorted(_dirs, key=len):
+            if os.path.exists(os.path.join(d, "config.json")):
+                ckpt_arg = d
+                break
+        print(f">>> Checkpoint Drive → {ckpt_arg}")
     if not ckpt_arg and args.hf_repo:
         from huggingface_hub import snapshot_download
         dl = os.path.join(OUTPUT_PATH, "finetune_hf")
