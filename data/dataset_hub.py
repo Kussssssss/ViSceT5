@@ -155,7 +155,13 @@ def _default_vqa_mapper(
     if isinstance(raw_anns, list):
         annotations_list = raw_anns
     elif isinstance(raw_anns, dict):
-        annotations_list = list(raw_anns.values())
+        # Một số bộ (OpenViVQA/VLSP) dùng KHÓA của dict làm question-id còn value
+        # KHÔNG có 'id' → list(values()) sẽ mất id submission. Giữ khóa làm 'id'.
+        annotations_list = []
+        for _k, _v in raw_anns.items():
+            if isinstance(_v, dict) and _v.get("id") is None:
+                _v = {**_v, "id": int(_k) if str(_k).isdigit() else _k}
+            annotations_list.append(_v)
 
     rows = []
     for ann in annotations_list:
