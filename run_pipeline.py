@@ -119,7 +119,10 @@ def run():
                 sys.argv.extend(["--split", os.environ.get("PREDICT_SPLIT", "both").strip()])
                 _pck = os.environ.get("PREDICT_CKPT_DIR", "").strip()
                 _hf_repo = os.environ.get("PREDICT_HF_REPO", "").strip()
-                if not _pck and _hf_repo:
+                _drive = os.environ.get("PREDICT_DRIVE_FOLDER", "").strip()
+                if not _pck and _drive:
+                    sys.argv.extend(["--drive_folder", _drive])
+                if not _pck and not _drive and _hf_repo:
                     from huggingface_hub import snapshot_download
                     _sub = os.environ.get("PREDICT_HF_CKPT", "").strip()
                     _dl = os.path.join("./output", "finetune_hf")
