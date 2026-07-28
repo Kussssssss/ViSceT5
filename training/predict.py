@@ -244,7 +244,7 @@ def _em_f1(preds, labels):
 
 @torch.inference_mode()
 def run_split(model, tokenizer, collator, df, split, out_csv,
-              batch_size, num_beams, max_new_tokens, report_em):
+              batch_size, num_beams, max_new_tokens, report_em, use_pil_images=False):
     dataset = ViT5VQADataset(df)
     ids = df["id"].tolist()
     n = len(dataset)
@@ -272,7 +272,10 @@ def run_split(model, tokenizer, collator, df, split, out_csv,
             input_ids=bd.get("input_ids"),
             attention_mask=bd.get("attention_mask"),
             pixel_values=bd.get("pixel_values"),
-            pil_images=batch.get("pil_images"),
+            # KHỚP finetune-eval: prediction_step KHÔNG truyền pil_images → visual_search
+            # dùng crop giả (dummy). Val CIDEr 3.69 được đo ở chế độ này. Mặc định bỏ
+            # pil_images để predict = eval; --use_pil_images bật lại crop thật (A/B trên val).
+            pil_images=(batch.get("pil_images") if use_pil_images else None),
             ocr_info=batch.get("ocr_info"),
             ocr_mask_token=bd.get("ocr_mask_token"),
             ocr_mask_box=bd.get("ocr_mask_box"),
@@ -350,6 +353,10 @@ def main():
                     help="[fallback --no_hub] thư mục chứa ViTextVQA_*.json")
     ap.add_argument("--image_dir", default="", help="[fallback] nếu thiếu CSV merged")
     ap.add_argument("--ocr_dir", default="", help="[fallback] nếu thiếu CSV merged")
+    ap.add_argument("--use_pil_images", action="store_true",
+                    help="Truyền pil_images (crop THẬT của visual_search) khi generate. "
+                         "MẶC ĐỊNH TẮT để KHỚP finetune-eval (nơi đo val CIDEr — nó không "
+                         "truyền pil_images, dùng crop giả). Bật để A/B trên val xem crop thật có lợi không.")
     ap.add_argument("--no_em", action="store_true", help="Bỏ tính EM cục bộ trên dev")
     args = ap.parse_args()
 
@@ -485,6 +492,7 @@ def main():
         outs.append(run_split(
             model, tokenizer, collator, df, sp, out_csv,
             args.batch_size, beams, max_new, report_em=not args.no_em,
+            use_pil_images=args.use_pil_images,
         ))
         torch.cuda.empty_cache()
         gc.collect()
