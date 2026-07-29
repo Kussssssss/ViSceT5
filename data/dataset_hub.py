@@ -132,6 +132,31 @@ def _safe_remove(p):
     except Exception:
         pass
 
+# Index tên-file -> đường dẫn đầy đủ, đệ quy toàn bộ cây thư mục (cache theo root).
+# Xử lý bộ dữ liệu tách ảnh/OCR thành NHIỀU thư mục con theo split (OpenViVQA:
+# images/{train,dev,test}-images/...), khi _find_leaf_dir chỉ trả về MỘT leaf.
+_FILE_INDEX_CACHE: Dict[str, Dict[str, str]] = {}
+
+def _file_index(root, pred):
+    if root in _FILE_INDEX_CACHE:
+        return _FILE_INDEX_CACHE[root]
+    idx = {}
+    try:
+        for cur, _dirs, files in os.walk(root):
+            for f in files:
+                if pred(f):
+                    idx.setdefault(f, os.path.join(cur, f))
+    except Exception:
+        pass
+    _FILE_INDEX_CACHE[root] = idx
+    return idx
+
+def _resolve_in_tree(image_dir, filename, pred):
+    """Tìm filename ở bất kỳ thư mục con nào dưới CÙNG cấp với image_dir (parent)."""
+    root = os.path.dirname(image_dir.rstrip("/\\")) or image_dir
+    return _file_index(root, pred).get(filename)
+
+
 def _default_vqa_mapper(
     data: Dict[str, Any],
     image_dir: str,
@@ -193,6 +218,12 @@ def _default_vqa_mapper(
             answer = all_answers[0]
 
         img_path = os.path.join(image_dir, filename) if filename else None
+        # Fallback đa-thư-mục: ảnh không có ở leaf đã chọn → tìm trong toàn cây
+        # (vd train image nằm ở train-images/ còn leaf lại là test-images/).
+        if img_path and filename and not os.path.isfile(img_path):
+            _hit = _resolve_in_tree(image_dir, filename, _is_img)
+            if _hit:
+                img_path = _hit
 
         ocr_path = None
         if ocr_dir and filename:
@@ -224,6 +255,16 @@ def _default_vqa_mapper(
                      ocr_path = cand_npy_12
                  elif os.path.isfile(cand_npz_12):
                      ocr_path = cand_npz_12
+
+            # Fallback đa-thư-mục cho OCR (train-ocr/, dev-ocr/, ...): tìm theo tên
+            if ocr_path is None:
+                for _cand in (f"{stem}.npy", f"{stem}.npz",
+                              *(( f"{int(stem)}.npy", f"{int(stem)}.npz",
+                                  f"{int(stem):012d}.npy", f"{int(stem):012d}.npz")
+                                if stem.isdigit() else ())):
+                    _hit = _resolve_in_tree(ocr_dir, _cand, _is_ocr)
+                    if _hit:
+                        ocr_path = _hit; break
 
         rows.append({
             "dataset": None,
