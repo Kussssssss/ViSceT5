@@ -12,8 +12,9 @@ dataset:
     drive_id: "1uo-HI_vrT2UGZEDP6NNivw2Dx16Q-Dbr"
   test:
     dir: ""
-    # JSON test THẬT (vlsp2023_test_data.json) — annotations là dict, id nằm ở KHÓA
-    drive_id: "1OY1eOfrtUUHorG3uDfJzOGv_e0NU7LIP"
+    # SUBSET 3536 câu CÓ ground-truth (list, id inline) — chỉ predict đúng phần chấm được,
+    # KHÔNG phí 14k câu. (Bản đầy đủ 14035 câu = 1OY1eOfrtUUHorG3uDfJzOGv_e0NU7LIP nếu cần.)
+    drive_id: "10azOS9TzgQl8HrztbexlKh08pkyMb4m5"
 image:
   dir: ""
   # primary = image mới bạn cung cấp; backup = id 1.66GB đã xác nhận là ảnh (public)
