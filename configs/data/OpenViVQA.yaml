@@ -17,8 +17,11 @@ dataset:
     drive_id: "10azOS9TzgQl8HrztbexlKh08pkyMb4m5"
 image:
   dir: ""
-  # primary = image mới bạn cung cấp; backup = id 1.66GB đã xác nhận là ảnh (public)
-  drive_id: "1Mv3aSahvoQV6cT6Av-gwYQOgB8g7bGq3, 10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc"
+  # primary = 10z-92 chứa ảnh TRAIN+DEV (cần cho finetune); backup = 1Mv3aS (test-images,
+  # dùng cho predict test). LƯU Ý: gdown chỉ tải PRIMARY (backup chỉ khi primary lỗi) —
+  # đây là 2 BỘ ẢNH KHÁC NHAU: finetune (train+dev) dùng 10z-92; predict test cần 1Mv3aS
+  # (khi predict test thì đảo primary hoặc dùng --image_dir_override).
+  drive_id: "10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc, 1Mv3aSahvoQV6cT6Av-gwYQOgB8g7bGq3"
 ocr:
   dir: ""
   drive_id: "1Jk0Gl04Xlsc1U86XcTaRbsF6EUvHxgFx"
