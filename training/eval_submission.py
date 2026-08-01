@@ -46,7 +46,7 @@ except Exception:
     def _norm(x: str) -> str:
         if x is None:
             return ""
-        x = unicodedata.normalize("NFC", str(x))
+        x = unicodedata.normalize("NFKC", str(x))
         return " ".join(x.strip().lower().split())
 
     def _cf1(preds, labels):

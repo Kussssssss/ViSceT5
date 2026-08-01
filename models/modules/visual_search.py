@@ -190,15 +190,15 @@ class VisualSearch(nn.Module):
             y = torch.arange(H, device=device, dtype=torch.float32).view(1, H, 1)
             x = torch.arange(W, device=device, dtype=torch.float32).view(1, 1, W)
 
-            tot = w.sum(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+            tot = w.sum(dim=(1, 2), keepdim=True).clamp_min(1e-8)
             yc = (w * y).sum(dim=(1, 2)) / tot.view(-1)
             xc = (w * x).sum(dim=(1, 2)) / tot.view(-1)
             yvar = ((y - yc.view(-1, 1, 1)) ** 2 * w).sum(dim=(1, 2)) / tot.view(-1)
             xvar = ((x - xc.view(-1, 1, 1)) ** 2 * w).sum(dim=(1, 2)) / tot.view(-1)
 
             scale = 1.5
-            yhalf = torch.sqrt(yvar.clamp_min(1e-6)) * scale
-            xhalf = torch.sqrt(xvar.clamp_min(1e-6)) * scale
+            yhalf = torch.sqrt(yvar.clamp_min(1e-8)) * scale
+            xhalf = torch.sqrt(xvar.clamp_min(1e-8)) * scale
             y0 = (yc - yhalf).clamp(0, H - 1)
             y1 = (yc + yhalf).clamp_min(y0 + 1.0).clamp(max=float(H))
             x0 = (xc - xhalf).clamp(0, W - 1)
@@ -378,7 +378,7 @@ class VisualSearch(nn.Module):
         flat = attn_grids.reshape(B, -1)
         att_min = flat.min(dim=1, keepdim=True)[0].unsqueeze(-1)
         att_max = flat.max(dim=1, keepdim=True)[0].unsqueeze(-1)
-        attn_grids = (attn_grids - att_min) / (att_max - att_min + 1e-6)
+        attn_grids = (attn_grids - att_min) / (att_max - att_min + 1e-8)
 
         B, g_out, _ = attn_grids.shape
         if g_out != g:
