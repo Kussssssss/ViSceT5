@@ -32,15 +32,22 @@ export VISCET5_PROGRESS_ONLY=1
 echo "▶ [Colab] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST | progress-bar only"
 
 # ---- environment bootstrap ----
+# GIT_BRANCH: nhánh cần chạy (mặc định 'main'). Ví dụ finetune bản đang thử nghiệm:
+#   !GIT_BRANCH=exp/pretrain-gen-all STAGE=finetune ... bash run_all_colab.sh finetune
+GIT_BRANCH="${GIT_BRANCH:-main}"
 cd /content
 
 if [ -d "/content/ViSceT5" ]; then
     cd /content/ViSceT5
-    git pull
+    git fetch origin --quiet
+    git checkout "$GIT_BRANCH"
+    git pull origin "$GIT_BRANCH"
 else
     git clone https://github.com/Kussssssss/ViSceT5.git
     cd /content/ViSceT5
+    git checkout "$GIT_BRANCH"
 fi
+echo "▶ [Colab] GIT_BRANCH=$GIT_BRANCH ($(git rev-parse --short HEAD))"
 
 # setup.sh installs Java (for CIDEr) + pip deps. torch is pinned with '>=' so
 # Colab's preinstalled CUDA torch is kept (not downgraded/reinstalled).
