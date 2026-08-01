@@ -476,11 +476,14 @@ class OpenViVQAModel(PreTrainedModel):
                     if det_word_all.size(0) > N_word:
                         det_word_all = det_word_all[:N_word]
                     else:
-                        # Zero-pad nửa augmented (KHỚP main): nửa OCR-nhiễu KHÔNG mang
-                        # đặc trưng thị giác thật. Tiling (copy det/rec) làm lệch input
-                        # finetune so với main + khiến TWC trivial ở pretrain.
-                        pad_d = torch.zeros(N_word - det_word_all.size(0), det_word_all.size(-1), device=device, dtype=self.target_dtype)
-                        det_word_all = torch.cat([det_word_all, pad_d], dim=0)
+                        # KHỚP NOTEBOOK: nếu N_word gấp đôi det_word_all (do OCR augmentation
+                        # ở finetune tạo nửa gốc + nửa nhiễu), COPY nửa gốc để nửa augmented
+                        # dùng lại đặc trưng thị giác của OCR gốc tương ứng, thay vì zero-pad.
+                        if N_word == 2 * det_word_all.size(0):
+                            det_word_all = torch.cat([det_word_all, det_word_all], dim=0)
+                        else:
+                            pad_d = torch.zeros(N_word - det_word_all.size(0), det_word_all.size(-1), device=device, dtype=self.target_dtype)
+                            det_word_all = torch.cat([det_word_all, pad_d], dim=0)
 
                 # Map det sang token level
                 det_tok_i = det_word_all[map_clamped] * valid.unsqueeze(-1)
@@ -499,9 +502,12 @@ class OpenViVQAModel(PreTrainedModel):
                     if rec_word_all.size(0) > N_word:
                         rec_word_all = rec_word_all[:N_word]
                     else:
-                        # Zero-pad nửa augmented (KHỚP main) — xem chú thích det ở trên.
-                        pad_r = torch.zeros(N_word - rec_word_all.size(0), rec_word_all.size(-1), device=device, dtype=self.target_dtype)
-                        rec_word_all = torch.cat([rec_word_all, pad_r], dim=0)
+                        # KHỚP NOTEBOOK: copy nửa gốc khi N_word gấp đôi — xem chú thích det ở trên.
+                        if N_word == 2 * rec_word_all.size(0):
+                            rec_word_all = torch.cat([rec_word_all, rec_word_all], dim=0)
+                        else:
+                            pad_r = torch.zeros(N_word - rec_word_all.size(0), rec_word_all.size(-1), device=device, dtype=self.target_dtype)
+                            rec_word_all = torch.cat([rec_word_all, pad_r], dim=0)
 
                 # Map rec sang token level
                 rec_tok_i = rec_word_all[map_clamped] * valid.unsqueeze(-1)

@@ -55,13 +55,13 @@ def _norm_answer(x: str) -> str:
     nguyên những gì model sinh (model đã được train trên target dạng thường)."""
     if x is None:
         return ""
-    x = unicodedata.normalize("NFC", str(x))
+    x = unicodedata.normalize("NFKC", str(x))
     return " ".join(x.split())
 
 
 def _norm_em(x: str) -> str:
     """Chuẩn hoá để đo EM cục bộ (khớp _normalize_txt của training/metrics.py)."""
-    return " ".join(unicodedata.normalize("NFC", str(x or "")).strip().lower().split())
+    return " ".join(unicodedata.normalize("NFKC", str(x or "")).strip().lower().split())
 
 
 def resolve_ckpt_dir(user_dir: str) -> str:

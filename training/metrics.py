@@ -112,7 +112,7 @@ def dbg(*args, **kwargs):
 def _normalize_txt(x: str) -> str:
     if x is None:
         return ""
-    x = unicodedata.normalize("NFC", x)
+    x = unicodedata.normalize("NFKC", x)
     x = x.strip().lower()
     x = " ".join(x.split())
     return x
