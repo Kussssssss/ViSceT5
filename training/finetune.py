@@ -212,6 +212,13 @@ def main(args_list=None):
         tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
         config = OpenViVQAConfig()
 
+    # FINETUNE: các submodule PRETRAIN-ONLY (ITC heads) được gate theo config.pretrain
+    # ngay trong __init__. Ép False TRƯỚC khi dựng model để finetune KHÔNG bao giờ tạo
+    # ITC → khởi tạo from-scratch khớp notebook (không ITC), và ckpt pretrain nếu có
+    # key itc_* thì chỉ là 'unexpected' (bỏ qua an toàn khi load strict=False).
+    # Việc phát hiện clamp_vision cho warm-start ở trên đã đọc cờ pretrain gốc của ckpt.
+    config.pretrain = False
+
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")

@@ -10,7 +10,7 @@ scope in the notebook source; it is restored here as a proper class method.
 from configs.model_config import OpenViVQAConfig
 from models.modules.qa_clip import QACLIPEncoder
 from models.modules.ocr_consformer import OCREncoder
-from models.modules.ocr_spatial import SemanticOCREmbedding
+from models.modules.ocr_spatial import SemanticOCREmbedding, SpatialCirclePosition
 from models.modules.visual_search import VisualSearch
 
 import torch
@@ -175,6 +175,11 @@ class OpenViVQAModel(PreTrainedModel):
         )
         self.ocr_encoder.set_word_embed_proxy(lambda ids: self.vit5.get_input_embeddings()(ids))
         self.semantic_ocr_embedding = SemanticOCREmbedding(ns)
+        # Module "chết" trong forward, NHƯNG được khởi tạo ở ĐÚNG vị trí này để giữ
+        # thứ tự rút RNG global y hệt notebook gốc — nhờ đó finetune-from-scratch nạp
+        # cùng seed sẽ khởi tạo MỌI submodule phía sau (char_*/ocr_lite/pollute_head/
+        # init_qavit_comps) với trọng số GIỐNG notebook. KHÔNG được xoá.
+        self.spatial_embedding = SpatialCirclePosition(ns)
 
         self.char_max_num = int(getattr(config, "char_max_num", 50))
         self.char_num = int(getattr(config, "char_num"))
@@ -205,14 +210,16 @@ class OpenViVQAModel(PreTrainedModel):
         self.pollute_head = T5PolluteHead(input_size=self.d_model, layer_norm_eps=1e-12).to(torch.float32)
 
         # ITC (Image-Text Contrastive) heads — align image ↔ question in a shared space
-        # (ALBEF "align-before-fuse"). PRETRAIN-ONLY (stamped only in the pretrain block),
-        # discarded at finetune. Shapes a joint image-question space; and when vision is
-        # UNFROZEN it gives the (otherwise frozen coarse) CLIP a gradient to learn
-        # scene-text-relevant visual features — addressing the frozen-vision ceiling.
+        # (ALBEF "align-before-fuse"). PRETRAIN-ONLY: nhánh forward/loss ITC đều nằm dưới
+        # `if self.pretrain` (xem forward), nên CHỈ dựng khi self.pretrain=True. Nhờ vậy
+        # model FINETUNE không hề tạo ITC → state_dict + thứ tự rút RNG khởi tạo khớp
+        # notebook (notebook không có ITC), tránh tham số chết. Finetune ép config.pretrain
+        # =False TRƯỚC khi dựng model (xem training/finetune.py) nên nhánh này bị bỏ qua.
         self.itc_dim = 256
-        self.itc_img_proj = nn.Linear(self.d_model, self.itc_dim)
-        self.itc_txt_proj = nn.Linear(self.d_model, self.itc_dim)
-        self.itc_logit_scale = nn.Parameter(torch.tensor(2.659))  # exp≈14.3 (CLIP-style)
+        if self.pretrain:
+            self.itc_img_proj = nn.Linear(self.d_model, self.itc_dim)
+            self.itc_txt_proj = nn.Linear(self.d_model, self.itc_dim)
+            self.itc_logit_scale = nn.Parameter(torch.tensor(2.659))  # exp≈14.3 (CLIP-style)
 
         # ── TWC Projection Heads ────────────────────────────────────────────────
         # TWC (theo notebook gốc / TWA paper): similarity tính trực tiếp trên
