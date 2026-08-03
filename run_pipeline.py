@@ -140,6 +140,15 @@ def run():
                 _pnb = os.environ.get("PREDICT_NUM_BEAMS", "").strip()
                 if _pnb:
                     sys.argv.extend(["--num_beams", _pnb])
+                # Ràng buộc generation (opt-in; default trung tính = giữ parity):
+                #   PREDICT_NO_REPEAT_NGRAM (vd 3), PREDICT_LENGTH_PENALTY (vd 0.8),
+                #   PREDICT_MIN_NEW_TOKENS. Tinh chỉnh trên DEV rồi mới dùng cho test.
+                for _gk, _gflag in [("PREDICT_NO_REPEAT_NGRAM", "--no_repeat_ngram_size"),
+                                    ("PREDICT_LENGTH_PENALTY", "--length_penalty"),
+                                    ("PREDICT_MIN_NEW_TOKENS", "--min_new_tokens")]:
+                    _gv = os.environ.get(_gk, "").strip()
+                    if _gv:
+                        sys.argv.extend([_gflag, _gv])
                 # Kaggle: trỏ vào data attach (tránh gdown Drive)
                 for _ek, _eflag in [("PREDICT_IMAGE_DIR", "--image_dir_override"),
                                     ("PREDICT_OCR_DIR", "--ocr_dir_override"),
