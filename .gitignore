@@ -164,3 +164,4 @@ checkpoints/
 # ...except the curated, token-free Colab runners
 !notebooks/finetune_colab.ipynb
 !notebooks/pretrain_colab.ipynb
+!notebooks/verify_data_resolution_colab.ipynb
