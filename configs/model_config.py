@@ -14,8 +14,11 @@ VIET_ALPHA = list(
     "aáàảãạăắằẳẵặâấầẩẫậbcdđeéèẻẽẹêếềểễệfghijklmnopqrstuvwxyz"
     "AÁÀẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬBCDĐEÉÈẺẼẸÊẾỀỂỄỆFGHIJKLMNOPQRSTUVWXYZ"
 )
+# NOTE: giữ NGUYÊN 4 smart-quote Unicode ‘ ’ “ ” (KHÔNG để editor tự đổi thành
+# ASCII ' ' " "). Nếu bị đổi, chúng trùng với ' và " đã có → dedupe mất 4 ký tự →
+# DEFAULT_CHAR_NUM tụt 172→168, lệch shape char_embedding so với notebook gốc.
 DIGITS_PUNC = list(
-    "0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~–—''""•…€£¥₹©®™°"
+    "0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~–—‘’“”•…€£¥₹©®™°"
 )
 
 COMBINED_CHARS = CHAR_SPECIAL_TOKENS + list(dict.fromkeys(VIET_ALPHA + DIGITS_PUNC))

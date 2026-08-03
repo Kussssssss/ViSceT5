@@ -21,10 +21,13 @@ import numpy as np
 
 TEST = False
 TONE_RANK = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
-# fix: Thêm để trả về <unk> nếu kỹ tự không nằm trong 'COMBINED_CHARS' -> Fallback
+# COMBINED_CHARS của COLLATOR (ánh xạ char->id cho twa_ocr_char). Phải GIỮ ĐÚNG
+# danh sách notebook gốc (CELL 37): bắt đầu bằng 'a', KHÔNG có "<unk>", KHÔNG có '@'.
+# (Đây là list RIÊNG, khác COMBINED_CHARS trong configs/model_config.py vốn quyết định
+# char_num=172. Char không có trong set sẽ fallback về id 1 qua .get("<unk>", 1) — khớp
+# notebook.) _CHAR_UNK_IDX giữ lại để import không vỡ, hiện không dùng trong logic.
 _CHAR_UNK_IDX = 0
 COMBINED_CHARS = [
-    "<unk>",
     'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
     'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
@@ -40,8 +43,7 @@ COMBINED_CHARS = [
     'ỳ', 'ý', 'ỷ', 'ỹ', 'ỵ',
 
     ' ', '.', ',', '!', '?', '-', '_', ':', ';', '"', "'",
-    # fix: thêm @
-    '(', ')', '[', ']', '/', '@',
+    '(', ')', '[', ']', '/',
     '#', '$', '%', '&', '*', '+', '=', '<', '>',
 ]
 
