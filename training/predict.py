@@ -337,6 +337,15 @@ def main():
     ap.add_argument("--num_beams", type=int, default=4)
     ap.add_argument("--max_new_tokens", type=int, default=0,
                     help="0 = dùng generation_max_new_tokens của config (mặc định)")
+    # Ràng buộc generation (OPT-IN — default trung tính = giống notebook/không đổi):
+    #   no_repeat_ngram_size>0 chặn lặp n-gram khi sinh (giảm câu lặp vòng);
+    #   length_penalty<1 ưu tiên câu NGẮN hơn (GT OpenViVQA median ~6 token);
+    #   min_new_tokens>0 tránh câu rỗng. Tinh chỉnh trên DEV rồi mới dùng cho test.
+    ap.add_argument("--no_repeat_ngram_size", type=int, default=0,
+                    help="0 = tắt (mặc định, giữ parity). Thử 2 hoặc 3 để chặn lặp.")
+    ap.add_argument("--length_penalty", type=float, default=1.0,
+                    help="1.0 = trung tính. <1 ưu tiên câu ngắn, >1 câu dài.")
+    ap.add_argument("--min_new_tokens", type=int, default=0)
     ap.add_argument("--out_dir", default=OUTPUT_PATH)
     ap.add_argument("--data_dir", default="./datasets",
                     help="Thư mục dataset cho Hub (tự tải/giải nén ảnh+OCR+JSON)")
@@ -426,12 +435,23 @@ def main():
 
     mnt = int(getattr(model.config, "generation_max_new_tokens", 56))
     beams = args.num_beams
-    model.generation_config = GenerationConfig(
+    _gen_kwargs = dict(
         max_new_tokens=mnt, num_beams=beams, do_sample=False,
         pad_token_id=model.config.pad_token_id,
         eos_token_id=model.config.eos_token_id,
         decoder_start_token_id=model.config.decoder_start_token_id,
     )
+    # Chỉ thêm khi bật (giữ default = notebook parity). length_penalty=1.0 là trung tính.
+    if args.no_repeat_ngram_size and args.no_repeat_ngram_size > 0:
+        _gen_kwargs["no_repeat_ngram_size"] = int(args.no_repeat_ngram_size)
+    if args.min_new_tokens and args.min_new_tokens > 0:
+        _gen_kwargs["min_new_tokens"] = int(args.min_new_tokens)
+    if abs(float(args.length_penalty) - 1.0) > 1e-9:
+        _gen_kwargs["length_penalty"] = float(args.length_penalty)
+    if len(_gen_kwargs) > 6:
+        print(f">>> [predict] generation ràng buộc: "
+              f"{ {k: _gen_kwargs[k] for k in _gen_kwargs if k in ('no_repeat_ngram_size','min_new_tokens','length_penalty')} }")
+    model.generation_config = GenerationConfig(**_gen_kwargs)
     max_new = args.max_new_tokens if args.max_new_tokens > 0 else mnt
 
     # dataframe cho collator (build vocab) — dùng train cache nếu có
