@@ -331,11 +331,16 @@ def main(args_list=None):
                 if not os.path.isdir(ck):
                     return
                 try:
-                    # bỏ optimizer.pt (nặng, không cần cho inference) để upload nhanh/nhẹ
+                    # MẶC ĐỊNH push ĐẦY ĐỦ (gồm optimizer.pt/scheduler.pt/rng_state/
+                    # trainer_state.json) để RESUME ĐÚNG được sau khi Colab ngắt.
+                    # Đặt HF_PUSH_OPTIM=0 nếu chỉ cần bản inference nhẹ (sẽ KHÔNG resume được).
+                    _light = os.environ.get("HF_PUSH_OPTIM", "1").lower() in ("0", "false", "no", "off")
+                    _ignore = ["optimizer.pt", "rng_state*.pth", "scheduler.pt"] if _light else None
                     self.api.upload_folder(folder_path=ck, path_in_repo=f"checkpoint-{state.global_step}",
                                            repo_id=self.repo, repo_type="model",
-                                           ignore_patterns=["optimizer.pt", "rng_state*.pth", "scheduler.pt"])
-                    print(f"☁️ [HF] đã push checkpoint-{state.global_step} → {self.repo}")
+                                           ignore_patterns=_ignore)
+                    print(f"☁️ [HF] đã push checkpoint-{state.global_step} "
+                          f"({'weights-only' if _light else 'ĐẦY ĐỦ/resume-được'}) → {self.repo}")
                 except Exception as e:
                     print(f"⚠️ [HF] push checkpoint-{state.global_step} lỗi: {e}")
         try:
@@ -343,6 +348,38 @@ def main(args_list=None):
             print(f"☁️ [HF] bật auto-push mỗi checkpoint → {_hf_repo} (chống mất khi reclaim)")
         except Exception as _e:
             print(f"ℹ️ [HF] không bật được auto-push callback ({_e}); vẫn có upload cuối ở run_pipeline.")
+
+    # ── Auto-resume TỪ HF repo (chống mất tiến độ khi Colab ngắt) ──
+    # Nếu đã set HF_TOKEN+HF_REPO và repo đã có checkpoint-* ĐẦY ĐỦ (từ lần chạy trước)
+    # mà chưa có resume tường minh → TỰ tải các checkpoint về output_dir rồi resume từ
+    # cái mới nhất. Chạy lại notebook = train TIẾP từ epoch dở, KHÔNG train lại từ đầu.
+    # Tắt bằng RESUME_FROM_HF=0 (vd muốn train mới trên repo cũ).
+    if (not training_args.resume_from_checkpoint and _hf_tok and _hf_repo
+            and os.environ.get("RESUME_FROM_HF", "auto").lower() not in ("0", "false", "no", "off")):
+        try:
+            from huggingface_hub import list_repo_files, snapshot_download
+            _files = list_repo_files(_hf_repo, token=_hf_tok)
+            _cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
+                          key=lambda x: int(x.split("-")[1]))
+            if _cks:
+                _latest = _cks[-1]
+                _has_optim = f"{_latest}/optimizer.pt" in _files
+                print(f"♻️ [HF-resume] repo có {len(_cks)} checkpoint; mới nhất={_latest} "
+                      f"(optimizer.pt: {'CÓ' if _has_optim else 'THIẾU'}).")
+                if _has_optim:
+                    print(f"♻️ [HF-resume] tải checkpoint-* về {training_args.output_dir} ...")
+                    snapshot_download(_hf_repo, repo_type="model", token=_hf_tok,
+                                      local_dir=training_args.output_dir,
+                                      allow_patterns=["checkpoint-*/**"])
+                    _resume_dir = os.path.join(training_args.output_dir, _latest)
+                    if os.path.isfile(os.path.join(_resume_dir, "optimizer.pt")):
+                        training_args.resume_from_checkpoint = _resume_dir
+                        print(f"♻️ [HF-resume] RESUME từ {_resume_dir}")
+                else:
+                    print("⚠️ [HF-resume] checkpoint là weights-only (push cũ) → KHÔNG resume "
+                          "đúng được. Từ lần này push sẽ ĐẦY ĐỦ (HF_PUSH_OPTIM=1 mặc định).")
+        except Exception as _e:
+            print(f"⚠️ [HF-resume] bỏ qua ({type(_e).__name__}: {_e}); train bình thường.")
 
     print(">>> Starting Finetune...")
     if training_args.resume_from_checkpoint:
