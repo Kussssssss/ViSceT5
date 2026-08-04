@@ -330,6 +330,15 @@ def main(args_list=None):
                 ck = os.path.join(self.out, f"checkpoint-{state.global_step}")
                 if not os.path.isdir(ck):
                     return
+                # KHÔNG push checkpoint HỎNG (NaN/inf): tránh làm nguồn resume bị nhiễm độc
+                # → lần sau auto-resume nạp lại trạng thái hỏng (death-spiral). Bỏ qua bản này.
+                _model = kw.get("model")
+                if _model is not None:
+                    _bad = [n for n, p in _model.named_parameters() if not torch.isfinite(p).all()]
+                    if _bad:
+                        print(f"🛑 [HF] checkpoint-{state.global_step}: model có {len(_bad)} tensor NaN/inf "
+                              f"(vd {_bad[0]}) → BỎ push (không nhiễm nguồn resume). Cần sửa gốc NaN trước.")
+                        return
                 try:
                     # MẶC ĐỊNH push ĐẦY ĐỦ (gồm optimizer.pt/scheduler.pt/rng_state/
                     # trainer_state.json) để RESUME ĐÚNG được sau khi Colab ngắt.
@@ -353,11 +362,14 @@ def main(args_list=None):
     # Nếu đã set HF_TOKEN+HF_REPO và repo đã có checkpoint-* ĐẦY ĐỦ (từ lần chạy trước)
     # mà chưa có resume tường minh → TỰ tải các checkpoint về output_dir rồi resume từ
     # cái mới nhất. Chạy lại notebook = train TIẾP từ epoch dở, KHÔNG train lại từ đầu.
-    # Tắt bằng RESUME_FROM_HF=0 (vd muốn train mới trên repo cũ).
+    # Tắt bằng RESUME_FROM_HF=0 (vd muốn train mới trên repo cũ). KHÔNG auto-resume trong
+    # smoke_test (tránh smoke nạp checkpoint của run thật).
     if (not training_args.resume_from_checkpoint and _hf_tok and _hf_repo
+            and not training_args.smoke_test
             and os.environ.get("RESUME_FROM_HF", "auto").lower() not in ("0", "false", "no", "off")):
         try:
             from huggingface_hub import list_repo_files, snapshot_download
+            from safetensors.torch import load_file as _load_sft
             _files = list_repo_files(_hf_repo, token=_hf_tok)
             _cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
                           key=lambda x: int(x.split("-")[1]))
@@ -372,7 +384,23 @@ def main(args_list=None):
                                       local_dir=training_args.output_dir,
                                       allow_patterns=["checkpoint-*/**"])
                     _resume_dir = os.path.join(training_args.output_dir, _latest)
-                    if os.path.isfile(os.path.join(_resume_dir, "optimizer.pt")):
+                    # KIỂM TRA checkpoint có NaN/inf không → KHÔNG resume vào trạng thái hỏng
+                    # (nếu không sẽ nạp lại trọng số NaN mãi mãi — death-spiral).
+                    _mp = os.path.join(_resume_dir, "model.safetensors")
+                    _corrupt = False
+                    if os.path.isfile(_mp):
+                        try:
+                            _corrupt = any((not torch.isfinite(v).all())
+                                           for v in _load_sft(_mp).values())
+                        except Exception:
+                            _corrupt = False
+                    if not os.path.isfile(os.path.join(_resume_dir, "optimizer.pt")):
+                        pass
+                    elif _corrupt:
+                        print(f"🛑 [HF-resume] checkpoint {_latest} chứa trọng số NaN/inf → BỎ resume "
+                              f"(tránh nạp lại trạng thái hỏng). Hãy XOÁ checkpoint hỏng trên HF (hoặc "
+                              f"dùng HF_REPO mới / RESUME_FROM_HF=0) rồi train lại từ đầu.")
+                    else:
                         training_args.resume_from_checkpoint = _resume_dir
                         print(f"♻️ [HF-resume] RESUME từ {_resume_dir}")
                 else:
