@@ -94,7 +94,24 @@ def main(args_list=None):
     torch.manual_seed(training_args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(training_args.seed)
-        
+
+    # ── Chế độ TÁI LẬP (opt-in, mặc định TẮT để giữ tốc độ + parity notebook) ──
+    # Bật bằng DETERMINISTIC=1: khử phần lớn nhiễu run-to-run trên CÙNG GPU
+    # (cudnn deterministic, thuật toán xác định, dataloader 1 worker). Lưu ý: KHÔNG
+    # đảm bảo giống hệt khi ĐỔI GPU/CUDA khác; và notebook cũng phải bật y hệt mới so được.
+    if os.environ.get("DETERMINISTIC", "0").lower() in ("1", "true", "yes", "on"):
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except Exception as _e:
+            print(f"ℹ️ [DETERMINISTIC] use_deterministic_algorithms lỗi ({_e}); vẫn bật cudnn.deterministic.")
+        training_args.dataloader_num_workers = 0
+        print("🔁 [DETERMINISTIC] bật tái lập: cudnn.deterministic=True, num_workers=0, "
+              "CUBLAS_WORKSPACE_CONFIG=:4096:8 (chậm hơn; chỉ giống nhau trên CÙNG GPU).")
+
+
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     
     # 1. Prepare Data
