@@ -117,6 +117,12 @@ def run():
                 #  PREDICT_CKPT_DIR   = thư mục bundle finetune LOCAL (ưu tiên hơn HF nếu set).
                 #  PREDICT_BATCH_SIZE / PREDICT_NUM_BEAMS = tinh chỉnh generation
                 sys.argv.extend(["--split", os.environ.get("PREDICT_SPLIT", "both").strip()])
+                #  PREDICT_DATASET = ViTextVQA | ViOCRVQA | OpenViVQA (phải có configs/data/<ten>.yaml).
+                #  Mặc định ViTextVQA (giữ hành vi cũ). Đổi để predict tập test dataset khác.
+                _pds = os.environ.get("PREDICT_DATASET", "").strip()
+                if _pds:
+                    sys.argv.extend(["--dataset", _pds])
+                    print(f">>> [predict] --dataset = {_pds}")
                 _pck = os.environ.get("PREDICT_CKPT_DIR", "").strip()
                 _hf_repo = os.environ.get("PREDICT_HF_REPO", "").strip()
                 _drive = os.environ.get("PREDICT_DRIVE_FOLDER", "").strip()
