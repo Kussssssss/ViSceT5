@@ -272,7 +272,10 @@ def main(args_list=None):
 
     # Apply Finetune config overrides
     mode = model_args.loss_ablation_mode
-    use_ocr_aug = mode in ["all", "only_twc_ocr_aug"]
+    # ABLATION #4 (finetune): OCR augmentation (correct/noise/keep → related-OCR),
+    # ĐỘC LẬP với 3 ablation kiến trúc. True = nối thêm bản OCR đã augment cạnh OCR
+    # gốc (gấp đôi token OCR đưa vào Consformer); False = chỉ OCR gốc.
+    use_ocr_aug = bool(model_args.ablation_use_ocr_aug)
 
     model.pretrain = False
     model.config.pretrain = False
@@ -280,8 +283,12 @@ def main(args_list=None):
     model.config.ablation_use_qaclip = model_args.ablation_use_qaclip
     model.config.ablation_use_vs = model_args.ablation_use_vs
     model.config.ablation_use_ocr = model_args.ablation_use_ocr
+    model.config.ablation_use_ocr_aug = use_ocr_aug
     model.config.use_twc = False  # TWC is disabled during finetuning
     model.config.use_ocr_aug_finetune = use_ocr_aug
+    print(f">>> [finetune] ABLATION: qaclip={model.config.ablation_use_qaclip} | "
+          f"vs={model.config.ablation_use_vs} | ocr={model.config.ablation_use_ocr} | "
+          f"ocr_aug={model.config.ablation_use_ocr_aug}")
     model.to(DEVICE)
     
     if hasattr(model, "visual_search") and hasattr(model.visual_search, "vit_processor"):
