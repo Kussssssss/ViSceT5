@@ -26,6 +26,13 @@ class ModelArguments:
         default=True,
         metadata={"help": "Whether to use OCR Consformer"}
     )
+    ablation_use_ocr_aug: bool = field(
+        default=True,
+        metadata={"help": "Ablation #4 (finetune): apply OCR augmentation — the OCR-related "
+                          "correct/noise/keep step that appends an augmented OCR view next to the "
+                          "clean OCR tokens. True = clean+augmented (doubled OCR tokens); "
+                          "False = clean OCR only."}
+    )
     loss_ablation_mode: str = field(
         default="all",
         metadata={"help": "Pretrain loss ablation mode: 'all', 'only_itm_mlm', 'only_twc_ocr_aug', 'gen_all', 'gen'"}

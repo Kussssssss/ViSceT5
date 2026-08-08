@@ -4,9 +4,11 @@ vocab_path: "configs/data/term_vocab.txt"
 viet_vocab_path: "configs/data/viet_vocab.txt"
 
 loss_ablation_mode: "all"
-ablation_use_qaclip: true
-ablation_use_vs: true
-ablation_use_ocr: true
+# 4 ablation ĐỘC LẬP cho finetune (bật/tắt từng cái để đánh giá khách quan):
+ablation_use_qaclip: true    # (1) Late-fusion QACLIP
+ablation_use_vs: true        # (2) Visual Search (crop)
+ablation_use_ocr: true       # (3) OCR Consformer
+ablation_use_ocr_aug: true   # (4) OCR augmentation (correct/noise/keep → nối bản OCR augment cạnh OCR gốc)
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
