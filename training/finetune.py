@@ -95,6 +95,17 @@ def main(args_list=None):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(training_args.seed)
 
+    # ── CHẨN ĐOÁN (ANOMALY=1): bật autograd anomaly detection ──────────────────
+    # Dùng khi forward FINITE nhưng backward sinh NaN (vd GradGuard báo grad non-finite
+    # mỗi step). PyTorch sẽ RAISE ngay tại op tạo NaN trong backward, kèm traceback trỏ
+    # đúng dòng forward đã tạo ra op đó → biết CHÍNH XÁC chỗ hỏng thay vì phải đoán.
+    # RẤT CHẬM (~2-5x) → chỉ chạy vài chục step để lấy traceback rồi tắt. Không đổi
+    # hành vi train khi không bật.
+    if os.environ.get("ANOMALY", "0").lower() in ("1", "true", "yes", "on"):
+        torch.autograd.set_detect_anomaly(True)
+        print("🔬 [finetune] ANOMALY=1 → autograd anomaly detection BẬT (chậm; chỉ để chẩn đoán). "
+              "Chạy tới khi raise rồi gửi traceback.")
+
     # ── Chế độ TÁI LẬP (opt-in, mặc định TẮT để giữ tốc độ + parity notebook) ──
     # Bật bằng DETERMINISTIC=1: khử phần lớn nhiễu run-to-run trên CÙNG GPU
     # (cudnn deterministic, thuật toán xác định, dataloader 1 worker). Lưu ý: KHÔNG

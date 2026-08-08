@@ -346,14 +346,23 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         # corrupting the whole model permanently (every later forward becomes NaN).
         # So sanitize non-finite grads HERE, before the optimizer step.
         bad = {}
+        _n_nan = _n_inf = 0          # PHÂN BIỆT NaN vs inf: hai loại cần hai cách truy khác
+        _first = None                # nhau (NaN → ANOMALY=1 chỉ đúng op; inf → tràn số học)
         for name, p in model.named_parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
+                _g = p.grad.detach()
+                _cn = int(torch.isnan(_g).sum()); _ci = int(torch.isinf(_g).sum())
+                _n_nan += _cn; _n_inf += _ci
+                if _first is None:
+                    _first = f"{name} (nan={_cn}, inf={_ci})"
                 p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
                 pref = name.split(".")[0]
                 bad[pref] = bad.get(pref, 0) + 1
         if bad:
+            _kind = "NaN" if (_n_nan and not _n_inf) else ("inf" if (_n_inf and not _n_nan) else "NaN+inf")
             print(f"⚠️  [GradGuard] step {self.state.global_step}: sanitized non-finite grads "
-                  f"(zeroed) in submodules {bad} — watch which one recurs to find the source.")
+                  f"(zeroed) in submodules {bad} | loại={_kind} (nan={_n_nan}, inf={_n_inf}) | "
+                  f"param đầu: {_first}")
 
         # Env-gated grad diagnostics (GRAD_DIAG=1): when the RAW total grad-norm is
         # about to overflow fp32 (what HF logs as grad_norm=inf), name the top
