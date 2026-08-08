@@ -189,14 +189,20 @@ def main(args_list=None):
             print(f"ℹ️ Không ghi được cache CSV ({_e}); không sao, sẽ prepare lại lần sau.")
 
     if training_args.smoke_test:
-        print("🚨 RUNNING IN SMOKE TEST MODE: Truncating dataset and reducing training steps.")
-        train_df = train_df.head(8)
-        val_df = val_df.head(4)
-        training_args.max_steps = 3
+        # Mặc định GIỮ NGUYÊN 8/4/3 (kiểm tra pipeline siêu nhanh). Có thể phóng to qua env
+        # để TÁI HIỆN lỗi chỉ xuất hiện sau vài trăm step (vd phân kỳ dần), mà không phải
+        # chạy full 21975 step:  SMOKE_TRAIN_SAMPLES=2048 SMOKE_MAX_STEPS=400
+        _s_tr = int(os.environ.get("SMOKE_TRAIN_SAMPLES", "8"))
+        _s_ev = int(os.environ.get("SMOKE_EVAL_SAMPLES", "4"))
+        _s_st = int(os.environ.get("SMOKE_MAX_STEPS", "3"))
+        print(f"🚨 RUNNING IN SMOKE TEST MODE: train={_s_tr} eval={_s_ev} max_steps={_s_st}.")
+        train_df = train_df.head(_s_tr)
+        val_df = val_df.head(_s_ev)
+        training_args.max_steps = _s_st
         training_args.num_train_epochs = 1.0
-        training_args.logging_steps = 1
-        training_args.eval_steps = 2
-        training_args.save_steps = 3
+        training_args.logging_steps = max(1, _s_st // 20)
+        training_args.eval_steps = max(1, _s_st)
+        training_args.save_steps = max(1, _s_st)
 
     train_dataset = ViT5VQADataset(train_df)
     val_dataset = ViT5VQADataset(val_df)
