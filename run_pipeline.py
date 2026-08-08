@@ -192,6 +192,20 @@ def run():
                         sys.argv.extend([_dflag, _dv])
                         print(f">>> [finetune] {_dflag} = {_dv}")
 
+                # 4 ABLATION finetune (bật/tắt qua env; nhận true/false/1/0/yes/no).
+                # Không set = giữ mặc định trong finetune.yaml (đều true).
+                #  ABLATION_USE_QACLIP | ABLATION_USE_VS | ABLATION_USE_OCR | ABLATION_USE_OCR_AUG
+                #  LOSS_ABLATION_MODE = ghi lại mode (all|only_itm_mlm|only_twc_ocr_aug|gen_all|gen).
+                for _ak, _aflag in [("ABLATION_USE_QACLIP", "--ablation_use_qaclip"),
+                                    ("ABLATION_USE_VS", "--ablation_use_vs"),
+                                    ("ABLATION_USE_OCR", "--ablation_use_ocr"),
+                                    ("ABLATION_USE_OCR_AUG", "--ablation_use_ocr_aug"),
+                                    ("LOSS_ABLATION_MODE", "--loss_ablation_mode")]:
+                    _av = os.environ.get(_ak, "").strip()
+                    if _av:
+                        sys.argv.extend([_aflag, _av])
+                        print(f">>> [finetune] {_aflag} = {_av}")
+
                 # Nạp trọng số PRETRAIN để finetune (warm-start):
                 #  PRETRAIN_HF_REPO   = HF repo id chứa checkpoint pretrain (vd
                 #                       'Kus669/ViSceT5-pretrain-genall'); tự tải về.
