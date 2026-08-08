@@ -34,6 +34,15 @@ from transformers import AutoTokenizer
 MODE = sys.argv[1] if len(sys.argv) > 1 else "full"
 dev = "cuda" if torch.cuda.is_available() else "cpu"
 
+# A/B TF32: A100/Ampere bật TF32 mặc định (matmul mantissa ~10-bit). DIAG_NO_TF32=1 để
+# ép fp32 THẬT → nếu phân kỳ biến mất khi tắt TF32 thì TF32 chính là nguyên nhân.
+if os.environ.get("DIAG_NO_TF32", "0").lower() in ("1", "true", "yes", "on"):
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    print("DIAG_NO_TF32=1 → TF32 OFF (fp32 thật)")
+else:
+    print(f"TF32 matmul allowed = {torch.backends.cuda.matmul.allow_tf32} (mặc định GPU)")
+
 # batch từ CSV cache (giống lúc train). Thử vài vị trí file.
 _csv = None
 for p in [os.path.join(OUTPUT_PATH, "merged_train.csv"),
@@ -62,11 +71,13 @@ col = ViT5VQADataCollator(tokenizer=tok, image_processor=m.image_processor, ocr_
     viet_vocab_path="configs/data/viet_vocab.txt", eng_vocab_path="", dataframe=df, pretrain=False)
 if hasattr(col, "set_mode"): col.set_mode(pretrain=False, mask_prob=0.0)
 col.use_ocr_aug_finetune = full
+def to_dev(bb):
+    return {k: (v.to(dev) if torch.is_tensor(v)
+                else ([{kk: (vv.to(dev) if torch.is_tensor(vv) else vv) for kk, vv in d.items()} for d in v]
+                      if k == "ocr_info" else v)) for k, v in bb.items()}
+
 ds = ViT5VQADataset(df)
-b = col([ds[i] for i in range(len(df))])
-b = {k: (v.to(dev) if torch.is_tensor(v)
-         else ([{kk: (vv.to(dev) if torch.is_tensor(vv) else vv) for kk, vv in d.items()} for d in v]
-               if k == "ocr_info" else v)) for k, v in b.items()}
+b = to_dev(col([ds[i] for i in range(len(df))]))
 
 # hook vision output
 cap = {}
@@ -128,3 +139,26 @@ if nf: print("  nonfinite params:", nf[:8])
 print("  top modules:")
 for k, v in sorted(msq.items(), key=lambda x: -x[1])[:10]:
     print(f"    {math.sqrt(v):>12.4g}  {k}")
+
+# ── MINI-TRAIN: tái hiện phân kỳ (AdamW + clip 1.0 y hệt trainer) ──
+STEPS = int(os.environ.get("DIAG_STEPS", "0"))
+if STEPS > 0:
+    lr = float(os.environ.get("DIAG_LR", "3e-5"))
+    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=lr)
+    print(f"\n== MINI-TRAIN {STEPS} steps (lr={lr}, clip=1.0) — xem grad_norm trôi tới inf? ==")
+    print(f"{'step':>4} {'loss':>9} {'|img_tok|':>10} {'gnorm_f64':>12} {'vs_norm':>11} {'enc_norm':>10} {'gnorm_f32(clip)':>16}")
+    for si in range(STEPS):
+        items = [dsN[(si * _bs + j) % len(dsN)] for j in range(_bs)]
+        bb = to_dev(col(items))
+        opt.zero_grad(set_to_none=True); cap.clear()
+        o = m(**bb); l = o["loss"]; l.backward()
+        gn, msq2, _, nf = grad_report(m)
+        vs = math.sqrt(msq2.get("visual_search", 0.0))
+        enc = math.sqrt(msq2.get("vit5.encoder", 0.0))
+        gn32 = torch.nn.utils.clip_grad_norm_(
+            [p for p in m.parameters() if p.requires_grad and p.grad is not None], 1.0)
+        opt.step()
+        print(f"{si:>4} {float(l):>9.3f} {cap.get('img_tokens_absmax', float('nan')):>10.4g} "
+              f"{gn:>12.4g} {vs:>11.4g} {enc:>10.4g} {float(gn32):>16.4g}")
+        if not math.isfinite(float(gn32)):
+            print(f"  → grad_norm(float32) = inf tại step {si} → clip triệt tiêu update từ đây (kẹt).")
