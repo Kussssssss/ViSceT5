@@ -84,34 +84,47 @@ def wrap(*a, **k):
     return out
 m._encode_image = wrap
 
-out = m(**b); loss = out["loss"]
-print(f"loss = {float(loss):.4f} (finite={bool(torch.isfinite(loss).all())})")
-loss.backward()
+def grad_report(mm):
+    """Trả (grad_norm float64, top-module dict, max|g| (name,val), có non-finite?)."""
+    mod_sq = defaultdict(float); total_sq = 0.0; nonfinite = []
+    gmax = 0.0; gmax_name = ""
+    for n, p in mm.named_parameters():
+        if not p.requires_grad or p.grad is None:
+            continue
+        g = p.grad.detach()
+        if not torch.isfinite(g).all():
+            nonfinite.append(n); continue
+        s = float((g.double() ** 2).sum()); total_sq += s
+        top = n.split(".")[0] + ("." + n.split(".")[1] if n.startswith(("vit5", "qa_clip")) and len(n.split(".")) > 1 else "")
+        mod_sq[top] += s
+        gm = float(g.abs().max())
+        if gm > gmax: gmax, gmax_name = gm, n
+    return math.sqrt(total_sq), mod_sq, (gmax_name, gmax), nonfinite
 
-print(f"|img_tokens| max = {cap.get('img_tokens_absmax')}")
-print(f"|patch_scores| max = {cap.get('patch_scores_absmax')}")
-
-# grad norm tính bằng float64 (không tràn) + gom theo module top-level
-mod_sq = defaultdict(float); total_sq = 0.0; nonfinite = []
-gmax = 0.0; gmax_name = ""
-for n, p in m.named_parameters():
-    if not p.requires_grad or p.grad is None:
-        continue
-    g = p.grad.detach()
-    if not torch.isfinite(g).all():
-        nonfinite.append(n)
-        continue
-    s = float((g.double() ** 2).sum())
-    total_sq += s
-    top = n.split(".")[0] + ("." + n.split(".")[1] if n.startswith(("vit5", "qa_clip")) and len(n.split(".")) > 1 else "")
-    mod_sq[top] += s
-    gm = float(g.abs().max())
-    if gm > gmax: gmax, gmax_name = gm, n
-
-print(f"\nTOTAL grad_norm (float64) = {math.sqrt(total_sq):.4g}")
-print(f"max |grad| element = {gmax:.4g}  @ {gmax_name}")
-if nonfinite:
-    print(f"NON-FINITE grad params ({len(nonfinite)}): {nonfinite[:8]}")
-print("\nTop modules by grad-norm:")
-for k, v in sorted(mod_sq.items(), key=lambda x: -x[1])[:12]:
-    print(f"  {math.sqrt(v):>12.4g}  {k}")
+# ── QUÉT NHIỀU BATCH: tìm batch làm img_tokens/grad_norm vọt lên (data-dependent?) ──
+NB = int(os.environ.get("DIAG_NBATCH", "20"))
+dfull = pd.read_csv(_csv).head(NB * _bs).reset_index(drop=True)
+dsN = ViT5VQADataset(dfull)
+print(f"\n== SCAN {NB} batch (bs={_bs}) ==")
+print(f"{'batch':>5} {'loss':>9} {'|img_tok|':>10} {'|patch|':>9} {'grad_norm':>12}  nonfinite")
+worst = (-1.0, None)
+for bi in range(NB):
+    items = [dsN[bi * _bs + j] for j in range(_bs)]
+    bb = col(items)
+    bb = {k: (v.to(dev) if torch.is_tensor(v)
+              else ([{kk: (vv.to(dev) if torch.is_tensor(vv) else vv) for kk, vv in d.items()} for d in v]
+                    if k == "ocr_info" else v)) for k, v in bb.items()}
+    m.zero_grad(set_to_none=True); cap.clear()
+    o = m(**bb); l = o["loss"]; l.backward()
+    gn, msq, (gname, gval), nf = grad_report(m)
+    print(f"{bi:>5} {float(l):>9.3f} {cap.get('img_tokens_absmax', float('nan')):>10.4g} "
+          f"{cap.get('patch_scores_absmax', float('nan')):>9.4g} {gn:>12.4g}  {len(nf)}")
+    if gn > worst[0] or nf:
+        worst = (gn if not nf else float('inf'), (bi, msq, (gname, gval), nf))
+print("\n== BATCH TỆ NHẤT (grad_norm lớn nhất / có non-finite) ==")
+bi, msq, (gname, gval), nf = worst[1]
+print(f"batch {bi}: grad_norm={worst[0]:.4g} | max|g|={gval:.4g} @ {gname} | nonfinite={len(nf)}")
+if nf: print("  nonfinite params:", nf[:8])
+print("  top modules:")
+for k, v in sorted(msq.items(), key=lambda x: -x[1])[:10]:
+    print(f"    {math.sqrt(v):>12.4g}  {k}")
