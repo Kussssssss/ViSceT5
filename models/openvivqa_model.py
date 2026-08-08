@@ -234,6 +234,12 @@ class OpenViVQAModel(PreTrainedModel):
             do_sample=False,
         )
 
+        # det/rec (SwinTextSpotter detection/recognition, 256-d) là ĐẶC TRƯNG OCR bình
+        # thường (giống text/box) → chiếu Linear về d_model rồi cộng vào baseline OCR.
+        # Đặt Ở CUỐI __init__ để KHÔNG xê dịch thứ tự rút RNG của các module phía trước.
+        self.ocr_lite_det_proj = nn.Linear(int(getattr(config, "ocr_d_det", 256)), self.d_model)
+        self.ocr_lite_rec_proj = nn.Linear(int(getattr(config, "ocr_d_rec", 256)), self.d_model)
+
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
         self.post_init()
@@ -670,8 +676,12 @@ class OpenViVQAModel(PreTrainedModel):
             device=device,
             dtype=self.target_dtype,
         )
+        _d_det = self.ocr_lite_det_proj.in_features
+        _d_rec = self.ocr_lite_rec_proj.in_features
+        det_word = torch.zeros(B, N_word, _d_det, device=device, dtype=self.target_dtype)
+        rec_word = torch.zeros(B, N_word, _d_rec, device=device, dtype=self.target_dtype)
         ocr_word_mask_list = []
-    
+
         for b in range(B):
             info_b = ocr_info[b]
             w = float(info_b.get("width", 1.0) or 1.0)
@@ -708,7 +718,30 @@ class OpenViVQAModel(PreTrainedModel):
                         device,
                         self.target_dtype,
                     )
-    
+
+            # det/rec là feature word-level (độ dài W trong ocr_info) → căn về N_word:
+            # crop nếu dài; COPY nửa gốc khi OCR-aug nhân đôi (N_word == 2W); còn lại zero-pad.
+            for _name, _dim, _dst in (("det_features", _d_det, det_word),
+                                      ("rec_features", _d_rec, rec_word)):
+                _f = info_b.get(_name, None)
+                if _f is None:
+                    continue
+                if not torch.is_tensor(_f):
+                    _f = torch.tensor(_f, device=device, dtype=self.target_dtype)
+                else:
+                    _f = _f.to(device=device, dtype=self.target_dtype)
+                if _f.dim() != 2 or _f.size(-1) != _dim:
+                    continue
+                n = _f.size(0)
+                if n == N_word:
+                    _dst[b] = _f
+                elif n > N_word:
+                    _dst[b] = _f[:N_word]
+                elif N_word == 2 * n:
+                    _dst[b] = torch.cat([_f, _f], dim=0)
+                elif n > 0:
+                    _dst[b, :n] = _f
+
             box_mask_b = box_mask[b] if box_mask is not None else None
             word_mask_b = self._get_ocr_word_mask(
                 info_b,
@@ -728,12 +761,16 @@ class OpenViVQAModel(PreTrainedModel):
             box_emb
             + self.ocr_lite_box_ff(box_emb.to(torch.float32)).to(self.target_dtype)
         )
-    
+
+        # det/rec: chiếu Linear đơn giản (như box) rồi cộng — đặc trưng OCR bình thường.
+        det_emb = self.ocr_lite_det_proj(det_word.to(torch.float32)).to(self.target_dtype)
+        rec_emb = self.ocr_lite_rec_proj(rec_word.to(torch.float32)).to(self.target_dtype)
+
         mask = ocr_word_mask.to(self.target_dtype).unsqueeze(-1)
-    
-        ocr_fused_feat = (text_mix + box_emb).to(self.target_dtype)
+
+        ocr_fused_feat = (text_mix + box_emb + det_emb + rec_emb).to(self.target_dtype)
         ocr_fused_feat = ocr_fused_feat * mask
-    
+
         return ocr_fused_feat, ocr_word_mask
 
     # =====================================================================
