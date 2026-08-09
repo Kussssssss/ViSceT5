@@ -239,6 +239,12 @@ class OpenViVQAModel(PreTrainedModel):
         # Đặt Ở CUỐI __init__ để KHÔNG xê dịch thứ tự rút RNG của các module phía trước.
         self.ocr_lite_det_proj = nn.Linear(int(getattr(config, "ocr_d_det", 256)), self.d_model)
         self.ocr_lite_rec_proj = nn.Linear(int(getattr(config, "ocr_d_rec", 256)), self.d_model)
+        # LayerNorm SAU Linear — GIỐNG HỆT đường ON (SemanticOCREmbedding.layer_norm_det/rec)
+        # và đúng công thức paper: x_OCR = x_semantic + LN(det·W) + LN(rec·W) + LN(box·W).
+        # THIẾU LN thì det/rec cộng vào fused_seq với biên độ không kiểm soát → gradient lớn
+        # → backward của QA-CLIP tràn → NaN (đo được: chỉ lỗi khi det/rec ON + qaclip ON).
+        self.ocr_lite_det_ln = nn.LayerNorm(self.d_model)
+        self.ocr_lite_rec_ln = nn.LayerNorm(self.d_model)
 
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
@@ -670,6 +676,7 @@ class OpenViVQAModel(PreTrainedModel):
         _d_rec = self.ocr_lite_rec_proj.in_features
         det_word = torch.zeros(B, N_word, _d_det, device=device, dtype=self.target_dtype)
         rec_word = torch.zeros(B, N_word, _d_rec, device=device, dtype=self.target_dtype)
+        _has_det = _has_rec = False   # khớp đường ON: KHÔNG có det/rec thì đóng góp 0 (bỏ LN)
         ocr_word_mask_list = []
 
         for b in range(B):
@@ -731,6 +738,10 @@ class OpenViVQAModel(PreTrainedModel):
                     _dst[b] = torch.cat([_f, _f], dim=0)
                 elif n > 0:
                     _dst[b, :n] = _f
+                else:
+                    continue
+                if _name == "det_features": _has_det = True
+                else: _has_rec = True
 
             box_mask_b = box_mask[b] if box_mask is not None else None
             word_mask_b = self._get_ocr_word_mask(
@@ -753,8 +764,12 @@ class OpenViVQAModel(PreTrainedModel):
         )
 
         # det/rec: chiếu Linear đơn giản (như box) rồi cộng — đặc trưng OCR bình thường.
-        det_emb = self.ocr_lite_det_proj(det_word.to(torch.float32)).to(self.target_dtype)
-        rec_emb = self.ocr_lite_rec_proj(rec_word.to(torch.float32)).to(self.target_dtype)
+        det_emb = self.ocr_lite_det_ln(
+            self.ocr_lite_det_proj(det_word.to(torch.float32))
+        ).to(self.target_dtype) if _has_det else 0.0
+        rec_emb = self.ocr_lite_rec_ln(
+            self.ocr_lite_rec_proj(rec_word.to(torch.float32))
+        ).to(self.target_dtype) if _has_rec else 0.0
 
         mask = ocr_word_mask.to(self.target_dtype).unsqueeze(-1)
 

@@ -194,10 +194,25 @@ else:
         m, col = build(cfg, detrec=True)
         b = to_dev(col([ds[i] for i in idx]))
         m.zero_grad(set_to_none=True)
-        out = m(**b); out["loss"].backward()
-        print("KHÔNG raise (có thể là inf chứ không phải NaN, hoặc anomaly không bắt được).")
-    except RuntimeError as e:
-        print("*** ANOMALY RAISE ***"); print(str(e)[:4000])
+        # QUAN TRỌNG: traceback của lời gọi FORWARD được phát ra dưới dạng UserWarning
+        # NGAY TRƯỚC khi raise, KHÔNG nằm trong exception → phải ghi lại warning mới thấy
+        # đúng dòng code. (Lần chạy trước bị filterwarnings('ignore') ở đầu file nuốt mất.)
+        _err = None
+        with warnings.catch_warnings(record=True) as _w:
+            warnings.simplefilter("always")
+            try:
+                out = m(**b); out["loss"].backward()
+            except RuntimeError as e:
+                _err = e
+        if _err is not None:
+            print("*** ANOMALY RAISE ***"); print(str(_err)[:2000])
+        else:
+            print("KHÔNG raise (có thể là inf, hoặc anomaly không bắt được).")
+        for _wi in _w:
+            _msg = str(_wi.message)
+            if "Traceback of forward call" in _msg or "anomaly" in _msg.lower():
+                print("\n*** TRACEBACK FORWARD (dòng code tạo ra op hỏng) ***")
+                print(_msg[:4000])
     except Exception as e:
         print(f"lỗi khác: {type(e).__name__}: {e}"); traceback.print_exc()
     finally:
