@@ -952,7 +952,15 @@ class OpenViVQAModel(PreTrainedModel):
         # FWD_DIAG=1: mở kiểm tra này cho CẢ finetune (chỉ in log, không đổi tính toán) —
         # cần để biết thành phần nào của fused_seq sinh NaN khi enc_out báo NaN.
         if getattr(self, "_pretrain_stage", False) or os.environ.get("FWD_DIAG") == "1":
-            for _cn, _ct in (("txt_emb", txt_emb_for_enc), ("img_tokens", img_pack["img_tokens"]),
+            # pixel_values / txt_hidden_states = ĐẦU VÀO THỰC của QA-CLIP (txt_emb ở dưới
+            # là txt_emb_for_enc — tensor KHÁC, nên trước đây không lộ ra thủ phạm).
+            if os.environ.get("FWD_DIAG") == "1":
+                _bad_w = [n for n, p in self.qa_clip.named_parameters() if not torch.isfinite(p).all()]
+                if _bad_w:
+                    print(f"🚨 [FWD_DIAG] qa_clip có {len(_bad_w)} TRỌNG SỐ non-finite, vd: {_bad_w[:3]}")
+            for _cn, _ct in (("pixel_values", pixel_values_dev),
+                             ("txt_hidden_states(->qa_clip)", txt_emb_for_clip),
+                             ("txt_emb", txt_emb_for_enc), ("img_tokens", img_pack["img_tokens"]),
                              ("ocr_fused_feat", ocr_fused_feat), ("crop_tokens", crop_tokens),
                              ("attn_summary", attn_summary)):
                 if not torch.isfinite(_ct).all():
