@@ -130,20 +130,66 @@ def bad_grads(m):
     return out, tn, ti
 
 
+HOOKS = os.environ.get("HOOKS", "0") == "1"   # HOOKS=1: bắt module đầu tiên non-finite
+
+
 def scan(m, col, nb):
     """Quét tới khi gặp batch xấu. Trả (batch_idx, rows, info) hoặc None."""
+    # Gắn hook TRONG CHÍNH chuỗi này (chạy riêng lẻ KHÔNG tái hiện được vì NaN ở
+    # ngưỡng biên, phụ thuộc trạng thái RNG tích luỹ) → mới bắt đúng lúc nó xảy ra.
+    _log, _first, _step = [], [None], [0]
+    _hs = []
+    if HOOKS:
+        def _stat(t):
+            if not torch.is_tensor(t) or not t.is_floating_point(): return None
+            f = t.detach().float(); fin = torch.isfinite(f)
+            return dict(nan=int(torch.isnan(f).sum()), inf=int(torch.isinf(f).sum()),
+                        absmax=(float(f[fin].abs().max()) if fin.any() else float("nan")),
+                        shape=tuple(f.shape))
+        def _mk(name):
+            def h(mod, inp, out):
+                _step[0] += 1
+                for oi, o in enumerate(out if isinstance(out, (tuple, list)) else (out,)):
+                    s = _stat(o)
+                    if s is None: continue
+                    _log.append((_step[0], name, oi, s))
+                    if (s["nan"] or s["inf"]) and _first[0] is None:
+                        ins = [_stat(x) for x in (inp if isinstance(inp, tuple) else (inp,))]
+                        _first[0] = (_step[0], name, oi, s, [x for x in ins if x])
+            return h
+        for n, mod in m.named_modules():
+            if n: _hs.append(mod.register_forward_hook(_mk(n)))
+
     for bi in range(nb):
         idx = ORDER[bi * BS:(bi + 1) * BS]
         if len(idx) < BS: break
         b = to_dev(col([ds[i] for i in idx]))
         m.zero_grad(set_to_none=True)
+        if HOOKS: _log.clear(); _first[0] = None; _step[0] = 0
         out = m(**b); loss = out["loss"]; loss.backward()
         bp, tn, ti = bad_grads(m)
+        if bp and HOOKS:
+            print(f"\n    --- MODULE ĐẦU TIÊN NON-FINITE (batch {bi}) ---")
+            if _first[0] is None:
+                print("      forward SẠCH ở mọi module → NaN sinh trong BACKWARD.")
+                _rk = [x for x in _log if x[3]['absmax'] == x[3]['absmax'] and x[3]['absmax'] < 1e30]
+                for e in sorted(_rk, key=lambda x: -x[3]['absmax'])[:8]:
+                    print(f"      absmax={e[3]['absmax']:>12.4g}  {e[1]}[{e[2]}]")
+            else:
+                st, nm, oi, s, ins = _first[0]
+                print(f"      #{st} {nm}[{oi}] nan={s['nan']} inf={s['inf']} absmax={s['absmax']:.4g} shape={s['shape']}")
+                for k, x in enumerate(ins):
+                    print(f"        in[{k}]: nan={x['nan']} inf={x['inf']} absmax={x['absmax']:.4g}")
+                for e in [x for x in _log if x[0] < st][-5:]:
+                    print(f"        trước: #{e[0]} {e[1]}[{e[2]}] absmax={e[3]['absmax']:.4g}")
+            for h in _hs: h.remove()
         if bp:
             mods = defaultdict(int)
             for n, _, _ in bp: mods[n.split(".")[0]] += 1
+            for h in _hs: h.remove()
             return bi, idx, dict(loss=float(loss), finite=bool(torch.isfinite(loss).all()),
                                  nparam=len(bp), nan=tn, inf=ti, mods=dict(mods), first=bp[0])
+    for h in _hs: h.remove()
     return None
 
 
