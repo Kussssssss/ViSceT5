@@ -343,6 +343,19 @@ class QACLIPEncoder(CLIPPreTrainedModel):
         with torch.no_grad():
             for layer in self.vision_model.encoder.layers:
                 if isinstance(layer, MMCLIPEncoderLayer):
+                    # BẮT BUỘC: instruct_dim_reduce dùng nn.Linear(bias=False). HF
+                    # `from_pretrained` (_fast_init) cấp phát bằng torch.empty() rồi chỉ
+                    # điền weight CÓ trong checkpoint; weight thiếu để cho _init_weights lo.
+                    # Nhưng CLIPPreTrainedModel._init_weights với nn.Linear thường CHỈ zero
+                    # bias NẾU có bias → các Linear bias=False này KHÔNG được khởi tạo, giữ
+                    # nguyên BỘ NHỚ RÁC và có thể chứa NaN (đo được:
+                    # layers.10.instruct_dim_reduce.3.weight = NaN ngay step 0 → img_tokens
+                    # NaN 100% → loss NaN). Rác nên lỗi KHÔNG tất định và seed không cứu được.
+                    idr = getattr(layer, "instruct_dim_reduce", None)
+                    if idr is not None:
+                        for sub in idr.modules():
+                            if isinstance(sub, (nn.Linear, nn.LayerNorm)):
+                                sub.reset_parameters()
                     sa = layer.self_attn
                     if hasattr(sa, "instruction_out_proj") and sa.instruction_out_proj is not None:
                         sa.instruction_out_proj.load_state_dict(sa.out_proj.state_dict())
