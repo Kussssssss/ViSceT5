@@ -335,12 +335,12 @@ class OpenViVQAModel(PreTrainedModel):
         else:
             qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
             img_hs = qa_out.last_hidden_state
-            # QA-CLIP vision (adapter QA-ViT random-init) có thể sinh NaN/inf NGAY ở forward
-            # (scratch finetune, rõ nhất trên A100) → enc_out NaN → loss NaN. Sanitize LUÔN
-            # (no-op với giá trị hữu hạn: chỉ NaN→0, ±inf→±1e4). Backward của nan_to_num cho
-            # grad=0 tại vị trí non-finite nên cũng chặn NaN lan ngược. Không còn gate theo
-            # _pretrain_stage/clamp_vision — vì scratch finetune cũng cần bảo vệ này.
-            img_hs = torch.nan_to_num(img_hs, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
+            if getattr(self, "_pretrain_stage", False) or bool(getattr(self.config, "clamp_vision", False)):
+                # UNFROZEN pretrain: QA-CLIP's RANDOM-INIT instruction adapters can overflow
+                # (~1e36 → inf). Sanitize + clamp WITHOUT detaching — grads still flow.
+                # config.clamp_vision: weights PRETRAINED under this clamp expect it as part
+                # of the forward. Scratch finetune (no flag) stays byte-identical to notebook.
+                img_hs = torch.nan_to_num(img_hs, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
 
         img_tokens = img_hs[:, 1:, :].to(self.target_dtype)
         img_attn_mask = torch.ones(B, img_tokens.size(1), dtype=torch.long, device=device)
@@ -359,9 +359,11 @@ class OpenViVQAModel(PreTrainedModel):
                 patch_scores = cls_to_patch.mean(dim=1)
 
             patch_scores = patch_scores.to(self.target_dtype)
-            # Sanitize LUÔN (như img_hs): attention score từ adapter tràn sẽ đầu độc
-            # visual_search/AVF. No-op với giá trị hữu hạn.
-            patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
+            if getattr(self, "_pretrain_stage", False) or bool(getattr(self.config, "clamp_vision", False)):
+                # covers BOTH frozen and unfrozen pretrain — attention scores from the
+                # overflowing adapters poison visual_search otherwise; clamp_vision: same
+                # guard when finetuning/inferring FROM such weights.
+                patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
             out["patch_scores"] = patch_scores
             if return_attn: out["qa_attn_last"] = last_attn.detach().cpu()
         else:
@@ -1000,11 +1002,11 @@ class OpenViVQAModel(PreTrainedModel):
             for k in list(img_pack.keys()):
                 if k not in ("img_tokens", "img_attn_mask", "patch_scores"): del img_pack[k]
 
-        # Numerical guard (LUÔN bật): QA-CLIP vision (custom MMCLIPAttention) có thể sinh
-        # giá trị non-finite lan vào img_tokens → enc_out → loss = NaN. Sanitize fused_seq
-        # TRƯỚC encoder. No-op nếu đã hữu hạn (img_hs/patch_scores đã sanitize ở trên), nên
-        # chỉ là lớp bảo hiểm cuối; áp cho cả pretrain lẫn finetune.
-        if not torch.isfinite(fused_seq).all():
+        # PRETRAIN-ONLY numerical guard (giữ nguyên như bản gốc): QA-CLIP vision có thể
+        # phát giá trị non-finite lan vào enc_out. Gate bằng `_pretrain_stage` (chỉ set ở
+        # pretrain.py) nên FINETUNE giữ nguyên hành vi notebook.
+        if getattr(self, "_pretrain_stage", False) and not torch.isfinite(fused_seq).all():
+            print("⚠️ [pretrain guard] non-finite in fused_seq (QA-CLIP vision) → nan_to_num")
             fused_seq = torch.nan_to_num(fused_seq, nan=0.0, posinf=1e4, neginf=-1e4)
 
         # Notebook gốc / TWA paper: dùng mask 1D chuẩn — original và related token

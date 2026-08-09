@@ -87,12 +87,6 @@ class MMCLIPAttention(CLIPAttention):
 
         attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
 
-        # Chặn q·k TRÀN thành ±inf (activation trung gian lớn ở layer 6-11): nếu để inf lọt
-        # vào phép trừ row-max phía dưới sẽ cho `inf - inf = NaN` — forward được che bởi
-        # nan_to_num sau softmax, nhưng BACKWARD đã bị đầu độc → grad NaN cho q/k_proj +
-        # adapter QA-ViT (lan sang vit5). Sanitize NGAY (trước amax). No-op với logit thường.
-        attn_weights = torch.nan_to_num(attn_weights, nan=0.0, posinf=1e4, neginf=-1e4)
-
         if full_key_mask is not None:
             if full_key_mask.size(1) != src_len:
                  if full_key_mask.size(1) < src_len:
