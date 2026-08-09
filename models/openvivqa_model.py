@@ -13,6 +13,7 @@ from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding, SpatialCirclePosition
 from models.modules.visual_search import VisualSearch
 
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -948,7 +949,9 @@ class OpenViVQAModel(PreTrainedModel):
 
         # Per-component non-finite diagnostic (NaN AND inf) — names the exact culprit
         # feeding fused_seq + its magnitude, so the pretrain guard below is never a guess.
-        if getattr(self, "_pretrain_stage", False):
+        # FWD_DIAG=1: mở kiểm tra này cho CẢ finetune (chỉ in log, không đổi tính toán) —
+        # cần để biết thành phần nào của fused_seq sinh NaN khi enc_out báo NaN.
+        if getattr(self, "_pretrain_stage", False) or os.environ.get("FWD_DIAG") == "1":
             for _cn, _ct in (("txt_emb", txt_emb_for_enc), ("img_tokens", img_pack["img_tokens"]),
                              ("ocr_fused_feat", ocr_fused_feat), ("crop_tokens", crop_tokens),
                              ("attn_summary", attn_summary)):
