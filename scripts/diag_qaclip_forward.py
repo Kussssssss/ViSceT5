@@ -40,14 +40,17 @@ for p in [os.path.join(OUTPUT_PATH, "merged_train.csv"),
 assert _csv, "Không thấy merged_train CSV."
 df = pd.read_csv(_csv).head(NPOOL).reset_index(drop=True)
 
+# THỨ TỰ PHẢI GIỐNG HỆT verify_all: tok/voc tạo TRƯỚC khi seed+build, nếu không trạng
+# thái RNG (dropout) sẽ lệch và NaN — vốn ở ngưỡng biên — sẽ không tái hiện.
+tok = AutoTokenizer.from_pretrained("VietAI/vit5-base")
+voc = Vision_Encode_Ocr_Feature(DEFAULT_OCR_CONFIG)
+
 torch.manual_seed(42)                      # GIỐNG verify_all.build()
 c = OpenViVQAConfig(); c.pretrain = False
 c.ablation_use_qaclip = True; c.ablation_use_vs = FULL
 c.ablation_use_ocr = FULL;    c.ablation_use_ocr_aug = FULL
 m = OpenViVQAModel(c); m.pretrain = False; m.config.use_twc = False
 m = m.to(DEV); m.train()
-tok = AutoTokenizer.from_pretrained("VietAI/vit5-base")
-voc = Vision_Encode_Ocr_Feature(DEFAULT_OCR_CONFIG)
 col = ViT5VQADataCollator(tokenizer=tok, image_processor=m.image_processor, ocr_encoder=voc,
     config=m.config, term_vocab_path="configs/data/term_vocab.txt",
     viet_vocab_path="configs/data/viet_vocab.txt", eng_vocab_path="", dataframe=df, pretrain=False)
@@ -55,13 +58,15 @@ col.set_mode(pretrain=False, mask_prob=0.0); col.use_ocr_aug_finetune = FULL
 ds = ViT5VQADataset(df)
 g = torch.Generator(); g.manual_seed(42)
 ORDER = torch.randperm(len(ds), generator=g).tolist()
-idx = ORDER[BATCH * BS:(BATCH + 1) * BS]
-print(f"config={CONFIG} | device={DEV} | batch={BATCH} rows={idx}")
+NB = int(os.environ.get("NB", "40"))
+print(f"config={CONFIG} | device={DEV} | quét tới {NB} batch (BS={BS}) tìm batch NaN đầu tiên")
 
-b = col([ds[i] for i in idx])
-b = {k: (v.to(DEV) if torch.is_tensor(v)
-         else ([{kk: (vv.to(DEV) if torch.is_tensor(vv) else vv) for kk, vv in d.items()} for d in v]
-               if k == "ocr_info" else v)) for k, v in b.items()}
+def make_batch(bi):
+    idx = ORDER[bi * BS:(bi + 1) * BS]
+    b = col([ds[i] for i in idx])
+    return idx, {k: (v.to(DEV) if torch.is_tensor(v)
+                     else ([{kk: (vv.to(DEV) if torch.is_tensor(vv) else vv) for kk, vv in d.items()} for d in v]
+                           if k == "ocr_info" else v)) for k, v in b.items()}
 
 # ── hook: ghi lại biên độ + phát hiện non-finite theo THỨ TỰ THỰC THI ──
 log, first_bad, step = [], [None], [0]
@@ -86,18 +91,28 @@ def mk(name):
                 first_bad[0] = (step[0], name, oi, s, [x for x in ins if x])
     return hook
 
-hs = [m.qa_clip.register_forward_hook(mk("qa_clip"))]
-for n, mod in m.qa_clip.named_modules():
-    if n: hs.append(mod.register_forward_hook(mk("qa_clip." + n)))
+# hook TOÀN BỘ model (không chỉ qa_clip) — NaN có thể ở visual_search/ocr_lite/vit5
+hs = []
+for n, mod in m.named_modules():
+    if n: hs.append(mod.register_forward_hook(mk(n)))
 
-with torch.no_grad():
-    out = m(**b)
+idx, b, out, loss = None, None, None, None
+for bi in range(NB):
+    log.clear(); first_bad[0] = None; step[0] = 0
+    idx, b = make_batch(bi)
+    out = m(**b)                       # CÓ grad, giống verify_all (không dùng no_grad)
+    loss = out.get("loss")
+    ok = bool(torch.isfinite(loss).all()) if loss is not None else True
+    if (not ok) or first_bad[0] is not None:
+        print(f"\n>>> BATCH LỖI: #{bi} rows={idx} | loss={loss} finite={ok}")
+        break
+    m.zero_grad(set_to_none=True)
+else:
+    print(f"\nKhông batch nào lỗi trong {NB} batch (lỗi ở ngưỡng biên — thử NB lớn hơn).")
 for h in hs: h.remove()
-
-loss = out.get("loss")
 print(f"loss = {loss} | finite = {bool(torch.isfinite(loss).all()) if loss is not None else None}")
 
-print("\n=== MODULE ĐẦU TIÊN CÓ OUTPUT NON-FINITE ===")
+print("\n=== MODULE ĐẦU TIÊN CÓ OUTPUT NON-FINITE (toàn model) ===")
 if first_bad[0] is None:
     print("Không module nào trong qa_clip cho non-finite ở forward này.")
 else:
@@ -111,5 +126,8 @@ else:
         print(f"    #{e[0]}  {e[1]}[{e[2]}]  absmax={e[3]['absmax']:.4g}  nan={e[3]['nan']} inf={e[3]['inf']}")
 
 print("\n=== TOP 15 module theo biên độ (|absmax| lớn nhất) ===")
-for e in sorted([x for x in log if x[3]["absmax"] == x[3]["absmax"]], key=lambda x: -x[3]["absmax"])[:15]:
+print("   (đã LỌC các tensor >=1e30: đó là hằng số mask/position_bias của T5 = finfo.min,")
+print("    hữu hạn và bình thường, không phải activation)")
+_rank = [x for x in log if x[3]["absmax"] == x[3]["absmax"] and x[3]["absmax"] < 1e30]
+for e in sorted(_rank, key=lambda x: -x[3]["absmax"])[:15]:
     print(f"  {e[3]['absmax']:>14.4g}   #{e[0]:<5} {e[1]}[{e[2]}]")
