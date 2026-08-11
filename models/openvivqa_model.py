@@ -790,8 +790,11 @@ class OpenViVQAModel(PreTrainedModel):
             global_box = torch.tensor([[0.0, 0.0, W_img, W_img]], device=device, dtype=self.target_dtype)
             global_boxes = global_box.expand(B, 4)
             
-            # ConvNeXt vẫn hoạt động trên toàn cảnh bức ảnh
-            dummy_crop_tokens, _ = self.visual_search._extract_roi_features(pixel_values_dev, global_boxes)
+            # ConvNeXt vẫn hoạt động trên toàn cảnh bức ảnh.
+            # pil_images để nhánh OFF lấy điểm ảnh y hệt cách nhánh ON lấy (từ ảnh gốc);
+            # nếu chỉ ON đọc ảnh gốc thì chênh lệch ON/OFF sẽ lẫn cả độ nét, làm hỏng ablation.
+            dummy_crop_tokens, _ = self.visual_search._extract_roi_features(
+                pixel_values_dev, global_boxes, pil_images=pil_images)
             
             vs_out = {}
             crop_tokens = dummy_crop_tokens.to(self.target_dtype)
