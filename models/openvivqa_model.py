@@ -664,12 +664,15 @@ class OpenViVQAModel(PreTrainedModel):
                 rec_tok[b] = _rc[map_clamped] * valid; _has_rec = True
 
         # Hop nhat TUYEN TINH — khac biet DUY NHAT so voi ON: khong Constituent/Group/Spatial
+        # CHỈ Linear (+LayerNorm) — KHÔNG dùng ocr_lite_text_ff / ocr_lite_box_ff (MLP 2 lớp
+        # GELU có residual). Lý do: hai nhánh OFF còn lại KHÔNG thêm lớp học được nào
+        # (QA-ViT OFF = CLIP thuần; AVF OFF = cùng ConvNeXt, chỉ đổi box), nên baseline OCR
+        # cũng phải là "đặc trưng đi qua Linear bình thường" thì ablation mới đồng bộ.
+        # Hai module _ff giữ lại trong __init__ cho tương thích checkpoint, nhưng không dùng.
         text_mix = self.ocr_lite_text_ln((tok_emb + char_tok).to(torch.float32)).to(self.target_dtype)
         text_mix = self.ocr_lite_text_proj(text_mix.to(torch.float32)).to(self.target_dtype)
-        text_mix = text_mix + self.ocr_lite_text_ff(text_mix.to(torch.float32)).to(self.target_dtype)
 
         box_emb = self.ocr_lite_box_proj(box_tok.to(torch.float32)).to(self.target_dtype)
-        box_emb = box_emb + self.ocr_lite_box_ff(box_emb.to(torch.float32)).to(self.target_dtype)
 
         det_emb = self.ocr_lite_det_ln(
             self.ocr_lite_det_proj(det_tok.to(torch.float32))
