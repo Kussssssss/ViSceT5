@@ -84,6 +84,15 @@ class VisualSearch(nn.Module):
         cnn_input_size = self._pick_size(self.processor)
         self.register_buffer("cnn_input_size", torch.tensor(cnn_input_size, dtype=torch.long))
 
+        # Kích thước mà processor của ConvNeXt RESIZE tới trước khi center-crop. Với
+        # ConvNeXt-V2-224 thì crop_pct=0.875 nên nó resize cạnh ngắn về 224/0.875 = 256
+        # rồi mới cắt giữa 224 — tức cửa sổ nhỏ hơn 256px sẽ bị NỘI SUY PHÓNG TO, mất
+        # đúng cái độ phân giải mà việc cắt từ ảnh gốc vừa lấy về. Dùng làm SÀN cạnh cắt.
+        self.register_buffer("cnn_resize_size",
+                             torch.tensor(self._proc_resize_target(self.processor, cnn_input_size),
+                                          dtype=torch.long),
+                             persistent=False)
+
         self.register_buffer("attention_threshold", torch.tensor(0.7, dtype=torch.float32))
         self.register_buffer("temperature", torch.tensor(5.0, dtype=torch.float32))
         self.register_buffer("image_size", torch.tensor(init_image_size, dtype=torch.long))
@@ -141,6 +150,24 @@ class VisualSearch(nn.Module):
             return int(p.size.get("width") or p.size.get("height") or 224)
         return int(p) if isinstance(p, (int, float)) else 224
 
+
+    @staticmethod
+    def _proc_resize_target(processor, fallback):
+        """Cạnh ngắn mà `processor` resize tới TRƯỚC khi center-crop.
+
+        Cắt nhỏ hơn con số này thì processor buộc phải phóng to bằng nội suy.
+        """
+        size_cfg = getattr(processor, "size", None)
+        se = None
+        if isinstance(size_cfg, dict):
+            se = size_cfg.get("shortest_edge") or size_cfg.get("height") or size_cfg.get("width")
+        elif isinstance(size_cfg, (int, float)):
+            se = size_cfg
+        se = int(se) if se else int(fallback)
+        crop_pct = getattr(processor, "crop_pct", None)
+        if crop_pct and float(crop_pct) > 0 and se < 384:
+            return int(round(se / float(crop_pct)))
+        return se
 
     @staticmethod
     def _quantile(x, q):
@@ -325,6 +352,10 @@ class VisualSearch(nn.Module):
             y1 = (float(b[i, 3]) + p["top"]) / sy
 
             side = max(x1 - x0, y1 - y0, 1.0) * float(self.vs_crop_scale.item())
+            # SÀN: không bao giờ cắt nhỏ hơn kích thước processor sẽ resize tới, nếu không
+            # nó phóng to bằng nội suy và xoá sạch phần độ phân giải vừa lấy từ ảnh gốc.
+            # Sàn cũng bị chặn bởi chính kích thước ảnh (ảnh nhỏ thì đành chịu nội suy).
+            side = max(side, float(min(int(self.cnn_resize_size.item()), W0, H0)))
             side = min(side, float(W0), float(H0))
             cx = min(max((x0 + x1) * 0.5, side * 0.5), float(W0) - side * 0.5)
             cy = min(max((y0 + y1) * 0.5, side * 0.5), float(H0) - side * 0.5)
