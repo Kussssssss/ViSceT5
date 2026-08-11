@@ -93,6 +93,12 @@ class VisualSearch(nn.Module):
         self.register_buffer("vs_min_area", torch.tensor(int(getattr(self.cfg, "vs_min_area", 1)), dtype=torch.long))
         self.register_buffer("vs_max_cov", torch.tensor(float(getattr(self.cfg, "vs_max_cov", 1.0)), dtype=torch.float32))
         self.register_buffer("vs_margin", torch.tensor(int(getattr(self.cfg, "vs_margin", 0)), dtype=torch.long))
+        # Hệ số nới cạnh cửa sổ cắt quanh vùng attention (đo trên ẢNH GỐC).
+        # 1.0 = đúng hình vuông bao của vùng attention; >1.0 = thêm ngữ cảnh xung quanh.
+        # persistent=False để không làm lệch state_dict của checkpoint cũ.
+        self.register_buffer("vs_crop_scale",
+                             torch.tensor(float(getattr(self.cfg, "vs_crop_scale", 1.0)), dtype=torch.float32),
+                             persistent=False)
 
         if vs_local_dir and os.path.isdir(vs_local_dir):
             params_path = os.path.join(vs_local_dir, "visual_search_params.pt")
@@ -252,6 +258,17 @@ class VisualSearch(nn.Module):
         cx = x0 + bw * 0.5
         cy = y0 + bh * 0.5
 
+        # Hình vuông bao của một box DÀI nằm sát mép sẽ tràn ra ngoài khung; khi đó
+        # grid_sample(padding_mode='zeros') lấp bằng hằng số (≈ màu trung bình sau khi
+        # denorm) — đo được tới 38.5% diện tích crop. Thay vì gán giá trị, DỜI hình vuông
+        # vào cho tới khi nó chạm biên: giữ nguyên kích thước vùng nhìn và mọi điểm ảnh
+        # đều là ảnh thật. Biên là W-1/H-1 vì lưới chuẩn hoá theo align_corners=True.
+        Wm = float(W - 1); Hm = float(H - 1)
+        max_dim = max_dim.clamp(max=min(Wm, Hm))
+        half = max_dim * 0.5
+        cx = torch.minimum(torch.maximum(cx, half), Wm - half)
+        cy = torch.minimum(torch.maximum(cy, half), Hm - half)
+
         max_dim = max_dim.unsqueeze(-1).unsqueeze(-1)
         cx = cx.unsqueeze(-1).unsqueeze(-1)
         cy = cy.unsqueeze(-1).unsqueeze(-1)
@@ -270,23 +287,78 @@ class VisualSearch(nn.Module):
         )
         return crops
 
-    def _extract_roi_features(self, pixel_values: torch.Tensor, boxes_224: torch.Tensor):
+    def _crops_from_original(self, pil_images, boxes_224: torch.Tensor, out_size: int,
+                             ref: torch.Tensor) -> Optional[torch.Tensor]:
+        """Cắt vùng attention TRỰC TIẾP TỪ ẢNH GỐC rồi để ConvNeXt tự tiền xử lý.
+
+        Vì sao cần: `pixel_values` là ảnh ĐÃ resize về 224. Cắt trên đó rồi nội suy lên
+        224 không sinh thêm điểm ảnh nào — 87% từ OCR cao dưới 16px ở khung 224 (trung
+        vị 7px) nên vùng cắt vẫn không đọc được chữ. Cắt từ ảnh gốc thì chữ giữ đúng
+        kích thước thật, đó mới là chỗ AVF lấy được high resolution.
+
+        Cửa sổ là hình VUÔNG (tỉ lệ 1:1 ⇒ không bóp méo) nhưng KÍCH THƯỚC ĐI THEO VÙNG
+        ATTENTION — vùng lớn thì cắt 512x512, vùng nhỏ thì cắt nhỏ hơn, đều ở điểm ảnh
+        gốc. Ở đây chỉ `.crop()` thuần: không resample, không chuẩn hoá. Việc resize và
+        chuẩn hoá giao cho `self.processor` của chính ConvNeXt, để backbone nhận đầu vào
+        đúng phân phối nó được huấn luyện.
+
+        Hình vuông được dựng TRONG KHÔNG GIAN ẢNH GỐC nên đúng cả khi sx != sy; nếu tràn
+        biên thì DỜI vào trong cho chạm biên, không bao giờ lấp giá trị.
+        Trả None nếu thiếu ảnh gốc → caller quay về đường grid_sample cũ.
+        """
+        if pil_images is None or len(pil_images) != int(boxes_224.size(0)):
+            return None
+
+        b = boxes_224.detach().float().cpu()
+        crops = []
+        for i, img in enumerate(pil_images):
+            if img is None:
+                return None
+            W0, H0 = img.size
+            if W0 <= 0 or H0 <= 0:
+                return None
+            p = self._proc_params(float(W0), float(H0))
+            sx = max(float(p["sx"]), 1e-8); sy = max(float(p["sy"]), 1e-8)
+            x0 = (float(b[i, 0]) + p["left"]) / sx
+            y0 = (float(b[i, 1]) + p["top"]) / sy
+            x1 = (float(b[i, 2]) + p["left"]) / sx
+            y1 = (float(b[i, 3]) + p["top"]) / sy
+
+            side = max(x1 - x0, y1 - y0, 1.0) * float(self.vs_crop_scale.item())
+            side = min(side, float(W0), float(H0))
+            cx = min(max((x0 + x1) * 0.5, side * 0.5), float(W0) - side * 0.5)
+            cy = min(max((y0 + y1) * 0.5, side * 0.5), float(H0) - side * 0.5)
+
+            S = max(1, int(round(side)))
+            L = max(0, min(int(round(cx - side * 0.5)), W0 - S))
+            T = max(0, min(int(round(cy - side * 0.5)), H0 - S))
+            crops.append(img.convert("RGB").crop((L, T, L + S, T + S)))
+
+        out = self.processor(images=crops, return_tensors="pt")["pixel_values"]
+        return out.to(device=ref.device, dtype=torch.float32)
+
+    def _extract_roi_features(self, pixel_values: torch.Tensor, boxes_224: torch.Tensor,
+                              pil_images: Optional[List[Image.Image]] = None):
         B, C, H, W = pixel_values.shape
         cnn_size = int(self.cnn_input_size.item())
 
-        crops_vit_norm = self._crops_via_grid_sample(
-            pixel_values,
-            boxes_224,
-            out_size=cnn_size
-        )
+        # Ưu tiên ảnh gốc; chỉ rơi về grid_sample trên bản 224 khi không có ảnh gốc.
+        crops_cnn_norm = self._crops_from_original(pil_images, boxes_224, cnn_size, pixel_values)
 
-        vit_mean = self.vit_mean.view(1, C, 1, 1)
-        vit_std = self.vit_std.view(1, C, 1, 1)
-        cnn_mean = self.cnn_mean.view(1, C, 1, 1)
-        cnn_std = self.cnn_std.view(1, C, 1, 1)
+        if crops_cnn_norm is None:
+            crops_vit_norm = self._crops_via_grid_sample(
+                pixel_values,
+                boxes_224,
+                out_size=cnn_size
+            )
 
-        crops_denorm = crops_vit_norm * vit_std + vit_mean
-        crops_cnn_norm = (crops_denorm - cnn_mean) / cnn_std
+            vit_mean = self.vit_mean.view(1, C, 1, 1)
+            vit_std = self.vit_std.view(1, C, 1, 1)
+            cnn_mean = self.cnn_mean.view(1, C, 1, 1)
+            cnn_std = self.cnn_std.view(1, C, 1, 1)
+
+            crops_denorm = crops_vit_norm * vit_std + vit_mean
+            crops_cnn_norm = (crops_denorm - cnn_mean) / cnn_std
 
         feats = self.cnn(pixel_values=crops_cnn_norm.to(self.cnn.dtype)).last_hidden_state
 
@@ -395,7 +467,8 @@ class VisualSearch(nn.Module):
         y1 = y1.clamp_min(y0 + 1.0).clamp(max=float(self.image_size.item()))
         boxes_224 = torch.stack([x0, y0, x1, y1], dim=-1)
 
-        crop_tokens, cnn_activation = self._extract_roi_features(pixel_values, boxes_224)
+        crop_tokens, cnn_activation = self._extract_roi_features(pixel_values, boxes_224,
+                                                                 pil_images=pil_images)
 
         B_img_tok = img_tokens.size(0)
         crop_mask = torch.ones(B_img_tok, crop_tokens.size(1), device=device, dtype=torch.long)
