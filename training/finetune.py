@@ -253,6 +253,19 @@ def main(args_list=None):
     # Việc phát hiện clamp_vision cho warm-start ở trên đã đọc cờ pretrain gốc của ckpt.
     config.pretrain = False
 
+    # Cờ ablation phải nằm trong config TRƯỚC khi dựng model. __init__ đọc
+    # ablation_use_vs để quyết định có giữ visual_search (ConvNeXt, 27.87M) hay gỡ đi;
+    # gán sau khi dựng thì forward vẫn tắt AVF đúng, nhưng module đã nằm sẵn trong
+    # state_dict và optimizer — tức phần tối ưu không hề có tác dụng. OpenViVQAConfig
+    # không khai báo sẵn các cờ này nên getattr mặc định True, càng phải set tường minh.
+    config.pretrain_ablation_mode = model_args.loss_ablation_mode
+    config.ablation_use_qaclip = bool(model_args.ablation_use_qaclip)
+    config.ablation_use_vs = bool(model_args.ablation_use_vs)
+    config.ablation_use_ocr = bool(model_args.ablation_use_ocr)
+    config.ablation_use_ocr_aug = bool(model_args.ablation_use_ocr_aug)
+    config.use_twc = False  # TWC is disabled during finetuning
+    config.use_ocr_aug_finetune = bool(model_args.ablation_use_ocr_aug)
+
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
@@ -294,18 +307,16 @@ def main(args_list=None):
     # gốc (gấp đôi token OCR đưa vào Consformer); False = chỉ OCR gốc.
     use_ocr_aug = bool(model_args.ablation_use_ocr_aug)
 
+    # Các cờ đã được set trên `config` TRƯỚC khi dựng model (xem phía trên); model.config
+    # chính là object đó nên ở đây chỉ còn xác nhận và in ra.
     model.pretrain = False
     model.config.pretrain = False
-    model.config.pretrain_ablation_mode = mode
-    model.config.ablation_use_qaclip = model_args.ablation_use_qaclip
-    model.config.ablation_use_vs = model_args.ablation_use_vs
-    model.config.ablation_use_ocr = model_args.ablation_use_ocr
-    model.config.ablation_use_ocr_aug = use_ocr_aug
-    model.config.use_twc = False  # TWC is disabled during finetuning
-    model.config.use_ocr_aug_finetune = use_ocr_aug
     print(f">>> [finetune] ABLATION: qaclip={model.config.ablation_use_qaclip} | "
           f"vs={model.config.ablation_use_vs} | ocr={model.config.ablation_use_ocr} | "
           f"ocr_aug={model.config.ablation_use_ocr_aug}")
+    print(f">>> [finetune] visual_search (ConvNeXt) "
+          f"{'CÓ dựng' if hasattr(model, 'visual_search') else 'ĐÃ GỠ (AVF tắt)'} | "
+          f"tổng tham số {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
     model.to(DEVICE)
     
     if hasattr(model, "visual_search") and hasattr(model.visual_search, "vit_processor"):
