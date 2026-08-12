@@ -785,20 +785,19 @@ class OpenViVQAModel(PreTrainedModel):
             crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
             crop_mask = vs_out.get("crop_mask", torch.zeros(B, 0, device=device, dtype=torch.long))
         else:
-            # Baseline (Global View): Ép box bao trọn toàn bộ ảnh
-            W_img = float(self.visual_search.image_size.item())
-            global_box = torch.tensor([[0.0, 0.0, W_img, W_img]], device=device, dtype=self.target_dtype)
-            global_boxes = global_box.expand(B, 4)
-            
-            # ConvNeXt vẫn hoạt động trên toàn cảnh bức ảnh.
-            # pil_images để nhánh OFF lấy điểm ảnh y hệt cách nhánh ON lấy (từ ảnh gốc);
-            # nếu chỉ ON đọc ảnh gốc thì chênh lệch ON/OFF sẽ lẫn cả độ nét, làm hỏng ablation.
-            dummy_crop_tokens, _ = self.visual_search._extract_roi_features(
-                pixel_values_dev, global_boxes, pil_images=pil_images)
-            
+            # TAT AVF = BO HAN MODULE: khong crop theo attention, va ConvNeXt KHONG chay.
+            # Truoc day nhanh nay van cho ConvNeXt chay tren toan anh, tuc la THAY THE
+            # module chu khong bo — nen "tat AVF" van them 49 token thi giac tu mot
+            # backbone thu hai, va phep so sanh ON/OFF do luong nham (ON con MAT goc nhin
+            # toan cuc so voi OFF). Gio OFF khong dong gop token nao, dung nhu QA-ViT OFF
+            # cho text_emb rong.
+            #
+            # attn_summary VAN GIU: no la trung binh cong cua chinh img_tokens (CLIP),
+            # khong lien quan crop hay ConvNeXt, va giong het nhau o ca hai nhanh — nen no
+            # thuoc kien truc nen, khong thuoc AVF.
             vs_out = {}
-            crop_tokens = dummy_crop_tokens.to(self.target_dtype)
-            crop_mask = torch.ones(B, dummy_crop_tokens.size(1), device=device, dtype=torch.long)
+            crop_tokens = torch.zeros(B, 0, D, device=device, dtype=self.target_dtype)
+            crop_mask = torch.zeros(B, 0, device=device, dtype=torch.long)
             attn_summary = img_pack["img_tokens"].mean(dim=1, keepdim=True)
 
         # ----------------------------------------------------

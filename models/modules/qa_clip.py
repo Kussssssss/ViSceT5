@@ -131,8 +131,18 @@ class MMCLIPAttention(CLIPAttention):
             vis_masks_f = vis_masks[:, :, None].to(attn_output.dtype)
             attn_output = attn_output * vis_masks_f
 
-        gate_val = self.instruction_proj_gate.tanh()
-        attn_output = self.out_proj(attn_output) + (self.instruction_out_proj(attn_output) * gate_val)
+        # mm_len == 0 nghĩa là KHÔNG có câu hỏi nào được nhúng vào (ablation tắt QA-ViT).
+        # Khi đó phải trả về đúng một CLIPAttention chuẩn. Trước đây nhánh instruction vẫn
+        # được cộng vào: `instruction_out_proj(attn) * tanh(β)`. Ở bước 0 thì β=0 nên số
+        # học ra bằng nhau, NHƯNG β vẫn nhận gradient (đo được |grad|=6.76 ở cấu hình
+        # baseline), nên từ bước 1 trở đi baseline có thêm một nhánh residual học được —
+        # tức "tắt QA-ViT" vẫn để lại một phần của QA-ViT. Không có text thì bỏ hẳn nhánh
+        # này, khi đó lớp MM trùng khít lớp CLIP gốc.
+        if mm_len > 0:
+            gate_val = self.instruction_proj_gate.tanh()
+            attn_output = self.out_proj(attn_output) + (self.instruction_out_proj(attn_output) * gate_val)
+        else:
+            attn_output = self.out_proj(attn_output)
 
         return attn_output, attn_weights_reshaped
 
