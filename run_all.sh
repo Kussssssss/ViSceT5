@@ -112,14 +112,30 @@ echo "────────────────────────�
 if [ "${SKIP_SANITY:-0}" != "1" ] && [ "$STAGE" != "predict" ]; then
   echo "🔎 Kiểm tra khởi tạo model..."
   python3 - <<'PY' || { echo "🛑 DỪNG: model có tham số non-finite ngay khi khởi tạo."; exit 1; }
-import sys, warnings; warnings.filterwarnings("ignore")
+import os, sys, warnings; warnings.filterwarnings("ignore")
 import torch
 from configs.model_config import OpenViVQAConfig
 from models.openvivqa_model import OpenViVQAModel
+
+def _flag(name, default=True):
+    v = os.environ.get(name, "").strip().lower()
+    if not v: return default
+    return v in ("1", "true", "yes", "on")
+
 torch.manual_seed(42)
 c = OpenViVQAConfig(); c.pretrain = False
+# Dựng ĐÚNG cấu hình sắp train (không phải mặc định): ablation_use_vs quyết định
+# visual_search có tồn tại hay không, nên số tham số in ra dưới đây mới là số thật.
+c.ablation_use_qaclip = _flag("ABLATION_USE_QACLIP")
+c.ablation_use_vs     = _flag("ABLATION_USE_VS")
+c.ablation_use_ocr    = _flag("ABLATION_USE_OCR")
+c.ablation_use_ocr_aug= _flag("ABLATION_USE_OCR_AUG")
 m = OpenViVQAModel(c)
 bad = [n for n, p in m.named_parameters() if not torch.isfinite(p).all()]
+print(f"   modules: qaclip={c.ablation_use_qaclip} vs={c.ablation_use_vs} "
+      f"ocr={c.ablation_use_ocr} ocr_aug={c.ablation_use_ocr_aug}")
+print(f"   visual_search: {'CÓ' if hasattr(m, 'visual_search') else 'ĐÃ GỠ'} | "
+      f"tổng tham số = {sum(p.numel() for p in m.parameters())/1e6:.2f}M")
 print(f"   non-finite params = {len(bad)}")
 if bad:
     print("   vd:", bad[:3]); sys.exit(1)

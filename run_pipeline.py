@@ -206,6 +206,14 @@ def run():
                         sys.argv.extend([_aflag, _av])
                         print(f">>> [finetune] {_aflag} = {_av}")
 
+                # OUTPUT_DIR: mỗi cấu hình ablation cần thư mục RIÊNG, nếu không lần chạy
+                # sau ghi đè checkpoint của lần trước (yaml cố định ./output/finetune) và
+                # resume sẽ nối nhầm vào run khác.
+                _od = os.environ.get("OUTPUT_DIR", "").strip()
+                if _od:
+                    sys.argv.extend(["--output_dir", _od])
+                    print(f">>> [finetune] --output_dir = {_od}")
+
                 # Nạp trọng số PRETRAIN để finetune (warm-start):
                 #  PRETRAIN_HF_REPO   = HF repo id chứa checkpoint pretrain (vd
                 #                       'Kus669/ViSceT5-pretrain-genall'); tự tải về.
@@ -274,7 +282,9 @@ def run():
                 elif stage == "predict":
                     output_dir = "./output"   # gồm submission_*.csv để tải về
                 else:
-                    output_dir = "./output/finetune"
+                    # phải khớp OUTPUT_DIR đã truyền cho Trainer, nếu không sẽ upload
+                    # nhầm thư mục rỗng khi chạy ablation nhiều cấu hình.
+                    output_dir = os.environ.get("OUTPUT_DIR", "").strip() or "./output/finetune"
                 os.makedirs(output_dir, exist_ok=True)
                 # Ghi thông tin meta chạy để thư mục không bao giờ rỗng khi upload test
                 with open(os.path.join(output_dir, "run_info.json"), "w", encoding="utf-8") as f:
