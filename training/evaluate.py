@@ -87,10 +87,13 @@ def main():
     ip_reload = CLIPImageProcessor.from_pretrained(os.path.join(BEST_DIR, "image_processor"))
 
     best_model.image_processor = ip_reload
-    if hasattr(best_model.visual_search, "vit_processor"):
-        best_model.visual_search.vit_processor = ip_reload
-    elif hasattr(best_model.visual_search, "processor"):
-        best_model.visual_search.processor = ip_reload
+    # visual_search bị gỡ hẳn khi ablation tắt AVF → phải kiểm tra trước khi chạm vào.
+    _vs = getattr(best_model, "visual_search", None)
+    if _vs is not None:
+        if hasattr(_vs, "vit_processor"):
+            _vs.vit_processor = ip_reload
+        elif hasattr(_vs, "processor"):
+            _vs.processor = ip_reload
 
     best_model.pretrain = False
 
