@@ -429,8 +429,10 @@ def main():
     if os.path.isdir(ip_dir):
         ip = CLIPImageProcessor.from_pretrained(ip_dir)
         model.image_processor = ip
-        if hasattr(model.visual_search, "vit_processor"):
-            model.visual_search.vit_processor = ip
+        # visual_search bị gỡ hẳn khi ablation tắt AVF → phải kiểm tra trước khi chạm vào.
+        _vs = getattr(model, "visual_search", None)
+        if _vs is not None and hasattr(_vs, "vit_processor"):
+            _vs.vit_processor = ip
     # else: dùng model.image_processor đã dựng trong __init__ (mặc định CLIP)
 
     mnt = int(getattr(model.config, "generation_max_new_tokens", 56))

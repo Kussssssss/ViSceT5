@@ -153,6 +153,11 @@ class OpenViVQAModel(PreTrainedModel):
             local_files_only=False,
         )
         self.visual_search.vit_processor = self.image_processor
+        # Tắt AVF = bỏ hẳn module → 27.87M tham số (chủ yếu ConvNeXt) không còn dùng tới.
+        # Vẫn dựng ở trên để tiêu RNG đúng thứ tự (nó đứng TRƯỚC mọi module khác), rồi mới
+        # gỡ đi: tiết kiệm ~111MB VRAM và một lượt .to(device), state_dict cũng sạch.
+        if not bool(getattr(self.config, "ablation_use_vs", True)):
+            del self.visual_search
 
         # Khởi tạo OCR Consformer (Bản Full)
         self.seq_max_ocr = int(getattr(config, "ocr_max_scene_text", 180))
@@ -176,11 +181,15 @@ class OpenViVQAModel(PreTrainedModel):
         )
         self.ocr_encoder.set_word_embed_proxy(lambda ids: self.vit5.get_input_embeddings()(ids))
         self.semantic_ocr_embedding = SemanticOCREmbedding(ns)
-        # Module "chết" trong forward, NHƯNG được khởi tạo ở ĐÚNG vị trí này để giữ
-        # thứ tự rút RNG global y hệt notebook gốc — nhờ đó finetune-from-scratch nạp
-        # cùng seed sẽ khởi tạo MỌI submodule phía sau (char_*/ocr_lite/pollute_head/
-        # init_qavit_comps) với trọng số GIỐNG notebook. KHÔNG được xoá.
-        self.spatial_embedding = SpatialCirclePosition(ns)
+        # SpatialCirclePosition KHÔNG được gọi trên bất kỳ đường forward nào (đã kiểm bằng
+        # forward hook: 0 lần ở cả 6 cấu hình ablation) → 2.36M tham số chết, nằm trong
+        # state_dict và chiếm state của optimizer.
+        # Vẫn PHẢI khởi tạo nó ở ĐÚNG vị trí này vì nó rút RNG global; bỏ hẳn lời gọi sẽ
+        # làm lệch trọng số khởi tạo của MỌI module dựng sau (char_*/ocr_lite/pollute_head/
+        # init_qavit_comps) so với notebook. Nên: vẫn dựng để tiêu RNG, nhưng KHÔNG gán vào
+        # self → không vào state_dict, không vào optimizer.
+        _rng_only_spatial = SpatialCirclePosition(ns)
+        del _rng_only_spatial
 
         self.char_max_num = int(getattr(config, "char_max_num", 50))
         self.char_num = int(getattr(config, "char_num"))
@@ -191,13 +200,16 @@ class OpenViVQAModel(PreTrainedModel):
         # Mạng Baseline cho OCR (Bản Lite - Dùng khi tắt OCR Module)
         self.ocr_lite_text_ln = T5LayerNorm(self.d_model, eps=1e-12)
         self.ocr_lite_text_proj = nn.Linear(self.d_model, self.d_model)
-        self.ocr_lite_text_ff = nn.Sequential(
+        # Hai MLP _ff đã ngưng dùng từ 780c6f7 (baseline OCR chỉ còn Linear để đối xứng với
+        # hai nhánh OFF còn lại) → 2.36M tham số chết. Cũng dựng-rồi-bỏ để giữ RNG.
+        _rng_only_text_ff = nn.Sequential(
             nn.Linear(self.d_model, self.d_model), nn.GELU(), nn.Linear(self.d_model, self.d_model),
         )
         self.ocr_lite_box_proj = nn.Linear(4, self.d_model)
-        self.ocr_lite_box_ff = nn.Sequential(
+        _rng_only_box_ff = nn.Sequential(
             nn.Linear(self.d_model, self.d_model), nn.GELU(), nn.Linear(self.d_model, self.d_model),
         )
+        del _rng_only_text_ff, _rng_only_box_ff
         with torch.no_grad():
             self.ocr_lite_text_proj.weight.copy_(torch.eye(self.d_model))
             self.ocr_lite_text_proj.bias.zero_()
@@ -292,10 +304,16 @@ class OpenViVQAModel(PreTrainedModel):
 
     # --- ENCODE IMAGE & TÍNH ATTENTION ---
     def _encode_image(
-        self, pixel_values: torch.Tensor, device: torch.device, 
-        txt_emb: Optional[torch.Tensor] = None, txt_mask: Optional[torch.Tensor] = None, 
-        fuse_with_text: bool = True, return_attn: bool = False
+        self, pixel_values: torch.Tensor, device: torch.device,
+        txt_emb: Optional[torch.Tensor] = None, txt_mask: Optional[torch.Tensor] = None,
+        fuse_with_text: bool = True, return_attn: bool = False,
+        need_attn_map: bool = True,
     ):
+        # need_attn_map=False khi AVF tắt: patch_scores chỉ phục vụ việc chọn vùng crop.
+        # Xin output_attentions buộc HF bỏ CLIPSdpaAttention để quay về attention thủ công
+        # (nó tự cảnh báo điều này), tức là trả giá tốc độ + bộ nhớ cho một tensor
+        # (B, 12, 197, 229) không ai dùng.
+        want_attn = bool(need_attn_map or return_attn)
         B = pixel_values.size(0)
 
         if fuse_with_text and txt_emb is not None:
@@ -331,10 +349,10 @@ class OpenViVQAModel(PreTrainedModel):
                       and not bool(getattr(self, "_vision_trainable", False)))
         if _frozen_pt:
             with torch.no_grad():
-                qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
+                qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=want_attn, return_dict=True)
             img_hs = torch.nan_to_num(qa_out.last_hidden_state, nan=0.0, posinf=1e4, neginf=-1e4)
         else:
-            qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=True, return_dict=True)
+            qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=want_attn, return_dict=True)
             img_hs = qa_out.last_hidden_state
             if getattr(self, "_pretrain_stage", False) or bool(getattr(self.config, "clamp_vision", False)):
                 # UNFROZEN pretrain: QA-CLIP's RANDOM-INIT instruction adapters can overflow
@@ -768,6 +786,7 @@ class OpenViVQAModel(PreTrainedModel):
             txt_mask=txt_attn_mask_for_clip,
             fuse_with_text=use_qaclip,  # Tắt True/False ở đây
             return_attn=return_visual_search_debug,
+            need_attn_map=use_vs,       # chỉ AVF cần patch_scores
         )
 
         # ----------------------------------------------------
