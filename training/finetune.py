@@ -410,6 +410,45 @@ def main(args_list=None):
         except Exception as _e:
             print(f"ℹ️ [HF] không bật được auto-push callback ({_e}); vẫn có upload cuối ở run_pipeline.")
 
+    # ── DỪNG SẠCH theo số epoch / thời gian (cho Kaggle 12h) ──
+    # num_train_epochs LUÔN = TỔNG (vd 5) để horizon cosine không đổi. Callback này chỉ
+    # dừng SỚM session hiện tại ở ĐÚNG ranh giới epoch (sau khi eval+save đã chạy), rồi
+    # session sau resume và đi tiếp tới tổng đó — KHÔNG để Kaggle kill giữa chừng.
+    #   STOP_AT_EPOCH=k  → dừng khi vừa hoàn tất epoch thứ k (tuyệt đối; tăng dần 2→4→5).
+    #   MAX_TRAIN_HOURS=h→ guard thời gian: quá h giờ thì eval+save+dừng (một eval phụ).
+    _stop_ep = os.environ.get("STOP_AT_EPOCH", "").strip()
+    _max_hr = os.environ.get("MAX_TRAIN_HOURS", "").strip()
+    if _stop_ep or _max_hr:
+        import time as _time
+        from transformers.trainer_callback import TrainerCallback as _TCB
+        class _EpochBudgetStop(_TCB):
+            def __init__(self, stop_at, max_sec):
+                self.stop_at = int(stop_at) if stop_at else None
+                self.max_sec = float(max_sec) * 3600 if max_sec else None
+                self.t0 = _time.time()
+            def on_epoch_end(self, args, state, control, **kw):
+                ep = int(round(state.epoch or 0))
+                if self.stop_at is not None and ep >= self.stop_at:
+                    # save_strategy="epoch" đã bật should_save ở ranh giới này; ép thêm cho
+                    # chắc, rồi dừng. Checkpoint được lưu + push TRƯỚC khi vòng lặp thoát.
+                    control.should_save = True
+                    control.should_training_stop = True
+                    print(f"⏹️ [chunk] hoàn tất epoch {ep} ≥ STOP_AT_EPOCH={self.stop_at} "
+                          f"→ lưu checkpoint và DỪNG session (resume tiếp ở session sau).")
+                return control
+            def on_step_end(self, args, state, control, **kw):
+                if self.max_sec is not None and (_time.time() - self.t0) > self.max_sec:
+                    # Ép eval để khớp load_best_model_at_end, rồi save + dừng giữa epoch.
+                    control.should_evaluate = True
+                    control.should_save = True
+                    control.should_training_stop = True
+                    print(f"⏰ [chunk] quá MAX_TRAIN_HOURS → eval+save+DỪNG ở step {state.global_step}.")
+                return control
+        trainer.add_callback(_EpochBudgetStop(_stop_ep, _max_hr))
+        print(f"⏹️ [chunk] dừng sớm: STOP_AT_EPOCH={_stop_ep or '(none)'} "
+              f"MAX_TRAIN_HOURS={_max_hr or '(none)'} | tổng epoch giữ nguyên "
+              f"{training_args.num_train_epochs}")
+
     # ── Auto-resume TỪ HF repo (chống mất tiến độ khi Colab ngắt) ──
     # Nếu đã set HF_TOKEN+HF_REPO và repo đã có checkpoint-* ĐẦY ĐỦ (từ lần chạy trước)
     # mà chưa có resume tường minh → TỰ tải các checkpoint về output_dir rồi resume từ
