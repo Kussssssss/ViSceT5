@@ -268,7 +268,8 @@ def run_split(model, tokenizer, collator, df, split, out_csv,
         batch = collator(samples)
         bd = {k: _to_dev(v) for k, v in batch.items() if k not in skip_keys}
 
-        gen_out = model.generate(
+        base_model = model.module if hasattr(model, "module") else model
+        gen_out = base_model.generate(
             input_ids=bd.get("input_ids"),
             attention_mask=bd.get("attention_mask"),
             pixel_values=bd.get("pixel_values"),

@@ -343,7 +343,8 @@ def visualize_samples(model, dataset, collator, tokenizer, device: str = "cuda",
             forward_kwargs["attention_mask"] = batch_dev.get("attention_mask")
 
             # Sinh câu trả lời
-            gen_out = model.generate(
+            base_model = model.module if hasattr(model, "module") else model
+            gen_out = base_model.generate(
                 input_ids=forward_kwargs["input_ids"],
                 attention_mask=forward_kwargs["attention_mask"],
                 pixel_values=forward_kwargs["pixel_values"],

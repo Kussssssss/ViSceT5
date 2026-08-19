@@ -985,6 +985,84 @@ def main(args_list=None):
             pretrain_loss_fn, pretrain_acc_fn, DEVICE, use_twc,
         )
 
+    # ── Upload TỪNG checkpoint NGAY khi lưu ──
+    _hf_tok = os.environ.get("HF_TOKEN", "").strip()
+    _hf_repo = os.environ.get("HF_REPO", "").strip()
+    if _hf_tok and _hf_repo:
+        from transformers.trainer_callback import TrainerCallback
+        from huggingface_hub import HfApi
+        class _PushEachCheckpoint(TrainerCallback):
+            def __init__(self, repo, token, out_dir):
+                self.api = HfApi(token=token); self.repo = repo; self.out = out_dir
+                self.api.create_repo(repo_id=repo, repo_type="model", exist_ok=True)
+            def on_save(self, args, state, control, **kw):
+                ck = os.path.join(self.out, f"checkpoint-{state.global_step}")
+                if not os.path.isdir(ck):
+                    return
+                _model = kw.get("model")
+                if _model is not None:
+                    _bad = [n for n, p in _model.named_parameters() if not torch.isfinite(p).all()]
+                    if _bad:
+                        print(f"🛑 [HF] checkpoint-{state.global_step}: model có {len(_bad)} tensor NaN/inf "
+                              f"(vd {_bad[0]}) → BỎ push (không nhiễm nguồn resume).")
+                        return
+                try:
+                    _light = os.environ.get("HF_PUSH_OPTIM", "1").lower() in ("0", "false", "no", "off")
+                    _ignore = ["optimizer.pt", "rng_state*.pth", "scheduler.pt"] if _light else None
+                    self.api.upload_folder(folder_path=ck, path_in_repo=f"checkpoint-{state.global_step}",
+                                           repo_id=self.repo, repo_type="model",
+                                           ignore_patterns=_ignore)
+                    print(f"☁️ [HF] đã push checkpoint-{state.global_step} "
+                          f"({'weights-only' if _light else 'ĐẦY ĐỦ/resume-được'}) → {self.repo}")
+                except Exception as e:
+                    print(f"⚠️ [HF] push checkpoint-{state.global_step} lỗi: {e}")
+        try:
+            trainer.add_callback(_PushEachCheckpoint(_hf_repo, _hf_tok, training_args.output_dir))
+            print(f"☁️ [HF] bật auto-push mỗi checkpoint → {_hf_repo}")
+        except Exception as _e:
+            print(f"ℹ️ [HF] không bật được auto-push callback ({_e}); vẫn có upload cuối ở run_pipeline.")
+
+    # ── Auto-resume TỪ HF repo ──
+    if (not training_args.resume_from_checkpoint and _hf_tok and _hf_repo
+            and not training_args.smoke_test
+            and os.environ.get("RESUME_FROM_HF", "auto").lower() not in ("0", "false", "no", "off")):
+        try:
+            from huggingface_hub import list_repo_files, snapshot_download
+            from safetensors.torch import load_file as _load_sft
+            _files = list_repo_files(_hf_repo, token=_hf_tok)
+            _cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
+                          key=lambda x: int(x.split("-")[1]))
+            if _cks:
+                _latest = _cks[-1]
+                _has_optim = f"{_latest}/optimizer.pt" in _files
+                print(f"♻️ [HF-resume] repo có {len(_cks)} checkpoint; mới nhất={_latest} "
+                      f"(optimizer.pt: {'CÓ' if _has_optim else 'THIẾU'}).")
+                if _has_optim:
+                    print(f"♻️ [HF-resume] tải checkpoint-* về {training_args.output_dir} ...")
+                    snapshot_download(_hf_repo, repo_type="model", token=_hf_tok,
+                                      local_dir=training_args.output_dir,
+                                      allow_patterns=["checkpoint-*/**"])
+                    _resume_dir = os.path.join(training_args.output_dir, _latest)
+                    _mp = os.path.join(_resume_dir, "model.safetensors")
+                    _corrupt = False
+                    if os.path.isfile(_mp):
+                        try:
+                            _corrupt = any((not torch.isfinite(v).all())
+                                           for v in _load_sft(_mp).values())
+                        except Exception:
+                            _corrupt = False
+                    if not os.path.isfile(os.path.join(_resume_dir, "optimizer.pt")):
+                        pass
+                    elif _corrupt:
+                        print(f"🛑 [HF-resume] checkpoint {_latest} chứa trọng số NaN/inf → BỎ resume.")
+                    else:
+                        training_args.resume_from_checkpoint = _resume_dir
+                        print(f"♻️ [HF-resume] RESUME từ {_resume_dir}")
+                else:
+                    print("⚠️ [HF-resume] checkpoint là weights-only (push cũ) → KHÔNG resume đúng được.")
+        except Exception as _e:
+            print(f"⚠️ [HF-resume] bỏ qua ({type(_e).__name__}: {_e}); train bình thường.")
+
     print(">>> Starting Pretrain...")
     if training_args.resume_from_checkpoint:
         from training.metrics import seed_train_metrics_from_checkpoint

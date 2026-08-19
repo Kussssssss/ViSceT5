@@ -32,9 +32,8 @@ export VISCET5_PROGRESS_ONLY=1
 echo "▶ [Colab] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST | progress-bar only"
 
 # ---- environment bootstrap ----
-# GIT_BRANCH: nhánh cần chạy (mặc định 'main'). Ví dụ finetune bản đang thử nghiệm:
-#   !GIT_BRANCH=exp/pretrain-gen-all STAGE=finetune ... bash run_all_colab.sh finetune
-GIT_BRANCH="${GIT_BRANCH:-main}"
+# GIT_BRANCH: nhánh cần chạy (mặc định 'exp/pretrain-gen-all').
+GIT_BRANCH="${GIT_BRANCH:-exp/pretrain-gen-all}"
 cd /content
 
 if [ -d "/content/ViSceT5" ]; then
