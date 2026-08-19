@@ -804,20 +804,15 @@ class OpenViVQAModel(PreTrainedModel):
             crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
             crop_mask = vs_out.get("crop_mask", torch.zeros(B, 0, device=device, dtype=torch.long))
         else:
-            # TAT AVF = BO HAN MODULE: khong crop theo attention, va ConvNeXt KHONG chay.
-            # Truoc day nhanh nay van cho ConvNeXt chay tren toan anh, tuc la THAY THE
-            # module chu khong bo — nen "tat AVF" van them 49 token thi giac tu mot
-            # backbone thu hai, va phep so sanh ON/OFF do luong nham (ON con MAT goc nhin
-            # toan cuc so voi OFF). Gio OFF khong dong gop token nao, dung nhu QA-ViT OFF
-            # cho text_emb rong.
-            #
-            # attn_summary VAN GIU: no la trung binh cong cua chinh img_tokens (CLIP),
-            # khong lien quan crop hay ConvNeXt, va giong het nhau o ca hai nhanh — nen no
-            # thuoc kien truc nen, khong thuoc AVF.
+            # TAT AVF = BO HAN MODULE: khong crop, ConvNeXt KHONG chay, va KHONG them token
+            # nao — ke ca attn_summary. attn_summary (mean-pool cua img_tokens) do chinh
+            # module VisualSearch sinh ra (companion cua crop); no chi la trung binh cua 196
+            # patch CLIP von da co mat, nen khi AVF off thi bo luon de baseline dung bang
+            # [text, image, OCR], nhat quan voi "tat module = bo han". Nhanh ON van giu no.
             vs_out = {}
             crop_tokens = torch.zeros(B, 0, D, device=device, dtype=self.target_dtype)
             crop_mask = torch.zeros(B, 0, device=device, dtype=torch.long)
-            attn_summary = img_pack["img_tokens"].mean(dim=1, keepdim=True)
+            attn_summary = torch.zeros(B, 0, D, device=device, dtype=self.target_dtype)
 
         # ----------------------------------------------------
         # 3. ABLATION MODULE: OCR CONSFORMER
