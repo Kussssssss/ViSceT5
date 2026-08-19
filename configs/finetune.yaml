@@ -31,6 +31,10 @@ eval_strategy: "epoch"
 save_strategy: "epoch"
 save_total_limit: 4
 
+# metric_for_best_model / greater_is_better được ĐẶT TỰ ĐỘNG theo dataset trong
+# training/finetune.py: ViTextVQA & ViOCRVQA → "em"; OpenViVQA → "cider" (cần java);
+# cả hai greater_is_better=true. Hai dòng dưới chỉ là mặc định dự phòng, sẽ bị ghi đè.
+# Ghi đè thủ công bằng env METRIC_FOR_BEST_MODEL nếu cần.
 metric_for_best_model: "loss"
 greater_is_better: false
 load_best_model_at_end: true

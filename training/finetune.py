@@ -353,6 +353,36 @@ def main(args_list=None):
         
     compute_metrics_fn = build_compute_metrics_finetune(tokenizer)
 
+    # ── CHỌN CHECKPOINT TỐT NHẤT theo metric ĐÚNG VỚI TỪNG DATASET ──
+    # ViTextVQA/ViOCRVQA: đáp án là scene-text ngắn → EM là thước đo mục tiêu.
+    # OpenViVQA: đáp án tự do, EM rất thấp và không phản ánh chất lượng → dùng CIDEr.
+    # Cả EM và CIDEr đều "càng cao càng tốt" (greater_is_better=True), khác với loss cũ.
+    # LƯU Ý: CIDEr chỉ được compute_metrics trả về khi có 'java' (PTBTokenizer). Nếu
+    # OpenViVQA mà thiếu java → 'eval_cider' vắng → load_best_model_at_end sẽ lỗi; khi đó
+    # tự lùi về 'loss' và cảnh báo. Env METRIC_FOR_BEST_MODEL ghi đè nếu cần.
+    import shutil as _shutil
+    _ds_l = str(data_args.dataset_name).strip().lower()
+    _java_ok = _shutil.which("java") is not None
+    _env_metric = os.environ.get("METRIC_FOR_BEST_MODEL", "").strip().lower()
+    if _env_metric:
+        training_args.metric_for_best_model = _env_metric
+        training_args.greater_is_better = _env_metric not in ("loss", "eval_loss")
+    elif _ds_l == "openvivqa":
+        if _java_ok:
+            training_args.metric_for_best_model = "cider"
+            training_args.greater_is_better = True
+        else:
+            training_args.metric_for_best_model = "loss"
+            training_args.greater_is_better = False
+            print("⚠️ [best-metric] OpenViVQA cần CIDEr nhưng KHÔNG thấy 'java' → "
+                  "tạm chọn best theo 'loss'. Cài java (openjdk) để dùng đúng CIDEr.")
+    else:  # ViTextVQA, ViOCRVQA và mặc định
+        training_args.metric_for_best_model = "em"
+        training_args.greater_is_better = True
+    print(f">>> [best-metric] dataset={data_args.dataset_name} → "
+          f"metric_for_best_model='{training_args.metric_for_best_model}' "
+          f"greater_is_better={training_args.greater_is_better} (java={'có' if _java_ok else 'không'})")
+
     # 6. Trainer
     trainer = TaskSpecificTrainer(
         model=model,
