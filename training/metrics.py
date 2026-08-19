@@ -293,6 +293,16 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         self._running_cnt = 0
         self._last_log_step = -1
 
+    def _unwrap(self, model):
+        if hasattr(self, "_unwrap_model"):
+            try:
+                return self._unwrap_model(model)
+            except Exception:
+                pass
+        while hasattr(model, "module"):
+            model = model.module
+        return model
+
     def create_optimizer(self):
         """Differential LR (TWA-style): scale the LR of the unfrozen QA-CLIP vision
         params by env VISION_LR_SCALE (e.g. 0.1) so pretrained CLIP features aren't
@@ -326,9 +336,10 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         return self.optimizer
 
     def training_step(self, model, inputs):
+        base_model = self._unwrap(model)
         # Detect weights that are ALREADY corrupted (means a previous step slipped
         # a bad update through — should not happen once the guard below works).
-        corrupted = [n for n, p in model.named_parameters()
+        corrupted = [n for n, p in base_model.named_parameters()
                      if not torch.isfinite(p).all()]
         if corrupted:
             print(f"🚨 [Trainer Check] step {self.state.global_step}: NaN/inf WEIGHTS already in {corrupted[:10]} "
@@ -348,7 +359,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         bad = {}
         _n_nan = _n_inf = 0          # PHÂN BIỆT NaN vs inf: hai loại cần hai cách truy khác
         _first = None                # nhau (NaN → ANOMALY=1 chỉ đúng op; inf → tràn số học)
-        for name, p in model.named_parameters():
+        for name, p in base_model.named_parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
                 _g = p.grad.detach()
                 _cn = int(torch.isnan(_g).sum()); _ci = int(torch.isinf(_g).sum())
@@ -371,7 +382,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         if os.environ.get("GRAD_DIAG", "").strip() in ("1", "true", "True"):
             _per = {}
             _tot = 0.0
-            for _n, _p in model.named_parameters():
+            for _n, _p in base_model.named_parameters():
                 if _p.grad is None:
                     continue
                 _s = float(_p.grad.detach().double().pow(2).sum())
@@ -390,9 +401,9 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         # always ran — and (b) any stage whose weights were TRAINED under this rule
         # (config.clamp_vision, i.e. finetune-from-v4 warm starts): the guard travels
         # with the weights. Scratch finetune (no flag) is untouched.
-        if getattr(model, "pretrain", False) or bool(
-                getattr(getattr(model, "config", None), "clamp_vision", False)):
-            _vparams = [p for n, p in model.named_parameters()
+        if getattr(base_model, "pretrain", False) or bool(
+                getattr(getattr(base_model, "config", None), "clamp_vision", False)):
+            _vparams = [p for n, p in base_model.named_parameters()
                         if p.grad is not None and "qa_clip" in n]
             if _vparams:
                 torch.nn.utils.clip_grad_norm_(_vparams, max_norm=1.0)
@@ -491,12 +502,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         """
         if inputs.get("gen_labels") is None or inputs.get("gen_input_ids") is None:
             return None, None
-        base = model
-        for _ in range(4):
-            if hasattr(base, "module"):
-                base = base.module
-            else:
-                break
+        base = self._unwrap(model)
         orig = getattr(base, "pretrain", False)
         base.pretrain = False
         try:
@@ -561,8 +567,9 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             inputs["tag_pollute"] = inputs["tag_pollute"].squeeze(-1)
 
         outputs = model(**inputs)
+        base = self._unwrap(model)
 
-        if getattr(model, "pretrain", False):
+        if getattr(base, "pretrain", False):
             loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
             acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
             gen_loss, gen_stats = self._pretrain_gen_loss(model, inputs)
@@ -608,8 +615,10 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             if "tag_pollute" in inputs and isinstance(inputs["tag_pollute"], torch.Tensor) and inputs["tag_pollute"].ndim > 1:
                 inputs["tag_pollute"] = inputs["tag_pollute"].squeeze(-1)
 
+            base = self._unwrap(model)
+
             # 1) PRETRAIN BRANCH
-            if getattr(model, "pretrain", False):
+            if getattr(base, "pretrain", False):
                 loss_fn = self.pretrain_loss_fn if self.pretrain_loss_fn is not None else pretrain_loss_fn
                 acc_fn = self.pretrain_acc_fn if self.pretrain_acc_fn is not None else pretrain_acc_fn
                 outputs = model(**inputs)
@@ -653,7 +662,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                         ignore_index=-100
                     )
                 else:
-                    loss = torch.tensor(0.0, device=next(model.parameters()).device)
+                    loss = torch.tensor(0.0, device=next(base.parameters()).device)
 
             if prediction_loss_only and not self.args.predict_with_generate:
                 return (loss.detach(), None, None)
@@ -686,7 +695,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             }
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
 
-            generated_tokens = model.generate(**gen_kwargs)
+            generated_tokens = base.generate(**gen_kwargs)
 
             if generated_tokens.shape[-1] < self.args.generation_max_length:
                 pad_len = self.args.generation_max_length - generated_tokens.shape[-1]
@@ -703,7 +712,14 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
 
 def get_model_fingerprint(model) -> Dict[str, float]:
     fps: Dict[str, float] = {}
-
+    
+    # Helper inside get_model_fingerprint for unwrap
+    def _unwrap(m):
+        while hasattr(m, "module"):
+            m = m.module
+        return m
+        
+    model = _unwrap(model)
     total = 0.0
     for p in model.parameters():
         total += p.detach().float().cpu().sum().item()
