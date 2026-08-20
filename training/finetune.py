@@ -83,7 +83,27 @@ def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     else:
         return parser.parse_args_into_dataclasses(args=args)
 
+def _patch_torch_load_weights_only():
+    """PyTorch >= 2.6 đổi mặc định torch.load(weights_only=True). Transformers 4.45 gọi
+    torch.load(rng_file/optimizer.pt/scheduler.pt) KHÔNG truyền weights_only, nên resume
+    trên torch 2.6 (Kaggle) nổ ở rng_state.pth (chứa RNG numpy):
+      UnpicklingError: Unsupported global: numpy._core.multiarray._reconstruct
+    Checkpoint là do CHÍNH ta tạo (tin cậy) → khôi phục hành vi cũ weights_only=False.
+    Dùng setdefault để lời gọi nào chủ động đặt weights_only vẫn được tôn trọng."""
+    import torch as _torch
+    if getattr(_torch.load, "_vsce_patched", False):
+        return
+    _orig = _torch.load
+    def _load(*a, **k):
+        k.setdefault("weights_only", False)
+        return _orig(*a, **k)
+    _load._vsce_patched = True
+    _torch.load = _load
+    print("🩹 [compat] torch.load → weights_only=False (resume trên PyTorch ≥2.6).")
+
+
 def main(args_list=None):
+    _patch_torch_load_weights_only()
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "finetune.yaml"))
     model_args, data_args, training_args = parse_args_with_yaml_and_cli(parser, args_list, default_yaml)
