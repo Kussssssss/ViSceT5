@@ -181,6 +181,17 @@ def run():
                     sys.argv.extend(["--num_train_epochs", _fep])
                     print(f">>> [finetune] num_train_epochs = {_fep}")
 
+                # PER_DEVICE_EVAL_BATCH_SIZE: chỉnh batch EVAL để tránh OOM (vd T4 16GB với
+                # beam search). AN TOÀN đổi giữa các session — eval batch KHÔNG ảnh hưởng số
+                # step/optimizer/scheduler nên không phá resume hay reproducibility.
+                # (KHÔNG expose train batch qua env: nó phải CỐ ĐỊNH để horizon cosine và
+                #  việc skip batch khi resume còn đúng — đổi train batch giữa chừng làm hỏng
+                #  checkpoint resume, xem cảnh báo per_device_train_batch_size 4!=8.)
+                _feb = os.environ.get("PER_DEVICE_EVAL_BATCH_SIZE", "").strip()
+                if _feb:
+                    sys.argv.extend(["--per_device_eval_batch_size", _feb])
+                    print(f">>> [finetune] per_device_eval_batch_size = {_feb}")
+
                 # Đổi DATASET để finetune (mặc định ViTextVQA trong finetune.yaml):
                 #  DATASET_NAME = ViTextVQA | ViOCRVQA | OpenViVQA (phải có configs/data/<ten>.yaml)
                 #  DATA_DIR     = thư mục dataset (mặc định ./datasets)
