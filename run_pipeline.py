@@ -192,6 +192,20 @@ def run():
                     sys.argv.extend(["--per_device_eval_batch_size", _feb])
                     print(f">>> [finetune] per_device_eval_batch_size = {_feb}")
 
+                # SAVE_TOTAL_LIMIT: so checkpoint local giu lai. Dia Kaggle ~20GB, moi
+                # checkpoint ~4.5GB (model+optimizer) → giu it de khong day dia khi luu.
+                _stl = os.environ.get("SAVE_TOTAL_LIMIT", "").strip()
+                if _stl:
+                    sys.argv.extend(["--save_total_limit", _stl])
+                    print(f">>> [finetune] save_total_limit = {_stl}")
+
+                # DISABLE_TQDM: tat progress bar de .ipynb khong phinh to (log dai lam
+                # papermill kho luu notebook, nhat la run nhieu gio tren Kaggle).
+                _dtq = os.environ.get("DISABLE_TQDM", "").strip().lower()
+                if _dtq in ("1", "true", "yes", "on"):
+                    sys.argv.extend(["--disable_tqdm", "True"])
+                    print(">>> [finetune] disable_tqdm = True")
+
                 # Đổi DATASET để finetune (mặc định ViTextVQA trong finetune.yaml):
                 #  DATASET_NAME = ViTextVQA | ViOCRVQA | OpenViVQA (phải có configs/data/<ten>.yaml)
                 #  DATA_DIR     = thư mục dataset (mặc định ./datasets)

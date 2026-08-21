@@ -29,7 +29,8 @@ lr_scheduler_type: "cosine"
 logging_steps: 100
 eval_strategy: "epoch"
 save_strategy: "epoch"
-save_total_limit: 4
+save_total_limit: 2   # đĩa Kaggle ~20GB; mỗi checkpoint ~4.5GB. Giữ best+latest.
+                      # override bằng env SAVE_TOTAL_LIMIT nếu cần.
 
 # metric_for_best_model / greater_is_better được ĐẶT TỰ ĐỘNG theo dataset trong
 # training/finetune.py: ViTextVQA & ViOCRVQA → "em"; OpenViVQA → "cider" (cần java);
