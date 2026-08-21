@@ -234,10 +234,20 @@ def run():
                 # OUTPUT_DIR: mỗi cấu hình ablation cần thư mục RIÊNG, nếu không lần chạy
                 # sau ghi đè checkpoint của lần trước (yaml cố định ./output/finetune) và
                 # resume sẽ nối nhầm vào run khác.
+                # MẸO ĐĨA KAGGLE: trỏ OUTPUT_DIR vào /kaggle/temp (đĩa ephemeral rộng ~57GB)
+                # thay vì /kaggle/working (quota ~20GB, dùng chung với repo+datasets). Vì
+                # checkpoint đã push lên HF nên KHÔNG cần Kaggle "Save Version" giữ lại;
+                # để trong temp vừa tiết kiệm quota working vừa tránh No-space khi lưu.
+                # Toàn bộ luồng (Trainer save, tải-resume từ HF, push, upload cuối) đều dùng
+                # cùng output_dir này nên checkpoint được đọc/ghi trọn vẹn trong temp.
                 _od = os.environ.get("OUTPUT_DIR", "").strip()
                 if _od:
                     sys.argv.extend(["--output_dir", _od])
-                    print(f">>> [finetune] --output_dir = {_od}")
+                    # logging_dir đi theo output_dir để log TensorBoard cũng nằm trong temp,
+                    # không chiếm quota working (trừ khi LOGGING_DIR được đặt tường minh).
+                    _ld = os.environ.get("LOGGING_DIR", "").strip() or (_od.rstrip("/") + "/logs")
+                    sys.argv.extend(["--logging_dir", _ld])
+                    print(f">>> [finetune] --output_dir = {_od} | --logging_dir = {_ld}")
 
                 # Nạp trọng số PRETRAIN để finetune (warm-start):
                 #  PRETRAIN_HF_REPO   = HF repo id chứa checkpoint pretrain (vd
