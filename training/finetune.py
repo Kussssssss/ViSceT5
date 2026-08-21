@@ -520,10 +520,14 @@ def main(args_list=None):
                 print(f"♻️ [HF-resume] repo có {len(_cks)} checkpoint; mới nhất={_latest} "
                       f"(optimizer.pt: {'CÓ' if _has_optim else 'THIẾU'}).")
                 if _has_optim:
-                    print(f"♻️ [HF-resume] tải checkpoint-* về {training_args.output_dir} ...")
+                    # CHỈ tải checkpoint MỚI NHẤT, không tải toàn bộ. Repo HF tích luỹ mọi
+                    # epoch (~4.5GB/checkpoint); tải hết vào đĩa Kaggle ~20GB sẽ đầy đĩa
+                    # ngay khi resume và crash lúc lưu (No space left / unexpected pos).
+                    # Resume chỉ cần đúng checkpoint mới nhất.
+                    print(f"♻️ [HF-resume] tải RIÊNG {_latest} về {training_args.output_dir} ...")
                     snapshot_download(_hf_repo, repo_type="model", token=_hf_tok,
                                       local_dir=training_args.output_dir,
-                                      allow_patterns=["checkpoint-*/**"])
+                                      allow_patterns=[f"{_latest}/**"])
                     _resume_dir = os.path.join(training_args.output_dir, _latest)
                     # KIỂM TRA checkpoint có NaN/inf không → KHÔNG resume vào trạng thái hỏng
                     # (nếu không sẽ nạp lại trọng số NaN mãi mãi — death-spiral).
