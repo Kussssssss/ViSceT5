@@ -369,6 +369,18 @@ class QACLIPEncoder(CLIPPreTrainedModel):
                     sa = layer.self_attn
                     if hasattr(sa, "instruction_out_proj") and sa.instruction_out_proj is not None:
                         sa.instruction_out_proj.load_state_dict(sa.out_proj.state_dict())
+                    # ReZero gate mặc định = 0 (paper QA-ViT). Trên bài OCR-chi-phối, gate
+                    # gần như KHÔNG mở trong 5 epoch (đo được: |tanh(β)|≤0.011 mọi layer) →
+                    # nhánh fusion inert → +qaclip ≈ baseline. Env QAVIT_GATE_INIT (>0) ép
+                    # nhánh hoạt động NGAY từ đầu để kiểm xem nó có giá trị hay không.
+                    # Mặc định 0.0 = giữ nguyên hành vi paper.
+                    import os as _os
+                    try:
+                        _g0 = float(_os.environ.get("QAVIT_GATE_INIT", "0") or "0")
+                    except ValueError:
+                        _g0 = 0.0
+                    if _g0 != 0.0 and hasattr(sa, "instruction_proj_gate"):
+                        sa.instruction_proj_gate.fill_(_g0)
 
     def get_input_embeddings(self) -> nn.Module:
         return self.vision_model.embeddings.patch_embedding
