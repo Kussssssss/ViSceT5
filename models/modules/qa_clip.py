@@ -39,112 +39,66 @@ class MMCLIPAttention(CLIPAttention):
         kv_states: torch.Tensor = None,
         kv_masks: torch.Tensor = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        # TRUE RESIDUAL GATING. Thiết kế cũ nối [question; visual] vào MỘT self-attention
+        # rồi `out_proj(attn)` — nhánh out_proj này KHÔNG bị gate mà attn đã trộn value của
+        # question, nên gate=0 KHÔNG đưa về CLIP thuần (đo được: đổi đặc trưng ảnh 7.3% dù
+        # β=0). Trên bài OCR-chi-phối, nhiễu bắt buộc đó làm +qaclip THẤP hơn baseline.
+        #
+        # Sửa: tách hẳn hai đường, toàn bộ ảnh hưởng câu hỏi nằm SAU gate.
+        #   base  = out_proj(SelfAttn(visual, visual))            # ĐÚNG CLIP thuần
+        #   delta = instruction_out_proj(CrossAttn(visual→question))
+        #   out   = base + tanh(β)·delta
+        # β=0 ⇒ out = base = CLIP thuần từng số ⇒ thêm qaclip KHÔNG BAO GIỜ tệ hơn baseline;
+        # model chỉ mở gate ở nơi câu hỏi thật sự giúp.
         if kv_states is None:
             raise ValueError("kv_states required")
+        bsz, vis_len, embed_dim = hidden_states.size()
+        mm_len = int(kv_states.shape[1])
+        H, Dh = self.num_heads, self.head_dim
+        ps = (bsz * H, -1, Dh)
 
-        bsz = hidden_states.size(0)
-        mm_len = kv_states.shape[1]
+        # visual query dùng chung (giữ scaling của CLIP)
+        q = self._shape(self.q_proj(hidden_states) * self.scale, vis_len, bsz).view(*ps)
 
-        hidden_states = torch.cat([kv_states, hidden_states], dim=1)
-        bsz, tgt_len, embed_dim = hidden_states.size()
+        # ---- base: self-attention CHỈ trên visual = đúng một lớp CLIP ----
+        kv = self._shape(self.k_proj(hidden_states), -1, bsz).view(*ps)
+        vv = self._shape(self.v_proj(hidden_states), -1, bsz).view(*ps)
+        base_w = torch.bmm(q.float(), kv.float().transpose(1, 2))
+        base_w = base_w - base_w.amax(dim=-1, keepdim=True)
+        base_w = F.softmax(base_w, dim=-1)
+        base_ctx = torch.bmm(F.dropout(base_w, p=self.dropout, training=self.training), vv.float())
+        base_ctx = base_ctx.to(hidden_states.dtype).view(bsz, H, vis_len, Dh).transpose(1, 2).reshape(bsz, vis_len, embed_dim)
+        base_out = self.out_proj(base_ctx)
 
-        device = hidden_states.device
-        dtype_mask = torch.long
+        if mm_len == 0:
+            # qaclip TẮT → đúng CLIP thuần, không có nhánh câu hỏi.
+            attn_ret = base_w.view(bsz, H, vis_len, vis_len) if output_attentions else None
+            return base_out, attn_ret
 
-        if kv_masks is None:
-            kv_masks = torch.ones(bsz, mm_len, dtype=dtype_mask, device=device)
-        else:
-            if kv_masks.size(1) != mm_len:
-                if kv_masks.size(1) > mm_len:
-                    kv_masks = kv_masks[:, :mm_len]
-                else:
-                    pad = torch.zeros(bsz, mm_len - kv_masks.size(1), dtype=dtype_mask, device=device)
-                    kv_masks = torch.cat([kv_masks.to(dtype_mask), pad], dim=1)
-            else:
-                kv_masks = kv_masks.to(device=device, dtype=dtype_mask)
+        # ---- delta: cross-attention visual → question (hoàn toàn sau gate) ----
+        kq = self._shape(self.k_proj(kv_states), -1, bsz).view(*ps)
+        vq = self._shape(self.v_proj(kv_states), -1, bsz).view(*ps)
+        cross_w = torch.bmm(q.float(), kq.float().transpose(1, 2))   # (B*H, vis, mm)
+        if kv_masks is not None:
+            m = kv_masks.to(device=hidden_states.device)
+            if m.size(1) != mm_len:
+                m = m[:, :mm_len] if m.size(1) > mm_len else torch.cat(
+                    [m, torch.zeros(bsz, mm_len - m.size(1), device=m.device, dtype=m.dtype)], dim=1)
+            km = m.to(torch.bool)[:, None, None, :].expand(bsz, H, vis_len, mm_len).reshape(bsz * H, vis_len, mm_len)
+            # -1e9 (không phải finfo.min) để trừ-max không tràn -inf → không sinh NaN
+            # kể cả khi một hàng bị mask hết (question luôn có ≥1 token thật nên hiếm).
+            cross_w = cross_w.masked_fill(~km, -1e9)
+        cross_w = cross_w - cross_w.amax(dim=-1, keepdim=True)
+        cross_w = F.softmax(cross_w, dim=-1)
+        cross_w = torch.nan_to_num(cross_w, nan=0.0)
+        cross_ctx = torch.bmm(F.dropout(cross_w, p=self.dropout, training=self.training), vq.float())
+        cross_ctx = cross_ctx.to(hidden_states.dtype).view(bsz, H, vis_len, Dh).transpose(1, 2).reshape(bsz, vis_len, embed_dim)
+        delta = self.instruction_out_proj(cross_ctx)
 
-        vis_len = tgt_len - mm_len
-        if attention_mask is None:
-            vis_masks = torch.ones(bsz, vis_len, dtype=dtype_mask, device=device)
-        else:
-            vis_masks = attention_mask.to(device=device, dtype=dtype_mask)
-
-        full_key_mask = torch.cat([kv_masks, vis_masks], dim=1)
-
-        query_states = self.q_proj(hidden_states) * self.scale
-        key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
-        value_states = self._shape(self.v_proj(hidden_states), -1, bsz)
-
-        proj_shape = (bsz * self.num_heads, -1, self.head_dim)
-        query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
-        key_states = key_states.view(*proj_shape)
-        value_states = value_states.view(*proj_shape)
-        src_len = key_states.size(1)
-
-        query_states_f32 = query_states.to(torch.float32)
-        key_states_f32 = key_states.to(torch.float32)
-        attn_weights = torch.bmm(query_states_f32, key_states_f32.transpose(1, 2))
-
-        attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-
-        if full_key_mask is not None:
-            if full_key_mask.size(1) != src_len:
-                 if full_key_mask.size(1) < src_len:
-                     pad = torch.ones(bsz, src_len - full_key_mask.size(1), dtype=dtype_mask, device=device)
-                     full_key_mask = torch.cat([full_key_mask, pad], dim=1)
-                 else:
-                     full_key_mask = full_key_mask[:, :src_len]
-
-            key_padding_mask = full_key_mask[:, None, None, :].to(torch.bool)
-            # NaN ROOT FIX: use a large-but-FINITE negative (not torch.finfo.min).
-            # finfo(float32).min = -3.4e38; softmax's internal (x - x.max()) then does
-            # finfo.min - real_max → OVERFLOWS to -inf, and a fully-masked row gives
-            # 0/0 = NaN — the nondeterministic NaN that forced vision to stay frozen.
-            # -1e9 masks just as hard (exp(-1e9)≈0) but never overflows on subtraction.
-            attn_weights = attn_weights.masked_fill(~key_padding_mask, -1e9)
-
-        attn_weights = attn_weights[:, :, mm_len:, :]
-        q_len = attn_weights.size(2)
-
-        attn_weights = attn_weights.view(bsz * self.num_heads, q_len, src_len)
-        # Stabilize (subtract row-max) + guard any fully-masked row (→ uniform-then-zero)
-        # so softmax can never produce NaN even when a query attends to no valid key.
-        attn_weights = attn_weights - attn_weights.amax(dim=-1, keepdim=True)
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        attn_weights = torch.nan_to_num(attn_weights, nan=0.0)
-
-        if output_attentions:
-            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, q_len, src_len)
-        else:
-            attn_weights_reshaped = None
-
-        attn_probs = F.dropout(attn_weights, p=self.dropout, training=self.training)
-
-        value_states_f32 = value_states.to(torch.float32)
-        attn_output = torch.bmm(attn_probs, value_states_f32)
-        attn_output = attn_output.to(hidden_states.dtype)
-
-        attn_output = attn_output.view(bsz, self.num_heads, q_len, self.head_dim)
-        attn_output = attn_output.transpose(1, 2).reshape(bsz, q_len, embed_dim)
-
-        if attention_mask is not None:
-            vis_masks_f = vis_masks[:, :, None].to(attn_output.dtype)
-            attn_output = attn_output * vis_masks_f
-
-        # mm_len == 0 nghĩa là KHÔNG có câu hỏi nào được nhúng vào (ablation tắt QA-ViT).
-        # Khi đó phải trả về đúng một CLIPAttention chuẩn. Trước đây nhánh instruction vẫn
-        # được cộng vào: `instruction_out_proj(attn) * tanh(β)`. Ở bước 0 thì β=0 nên số
-        # học ra bằng nhau, NHƯNG β vẫn nhận gradient (đo được |grad|=6.76 ở cấu hình
-        # baseline), nên từ bước 1 trở đi baseline có thêm một nhánh residual học được —
-        # tức "tắt QA-ViT" vẫn để lại một phần của QA-ViT. Không có text thì bỏ hẳn nhánh
-        # này, khi đó lớp MM trùng khít lớp CLIP gốc.
-        if mm_len > 0:
-            gate_val = self.instruction_proj_gate.tanh()
-            attn_output = self.out_proj(attn_output) + (self.instruction_out_proj(attn_output) * gate_val)
-        else:
-            attn_output = self.out_proj(attn_output)
-
-        return attn_output, attn_weights_reshaped
+        out = base_out + torch.tanh(self.instruction_proj_gate) * delta
+        # Trả về attention question-guided (visual × question) để làm patch_scores cho AVF.
+        attn_ret = cross_w.view(bsz, H, vis_len, mm_len) if output_attentions else None
+        return out, attn_ret
 
 class MMCLIPEncoderLayer(nn.Module):
     def __init__(self, config: CLIPConfig):
