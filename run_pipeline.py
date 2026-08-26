@@ -224,6 +224,7 @@ def run():
                 for _ak, _aflag in [("ABLATION_USE_QACLIP", "--ablation_use_qaclip"),
                                     ("ABLATION_USE_VS", "--ablation_use_vs"),
                                     ("ABLATION_USE_OCR", "--ablation_use_ocr"),
+                                    ("ABLATION_USE_OCR_INPUT", "--ablation_use_ocr_input"),
                                     ("ABLATION_USE_OCR_AUG", "--ablation_use_ocr_aug"),
                                     ("LOSS_ABLATION_MODE", "--loss_ablation_mode")]:
                     _av = os.environ.get(_ak, "").strip()
