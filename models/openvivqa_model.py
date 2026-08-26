@@ -740,6 +740,11 @@ class OpenViVQAModel(PreTrainedModel):
         use_qaclip = bool(getattr(self.config, "ablation_use_qaclip", True))
         use_vs = bool(getattr(self.config, "ablation_use_vs", True))
         use_ocr = bool(getattr(self.config, "ablation_use_ocr", True))
+        # ablation_use_ocr_input=False → BỎ HẲN mọi đặc trưng OCR (text/box/det/rec/char),
+        # KHÁC với ablation_use_ocr (chỉ đổi xử lý ConsFormer↔linear nhưng vẫn có OCR). Dùng
+        # để tách xem QA-CLIP có giúp khi KHÔNG có OCR — nếu có mà khi thêm OCR lại không,
+        # tức OCR đã bao trùm đóng góp của QA-CLIP. Chuỗi khi đó = [question, image] thôi.
+        use_ocr_input = bool(getattr(self.config, "ablation_use_ocr_input", True))
 
         if self.pretrain:
             assert mlm_input_ids is not None, "mlm_input_ids required in pretrain"
@@ -823,48 +828,53 @@ class OpenViVQAModel(PreTrainedModel):
         assert twa_ocr_char_mask is not None, "twa_ocr_char_mask required"
         assert ocr_info is not None, "ocr_info required"
 
-        word_ids_for_ocr = twa_word_ids.to(device)
-        pad_id = self.vit5.config.pad_token_id
-        token_mask_for_ocr = (word_ids_for_ocr != pad_id).long()
-        ocr_map = ocr_to_word_map.to(device).long()
-        L_tok = word_ids_for_ocr.size(1)
-
-        if ocr_map.size(1) != L_tok: 
-            ocr_map = _pad_or_crop_lastdim_int(ocr_map, L_tok, pad_value=-1)
-        if token_mask_for_ocr.size(1) != L_tok: 
-            token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
-
-        char_ids_for_ocr = twa_ocr_char.to(device)
-        char_mask_for_ocr = twa_ocr_char_mask.to(device)
-        ocr_box_mask_for_ocr = ocr_mask_box.to(device).long() if ocr_mask_box is not None else None
-
-        if use_ocr:
-            ocr_fused_feat = self._encode_ocr_features(
-                ocr_info,
-                word_ids_for_ocr,
-                ocr_map,
-                char_ids_for_ocr,
-                char_mask_for_ocr,
-                token_mask_for_ocr,
-                ocr_box_mask_for_ocr,
-                device,
-            )
+        if not use_ocr_input:
+            # BỎ HẲN OCR: không token OCR nào vào chuỗi (fused = [question, image]).
+            # Bỏ qua toàn bộ mã hoá + pad OCR bên dưới.
+            ocr_fused_feat = torch.zeros(B, 0, D, device=device, dtype=self.target_dtype)
+            token_mask_for_ocr = torch.zeros(B, 0, device=device, dtype=torch.long)
         else:
-            # Baseline: hợp nhất TUYẾN TÍNH thay cho Constituent/Group/SpatialCircle.
-            # Cũng ở TOKEN-LEVEL (L_tok) như đường ON → ablation chỉ đổi phần xử lý,
-            # KHÔNG đổi độ dài chuỗi (trước đây baseline trả word-level nên ngắn hơn ~1.8x).
-            ocr_fused_feat, mask_ocr = self._encode_ocr_baseline_features(
-                ocr_info, word_ids_for_ocr, ocr_map, twa_ocr_char,
-                twa_ocr_char_mask, token_mask_for_ocr, ocr_box_mask_for_ocr, device
-            )
-            token_mask_for_ocr = mask_ocr
+            word_ids_for_ocr = twa_word_ids.to(device)
+            pad_id = self.vit5.config.pad_token_id
+            token_mask_for_ocr = (word_ids_for_ocr != pad_id).long()
+            ocr_map = ocr_to_word_map.to(device).long()
+            L_tok = word_ids_for_ocr.size(1)
 
-        # Cả hai đường giờ đều token-level → pad/crop về L_tok cho cả hai (thường là no-op).
-        L_tok = word_ids_for_ocr.size(1)
-        if ocr_fused_feat.size(1) != L_tok:
-            ocr_fused_feat = _pad_or_crop_lastdim(ocr_fused_feat, L_tok, pad_value=0.0)
-        if token_mask_for_ocr.size(1) != L_tok:
-            token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
+            if ocr_map.size(1) != L_tok:
+                ocr_map = _pad_or_crop_lastdim_int(ocr_map, L_tok, pad_value=-1)
+            if token_mask_for_ocr.size(1) != L_tok:
+                token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
+
+            char_ids_for_ocr = twa_ocr_char.to(device)
+            char_mask_for_ocr = twa_ocr_char_mask.to(device)
+            ocr_box_mask_for_ocr = ocr_mask_box.to(device).long() if ocr_mask_box is not None else None
+
+            if use_ocr:
+                ocr_fused_feat = self._encode_ocr_features(
+                    ocr_info,
+                    word_ids_for_ocr,
+                    ocr_map,
+                    char_ids_for_ocr,
+                    char_mask_for_ocr,
+                    token_mask_for_ocr,
+                    ocr_box_mask_for_ocr,
+                    device,
+                )
+            else:
+                # Baseline: hợp nhất TUYẾN TÍNH thay cho Constituent/Group/SpatialCircle.
+                # Cũng ở TOKEN-LEVEL (L_tok) như đường ON → ablation chỉ đổi phần xử lý,
+                # KHÔNG đổi độ dài chuỗi (trước đây baseline trả word-level nên ngắn hơn ~1.8x).
+                ocr_fused_feat, mask_ocr = self._encode_ocr_baseline_features(
+                    ocr_info, word_ids_for_ocr, ocr_map, twa_ocr_char,
+                    twa_ocr_char_mask, token_mask_for_ocr, ocr_box_mask_for_ocr, device
+                )
+                token_mask_for_ocr = mask_ocr
+
+            # Cả hai đường giờ đều token-level → pad/crop về L_tok (thường là no-op).
+            if ocr_fused_feat.size(1) != L_tok:
+                ocr_fused_feat = _pad_or_crop_lastdim(ocr_fused_feat, L_tok, pad_value=0.0)
+            if token_mask_for_ocr.size(1) != L_tok:
+                token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
 
         # attn_summary, crop_tokens, crop_mask were already assigned in the use_vs block above
 
