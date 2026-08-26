@@ -901,35 +901,22 @@ class OpenViVQAModel(PreTrainedModel):
                     _rng = (f"finite[min={_fin.min():.3g},max={_fin.max():.3g}]" if _fin.numel() else "all-nonfinite")
                     print(f"🚨 [FORWARD CHECK] {_cn} non-finite: nan={_n_nan} inf={_n_inf} {_rng}")
 
-        # CONCAT CHUỖI VÀO ENCODER: CHỈ CÓ 1 KHỐI ocr_fused_feat
-        fused_seq = torch.cat(
-            [
-                txt_emb_for_enc,
-                img_pack["img_tokens"],
-                ocr_fused_feat,
-                crop_tokens,
-                attn_summary,
-            ],
-            dim=1,
-        )
-
-        mask_txt = txt_attn_mask_for_enc.long()
-        mask_img = img_pack["img_attn_mask"].long()
-        mask_ocr = token_mask_for_ocr.long()
-        mask_crop = crop_mask.long()
-        mask_attn = torch.ones(B, attn_summary.size(1), device=device, dtype=torch.long)
-
-        # GHÉP ATTENTION MASK KHỚP HOÀN TOÀN VỚI FUSED_SEQ
-        fused_mask = torch.cat(
-            [
-                mask_txt,
-                mask_img,
-                mask_ocr,
-                mask_crop,
-                mask_attn,
-            ],
-            dim=1,
-        )
+        # CONCAT CHUỖI VÀO ENCODER — CHỈ nối các khối THỰC SỰ CÓ token.
+        # text + image luôn có mặt. ocr / crop / attn_summary chỉ được nối khi module
+        # tương ứng bật; khi tắt, các tensor này rỗng (B,0,D) và BỊ LOẠI HẲN khỏi chuỗi
+        # (không truyền vào encoder dưới bất kỳ dạng nào, kể cả zeros). Nhờ đó cấu hình
+        # image+text thuần cho fused_seq = [text, image] CHÍNH XÁC.
+        _mask_attn = torch.ones(B, attn_summary.size(1), device=device, dtype=torch.long)
+        _blocks = [
+            (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
+            (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
+            (ocr_fused_feat,           token_mask_for_ocr.long()),
+            (crop_tokens,              crop_mask.long()),
+            (attn_summary,             _mask_attn),
+        ]
+        _blocks = [(f, mk) for (f, mk) in _blocks if f.size(1) > 0]
+        fused_seq = torch.cat([f for f, _ in _blocks], dim=1)
+        fused_mask = torch.cat([mk for _, mk in _blocks], dim=1)
 
         if fused_mask.size(1) != fused_seq.size(1):
             if fused_mask.size(1) > fused_seq.size(1):
