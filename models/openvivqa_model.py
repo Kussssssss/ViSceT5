@@ -11,7 +11,7 @@ from configs.model_config import OpenViVQAConfig
 from models.modules.qa_clip import QACLIPEncoder
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding, SpatialCirclePosition
-from models.modules.visual_search import VisualSearch
+from models.modules.visual_search import VisualSearch, AVFFusion
 
 import os
 import torch
@@ -258,6 +258,15 @@ class OpenViVQAModel(PreTrainedModel):
         # → backward của QA-CLIP tràn → NaN (đo được: chỉ lỗi khi det/rec ON + qaclip ON).
         self.ocr_lite_det_ln = nn.LayerNorm(self.d_model)
         self.ocr_lite_rec_ln = nn.LayerNorm(self.d_model)
+
+        # Gated Residual Fusion cho AVF (VisualSearch): làm giàu img_tokens trực tiếp qua
+        # cross-attention có gate ReZero thay vì nối 50 tokens phân tâm vào fused_seq.
+        # Đặt ở CUỐI __init__ để không xê dịch thứ tự rút RNG của các module trước.
+        self.avf_fusion = AVFFusion(
+            d_model=self.d_model,
+            num_heads=int(getattr(self.vit5.config, "num_attention_heads", 8)),
+            dropout=0.1
+        )
 
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
@@ -795,7 +804,7 @@ class OpenViVQAModel(PreTrainedModel):
         )
 
         # ----------------------------------------------------
-        # 2. ABLATION MODULE: VISUAL SEARCH
+        # 2. ABLATION MODULE: VISUAL SEARCH (AVF)
         # ----------------------------------------------------
         if use_vs:
             vs_out = self.visual_search(
@@ -805,19 +814,15 @@ class OpenViVQAModel(PreTrainedModel):
                 return_debug=return_visual_search_debug,
                 pil_images=pil_images,
             )
-            attn_summary = _ensure_1_token(vs_out.get("attn_summary", None), B, D, device, self.target_dtype)
             crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
-            crop_mask = vs_out.get("crop_mask", torch.zeros(B, 0, device=device, dtype=torch.long))
+            # GATED RESIDUAL FUSION: Toàn bộ thông tin từ crop của ConvNeXt được làm giàu
+            # trực tiếp vào 196 img_tokens qua Cross-Attention có gate ReZero (tanh(gate)*delta).
+            # KHÔNG nối thêm 49 crop_tokens và 1 attn_summary vào chuỗi fused_seq để tránh
+            # pha loãng và phân tâm decoder.
+            if hasattr(self, "avf_fusion"):
+                img_pack["img_tokens"] = self.avf_fusion(img_pack["img_tokens"], crop_tokens)
         else:
-            # TAT AVF = BO HAN MODULE: khong crop, ConvNeXt KHONG chay, va KHONG them token
-            # nao — ke ca attn_summary. attn_summary (mean-pool cua img_tokens) do chinh
-            # module VisualSearch sinh ra (companion cua crop); no chi la trung binh cua 196
-            # patch CLIP von da co mat, nen khi AVF off thi bo luon de baseline dung bang
-            # [text, image, OCR], nhat quan voi "tat module = bo han". Nhanh ON van giu no.
             vs_out = {}
-            crop_tokens = torch.zeros(B, 0, D, device=device, dtype=self.target_dtype)
-            crop_mask = torch.zeros(B, 0, device=device, dtype=torch.long)
-            attn_summary = torch.zeros(B, 0, D, device=device, dtype=self.target_dtype)
 
         # ----------------------------------------------------
         # 3. ABLATION MODULE: OCR CONSFORMER
@@ -876,8 +881,6 @@ class OpenViVQAModel(PreTrainedModel):
             if token_mask_for_ocr.size(1) != L_tok:
                 token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
 
-        # attn_summary, crop_tokens, crop_mask were already assigned in the use_vs block above
-
         # Per-component non-finite diagnostic (NaN AND inf) — names the exact culprit
         # feeding fused_seq + its magnitude, so the pretrain guard below is never a guess.
         # FWD_DIAG=1: mở kiểm tra này cho CẢ finetune (chỉ in log, không đổi tính toán) —
@@ -892,8 +895,7 @@ class OpenViVQAModel(PreTrainedModel):
             for _cn, _ct in (("pixel_values", pixel_values_dev),
                              ("txt_hidden_states(->qa_clip)", txt_emb_for_clip),
                              ("txt_emb", txt_emb_for_enc), ("img_tokens", img_pack["img_tokens"]),
-                             ("ocr_fused_feat", ocr_fused_feat), ("crop_tokens", crop_tokens),
-                             ("attn_summary", attn_summary)):
+                             ("ocr_fused_feat", ocr_fused_feat)):
                 if not torch.isfinite(_ct).all():
                     _f = _ct.detach().float()
                     _n_nan = int(torch.isnan(_f).sum()); _n_inf = int(torch.isinf(_f).sum())
@@ -902,17 +904,13 @@ class OpenViVQAModel(PreTrainedModel):
                     print(f"🚨 [FORWARD CHECK] {_cn} non-finite: nan={_n_nan} inf={_n_inf} {_rng}")
 
         # CONCAT CHUỖI VÀO ENCODER — CHỈ nối các khối THỰC SỰ CÓ token.
-        # text + image luôn có mặt. ocr / crop / attn_summary chỉ được nối khi module
-        # tương ứng bật; khi tắt, các tensor này rỗng (B,0,D) và BỊ LOẠI HẲN khỏi chuỗi
-        # (không truyền vào encoder dưới bất kỳ dạng nào, kể cả zeros). Nhờ đó cấu hình
-        # image+text thuần cho fused_seq = [text, image] CHÍNH XÁC.
-        _mask_attn = torch.ones(B, attn_summary.size(1), device=device, dtype=torch.long)
+        # Với AVF Gated Residual Fusion, visual_search làm giàu img_tokens trực tiếp qua
+        # cross-attention có gate ReZero thay vì nối 50 tokens phân tâm vào fused_seq.
+        # Nhờ đó chuỗi fused_seq luôn có đúng [text, image, ocr] và bit-for-bit == baseline tại gate=0.
         _blocks = [
             (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
             (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
             (ocr_fused_feat,           token_mask_for_ocr.long()),
-            (crop_tokens,              crop_mask.long()),
-            (attn_summary,             _mask_attn),
         ]
         _blocks = [(f, mk) for (f, mk) in _blocks if f.size(1) > 0]
         fused_seq = torch.cat([f for f, _ in _blocks], dim=1)
@@ -927,7 +925,7 @@ class OpenViVQAModel(PreTrainedModel):
 
         if not return_visual_search_debug:
             for k in list(vs_out.keys()):
-                if k not in ("attn_summary", "crop_tokens", "crop_mask"): del vs_out[k]
+                if k not in ("crop_tokens",): del vs_out[k]
             for k in list(img_pack.keys()):
                 if k not in ("img_tokens", "img_attn_mask", "patch_scores"): del img_pack[k]
 
