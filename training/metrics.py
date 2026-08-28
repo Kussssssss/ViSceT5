@@ -779,6 +779,12 @@ def get_model_fingerprint(model) -> Dict[str, float]:
             s += p.detach().float().cpu().sum().item()
         fps["visual_search.cnn"] = float(s)
 
+    if hasattr(model, "avf_fusion"):
+        s = 0.0
+        for p in model.avf_fusion.parameters():
+            s += p.detach().float().cpu().sum().item()
+        fps["avf_fusion"] = float(s)
+
     if hasattr(model, "vit5"):
         if hasattr(model.vit5, "decoder"):
             s = 0.0
