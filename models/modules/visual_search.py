@@ -12,8 +12,43 @@ import numpy as np
 import cv2
 from PIL import Image, ImageDraw
 from matplotlib import cm
-from transformers import AutoImageProcessor
-from transformers import ConvNextV2Model
+from transformers import AutoImageProcessor, ConvNextV2Model
+
+class AVFFusion(nn.Module):
+    """Gated Residual Cross-Attention Fusion for AVF (VisualSearch).
+
+    Instead of concatenating 49 crop tokens and 1 summary token into fused_seq (which dilutes
+    the sequence and adds noise when crops are uninformative), AVFFusion enriches the 196 global
+    CLIP image tokens using a cross-attention layer over the ConvNeXt high-res crop features:
+        img_tokens' = img_tokens + tanh(gate) * LayerNorm(out_proj(CrossAttn(Q=img, K=crop, V=crop)))
+
+    With gate initialized to 0.0 (ReZero), at step 0:
+        tanh(0.0) == 0.0  ==>  img_tokens' == img_tokens  (Bit-for-bit identical to baseline)
+    """
+    def __init__(self, d_model: int = 768, num_heads: int = 8, dropout: float = 0.1):
+        super().__init__()
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=d_model,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.gate = nn.Parameter(torch.zeros(1))
+
+    def forward(self, img_tokens: torch.Tensor, crop_tokens: Optional[torch.Tensor]) -> torch.Tensor:
+        if crop_tokens is None or crop_tokens.size(1) == 0:
+            return img_tokens
+        
+        q = img_tokens
+        k = crop_tokens.to(dtype=q.dtype, device=q.device)
+        v = k
+        
+        delta, _ = self.cross_attn(query=q, key=k, value=v)
+        delta = self.layer_norm(self.out_proj(delta))
+        
+        return img_tokens + torch.tanh(self.gate) * delta
 
 class VisualSearch(nn.Module):
     def __init__(self, vit_processor, model_config, vit_dim=768,
