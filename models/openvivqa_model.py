@@ -262,11 +262,12 @@ class OpenViVQAModel(PreTrainedModel):
         # Gated Residual Fusion cho AVF (VisualSearch): làm giàu img_tokens trực tiếp qua
         # cross-attention có gate ReZero thay vì nối 50 tokens phân tâm vào fused_seq.
         # Đặt ở CUỐI __init__ để không xê dịch thứ tự rút RNG của các module trước.
-        self.avf_fusion = AVFFusion(
-            d_model=self.d_model,
-            num_heads=int(getattr(self.vit5.config, "num_attention_heads", 8)),
-            dropout=0.1
-        )
+        if bool(getattr(self.config, "ablation_use_vs", True)):
+            self.avf_fusion = AVFFusion(
+                d_model=self.d_model,
+                num_heads=int(getattr(self.vit5.config, "num_attention_heads", 8)),
+                dropout=0.1
+            )
 
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()

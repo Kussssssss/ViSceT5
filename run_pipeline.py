@@ -176,7 +176,11 @@ def run():
             try:
                 sys.argv = ["finetune.py", "configs/finetune.yaml"]
 
-                _fep = os.environ.get("NUM_TRAIN_EPOCHS", "").strip()
+                def _clean_env(k: str) -> str:
+                    v = os.environ.get(k, "")
+                    return v.split("#")[0].strip()
+
+                _fep = _clean_env("NUM_TRAIN_EPOCHS")
                 if _fep:
                     sys.argv.extend(["--num_train_epochs", _fep])
                     print(f">>> [finetune] num_train_epochs = {_fep}")
@@ -187,21 +191,21 @@ def run():
                 # (KHÔNG expose train batch qua env: nó phải CỐ ĐỊNH để horizon cosine và
                 #  việc skip batch khi resume còn đúng — đổi train batch giữa chừng làm hỏng
                 #  checkpoint resume, xem cảnh báo per_device_train_batch_size 4!=8.)
-                _feb = os.environ.get("PER_DEVICE_EVAL_BATCH_SIZE", "").strip()
+                _feb = _clean_env("PER_DEVICE_EVAL_BATCH_SIZE")
                 if _feb:
                     sys.argv.extend(["--per_device_eval_batch_size", _feb])
                     print(f">>> [finetune] per_device_eval_batch_size = {_feb}")
 
                 # SAVE_TOTAL_LIMIT: so checkpoint local giu lai. Dia Kaggle ~20GB, moi
                 # checkpoint ~4.5GB (model+optimizer) → giu it de khong day dia khi luu.
-                _stl = os.environ.get("SAVE_TOTAL_LIMIT", "").strip()
+                _stl = _clean_env("SAVE_TOTAL_LIMIT")
                 if _stl:
                     sys.argv.extend(["--save_total_limit", _stl])
                     print(f">>> [finetune] save_total_limit = {_stl}")
 
                 # DISABLE_TQDM: tat progress bar de .ipynb khong phinh to (log dai lam
                 # papermill kho luu notebook, nhat la run nhieu gio tren Kaggle).
-                _dtq = os.environ.get("DISABLE_TQDM", "").strip().lower()
+                _dtq = _clean_env("DISABLE_TQDM").lower()
                 if _dtq in ("1", "true", "yes", "on"):
                     sys.argv.extend(["--disable_tqdm", "True"])
                     print(">>> [finetune] disable_tqdm = True")
@@ -212,7 +216,7 @@ def run():
                 # Cache CSV đã mang tên dataset (merged_*_<ten>.csv) nên đổi qua lại an toàn.
                 for _dk, _dflag in [("DATASET_NAME", "--dataset_name"),
                                     ("DATA_DIR", "--data_dir")]:
-                    _dv = os.environ.get(_dk, "").strip()
+                    _dv = _clean_env(_dk)
                     if _dv:
                         sys.argv.extend([_dflag, _dv])
                         print(f">>> [finetune] {_dflag} = {_dv}")
@@ -224,9 +228,10 @@ def run():
                 for _ak, _aflag in [("ABLATION_USE_QACLIP", "--ablation_use_qaclip"),
                                     ("ABLATION_USE_VS", "--ablation_use_vs"),
                                     ("ABLATION_USE_OCR", "--ablation_use_ocr"),
+                                    ("ABLATION_USE_OCR_INPUT", "--ablation_use_ocr_input"),
                                     ("ABLATION_USE_OCR_AUG", "--ablation_use_ocr_aug"),
                                     ("LOSS_ABLATION_MODE", "--loss_ablation_mode")]:
-                    _av = os.environ.get(_ak, "").strip()
+                    _av = _clean_env(_ak)
                     if _av:
                         sys.argv.extend([_aflag, _av])
                         print(f">>> [finetune] {_aflag} = {_av}")
