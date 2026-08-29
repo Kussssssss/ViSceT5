@@ -24,7 +24,9 @@ class ModelArguments:
     )
     ablation_use_ocr: bool = field(
         default=True,
-        metadata={"help": "Whether to use OCR Consformer"}
+        metadata={"help": "Whether to use SceSpaVis (Scene Spatial-Visual-Semantic OCR Representation Module: "
+                          "Spatial 2D Box + Visual Det/Rec Spotting + Char-level embeddings). "
+                          "If False, uses clean Text-Only OCR baseline."}
     )
     ablation_use_ocr_aug: bool = field(
         default=True,
