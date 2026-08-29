@@ -28,6 +28,12 @@ class ModelArguments:
                           "Spatial 2D Box + Visual Det/Rec Spotting + Char-level embeddings). "
                           "If False, uses clean Text-Only OCR baseline."}
     )
+    ablation_use_ocr_input: bool = field(
+        default=True,
+        metadata={"help": "If False, DROP all OCR features entirely (text/box/det/rec/char) so the "
+                          "fused sequence is [question, image] only. Different from ablation_use_ocr "
+                          "(which only switches SceSpaVis<->text-only but still keeps OCR)."}
+    )
     ablation_use_ocr_aug: bool = field(
         default=True,
         metadata={"help": "Ablation #4 (finetune): apply OCR augmentation — the OCR-related "

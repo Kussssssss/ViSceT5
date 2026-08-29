@@ -282,6 +282,7 @@ def main(args_list=None):
     config.ablation_use_qaclip = bool(model_args.ablation_use_qaclip)
     config.ablation_use_vs = bool(model_args.ablation_use_vs)
     config.ablation_use_ocr = bool(model_args.ablation_use_ocr)
+    config.ablation_use_ocr_input = bool(getattr(model_args, "ablation_use_ocr_input", True))
     config.ablation_use_ocr_aug = bool(model_args.ablation_use_ocr_aug)
     config.use_twc = False  # TWC is disabled during finetuning
     config.use_ocr_aug_finetune = bool(model_args.ablation_use_ocr_aug)
