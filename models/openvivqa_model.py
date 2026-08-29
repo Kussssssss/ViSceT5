@@ -597,7 +597,7 @@ class OpenViVQAModel(PreTrainedModel):
         final_ocr_feat = torch.stack(ocr_box_feat_tok_list, dim=0).to(self.target_dtype)
         return final_ocr_feat
 
-    # --- ENCODE OCR (BẢN LITE BASELINE) ---
+    # --- ENCODE OCR (BẢN BASELINE: CHỈ DÙNG OCR TEXT TOKENS) ---
     def _encode_ocr_baseline_features(
         self,
         ocr_info: List[Dict[str, Any]],
@@ -609,107 +609,20 @@ class OpenViVQAModel(PreTrainedModel):
         box_mask: Optional[torch.Tensor],
         device: torch.device,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-    
+        """Baseline OCR (Text-Only): Chỉ lấy token embeddings từ ViT5 cho chuỗi OCR.
+        
+        Không nạp Char-level embedding, không nạp Spatial Bounding Box, và không nạp
+        Visual Detection/Recognition features (các thành phần này thuộc về module SceSpaVis).
+        Độ dài chuỗi giữ nguyên L_tok để đảm bảo đối xứng token-level chính xác.
+        """
         ocr_token_ids = ocr_token_ids.to(device)
-        ocr_to_word_map = ocr_to_word_map.to(device)
-        char_ids = char_ids.to(device)
-        char_mask = char_mask.to(device)
         token_mask = token_mask.to(device)
-    
-        B, L_tok = ocr_token_ids.size()
-        if ocr_to_word_map.size(1) != L_tok:
-            ocr_to_word_map = _pad_or_crop_lastdim_int(
-                ocr_to_word_map,
-                L_tok,
-                pad_value=-1,
-            )
-    
-        N_word = int(char_ids.size(1))
-        D = self.d_model
 
-        # ── TOKEN-LEVEL (khop dung duong ON) ───────────────────────────────────
-        # Baseline phai o CUNG cap va CUNG do dai voi _encode_ocr_features (L_tok), de
-        # ablation chi doi PHAN XU LY (Constituent + GroupAttention + SpatialCircle) chu
-        # khong doi luon do phan giai chuoi. Truoc day baseline gop sub-word -> word
-        # (N_word) nen chuoi ngan hon ~1.8x, lam phep so sanh lan hai bien.
         tok_emb = self.vit5.get_input_embeddings()(ocr_token_ids).to(dtype=self.target_dtype)
-
-        char_feat_word = _char_embedding(
-            self.char_embedding, self.char_position_embedding, char_ids, char_mask, mean=True,
-        )
-        char_feat_word = self.ocr_char_layernorm(char_feat_word).to(self.target_dtype)
-
-        _d_det = self.ocr_lite_det_proj.in_features
-        _d_rec = self.ocr_lite_rec_proj.in_features
-        char_tok = torch.zeros(B, L_tok, D, device=device, dtype=self.target_dtype)
-        box_tok = torch.zeros(B, L_tok, 4, device=device, dtype=self.target_dtype)
-        det_tok = torch.zeros(B, L_tok, _d_det, device=device, dtype=self.target_dtype)
-        rec_tok = torch.zeros(B, L_tok, _d_rec, device=device, dtype=self.target_dtype)
-        _has_det = _has_rec = False
-
-        def _to_word(feat, dim):
-            """Dua dac trung word-level cua 1 mau ve dung N_word (crop / copy nua goc khi
-            OCR-aug nhan doi / zero-pad) — cung quy tac voi duong ON."""
-            if feat is None:
-                return None
-            if not torch.is_tensor(feat):
-                feat = torch.tensor(feat, device=device, dtype=self.target_dtype)
-            else:
-                feat = feat.to(device=device, dtype=self.target_dtype)
-            if feat.dim() != 2 or feat.size(-1) != dim:
-                return None
-            n = feat.size(0)
-            if n == N_word:
-                return feat
-            if n > N_word:
-                return feat[:N_word]
-            if N_word == 2 * n:
-                return torch.cat([feat, feat], dim=0)
-            pad = torch.zeros(N_word - n, dim, device=device, dtype=self.target_dtype)
-            return torch.cat([feat, pad], dim=0)
-
-        for b in range(B):
-            map_b = ocr_to_word_map[b]
-            valid = ((map_b >= 0) & (token_mask[b] > 0)).unsqueeze(-1)
-            map_clamped = map_b.clamp(min=0, max=max(N_word - 1, 0))
-
-            char_tok[b] = char_feat_word[b][map_clamped] * valid
-
-            info_b = ocr_info[b]
-            w = float(info_b.get("width", 1.0) or 1.0)
-            h = float(info_b.get("height", 1.0) or 1.0)
-            _bx = _to_word(info_b.get("boxes_word_all"), 4)
-            if _bx is not None:
-                _bx = _normalize_boxes_auto(_bx, w, h, device, self.target_dtype)
-                box_tok[b] = _bx[map_clamped] * valid
-
-            _dt = _to_word(info_b.get("det_features"), _d_det)
-            if _dt is not None:
-                det_tok[b] = _dt[map_clamped] * valid; _has_det = True
-            _rc = _to_word(info_b.get("rec_features"), _d_rec)
-            if _rc is not None:
-                rec_tok[b] = _rc[map_clamped] * valid; _has_rec = True
-
-        # Hop nhat TUYEN TINH — khac biet DUY NHAT so voi ON: khong Constituent/Group/Spatial
-        # CHỈ Linear (+LayerNorm) — KHÔNG dùng ocr_lite_text_ff / ocr_lite_box_ff (MLP 2 lớp
-        # GELU có residual). Lý do: hai nhánh OFF còn lại KHÔNG thêm lớp học được nào
-        # (QA-ViT OFF = CLIP thuần; AVF OFF = cùng ConvNeXt, chỉ đổi box), nên baseline OCR
-        # cũng phải là "đặc trưng đi qua Linear bình thường" thì ablation mới đồng bộ.
-        # Hai module _ff giữ lại trong __init__ cho tương thích checkpoint, nhưng không dùng.
-        text_mix = self.ocr_lite_text_ln((tok_emb + char_tok).to(torch.float32)).to(self.target_dtype)
-        text_mix = self.ocr_lite_text_proj(text_mix.to(torch.float32)).to(self.target_dtype)
-
-        box_emb = self.ocr_lite_box_proj(box_tok.to(torch.float32)).to(self.target_dtype)
-
-        det_emb = self.ocr_lite_det_ln(
-            self.ocr_lite_det_proj(det_tok.to(torch.float32))
-        ).to(self.target_dtype) if _has_det else 0.0
-        rec_emb = self.ocr_lite_rec_ln(
-            self.ocr_lite_rec_proj(rec_tok.to(torch.float32))
-        ).to(self.target_dtype) if _has_rec else 0.0
+        text_mix = self.ocr_lite_text_ln(tok_emb.to(torch.float32)).to(self.target_dtype)
+        ocr_fused_feat = self.ocr_lite_text_proj(text_mix.to(torch.float32)).to(self.target_dtype)
 
         ocr_tok_mask = token_mask.long()
-        ocr_fused_feat = (text_mix + box_emb + det_emb + rec_emb).to(self.target_dtype)
         ocr_fused_feat = ocr_fused_feat * ocr_tok_mask.to(self.target_dtype).unsqueeze(-1)
 
         return ocr_fused_feat, ocr_tok_mask
