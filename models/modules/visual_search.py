@@ -20,7 +20,7 @@ class AVFFusion(nn.Module):
     Instead of concatenating 49 crop tokens and 1 summary token into fused_seq (which dilutes
     the sequence and adds noise when crops are uninformative), AVFFusion enriches the 196 global
     CLIP image tokens using a cross-attention layer over the ConvNeXt high-res crop features:
-        img_tokens' = img_tokens + tanh(gate) * LayerNorm(out_proj(CrossAttn(Q=img, K=crop, V=crop)))
+        img_tokens' = img_tokens + tanh(gate) * LayerNorm(CrossAttn(Q=img, K=crop, V=crop))
 
     With gate initialized to 0.0 (ReZero), at step 0:
         tanh(0.0) == 0.0  ==>  img_tokens' == img_tokens  (Bit-for-bit identical to baseline)
@@ -33,7 +33,6 @@ class AVFFusion(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
-        self.out_proj = nn.Linear(d_model, d_model)
         self.layer_norm = nn.LayerNorm(d_model)
         self.gate = nn.Parameter(torch.zeros(1))
 
@@ -46,7 +45,7 @@ class AVFFusion(nn.Module):
         v = k
         
         delta, _ = self.cross_attn(query=q, key=k, value=v)
-        delta = self.layer_norm(self.out_proj(delta))
+        delta = self.layer_norm(delta)
         
         return img_tokens + torch.tanh(self.gate) * delta
 
