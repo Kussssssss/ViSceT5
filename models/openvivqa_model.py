@@ -664,19 +664,18 @@ class OpenViVQAModel(PreTrainedModel):
         use_vs = bool(getattr(self.config, "ablation_use_vs", True))
         use_ocr = bool(getattr(self.config, "ablation_use_ocr", True))
 
-        if self.pretrain:
-            assert mlm_input_ids is not None, "mlm_input_ids required in pretrain"
-            assert cmb_text_mask_label is not None, "cmb_text_mask_label required in pretrain"
+        if input_ids is not None:
+            q_ids_for_enc = input_ids.to(device)
+            enc_attention_mask = attention_mask.to(device) if attention_mask is not None else None
+            q_ids_for_clip = q_ids_for_enc
+        elif mlm_input_ids is not None:
             q_ids_for_enc = mlm_input_ids.to(device)
             enc_attention_mask = attention_mask.to(device) if attention_mask is not None else None
             max_q_len_cfg = int(getattr(self.config, "text_max_input_length", q_ids_for_enc.size(1)))
             max_q_len = min(max_q_len_cfg, q_ids_for_enc.size(1))
             q_ids_for_clip = q_ids_for_enc[:, :max_q_len]
         else:
-            assert input_ids is not None, "input_ids required in finetune"
-            q_ids_for_enc = input_ids.to(device)
-            enc_attention_mask = attention_mask.to(device) if attention_mask is not None else None
-            q_ids_for_clip = q_ids_for_enc
+            raise ValueError("Either input_ids or mlm_input_ids must be provided to forward().")
 
         txt_emb_for_enc, txt_attn_mask_for_enc = self._encode_text(q_ids_for_enc, enc_attention_mask, device)
 
@@ -688,12 +687,12 @@ class OpenViVQAModel(PreTrainedModel):
         )
         txt_hidden_states = txt_outputs.last_hidden_state.to(dtype=self.target_dtype)
 
-        if self.pretrain:
-            txt_emb_for_clip = txt_hidden_states[:, : q_ids_for_clip.size(1)]
-            txt_attn_mask_for_clip = txt_attn_mask_for_enc[:, : q_ids_for_clip.size(1)]
-        else:
+        if input_ids is not None:
             txt_emb_for_clip = txt_hidden_states
             txt_attn_mask_for_clip = txt_attn_mask_for_enc
+        else:
+            txt_emb_for_clip = txt_hidden_states[:, : q_ids_for_clip.size(1)]
+            txt_attn_mask_for_clip = txt_attn_mask_for_enc[:, : q_ids_for_clip.size(1)]
 
         pixel_values_dev = pixel_values.to(device)
         B = pixel_values_dev.size(0)
@@ -847,7 +846,23 @@ class OpenViVQAModel(PreTrainedModel):
 
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
 
-        if self.pretrain:
+        if labels is not None:
+            outputs = self.vit5(
+                encoder_outputs=enc_out,
+                attention_mask=fused_mask,
+                labels=labels.to(device),
+                use_cache=False,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+            out_dict["loss"] = outputs.loss
+            out_dict["logits"] = outputs.logits
+            if return_visual_search_debug:
+                out_dict["vs_debug"] = vs_out
+                out_dict["clip_input_ids"] = q_ids_for_clip.detach().cpu()
+            return out_dict
+
+        if self.pretrain and cmb_text_mask_label is not None:
             mlm_labels = cmb_text_mask_label.to(device)
             mlm_labels = torch.where(mlm_labels == -1, torch.full_like(mlm_labels, -100), mlm_labels)
 

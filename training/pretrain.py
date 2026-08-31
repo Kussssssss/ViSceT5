@@ -145,119 +145,42 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     model.train()
     model.zero_grad(set_to_none=True)
     out = model(**batch)
-    # Grounded-cloze decoder loss via the model's existing finetune path (pretrain
-    # flipped off) — same mechanism the trainer uses; keeps the objective in the
-    # pretrain method, not in models/. Only fires when the collator emitted gen targets.
-    if batch.get("gen_labels") is not None and batch.get("gen_input_ids") is not None:
-        _op = model.pretrain
-        model.pretrain = False
-        try:
-            _gen = model(
-                input_ids=batch.get("gen_input_ids"),
-                attention_mask=batch.get("gen_attention_mask"),
-                pixel_values=batch.get("pixel_values"),
-                pil_images=batch.get("pil_images"),
-                ocr_info=batch.get("ocr_info"),
-                ocr_mask_token=batch.get("ocr_mask_token"),
-                ocr_mask_box=batch.get("ocr_mask_box"),
-                labels=batch.get("gen_labels"),
-                twa_ocr_char=batch.get("gen_twa_ocr_char", batch.get("twa_ocr_char")),
-                twa_ocr_char_mask=batch.get("gen_twa_ocr_char_mask", batch.get("twa_ocr_char_mask")),
-                twa_word_ids=batch.get("gen_twa_word_ids", batch.get("twa_word_ids")),
-                ocr_to_word_map=batch.get("gen_ocr_to_word_map", batch.get("ocr_to_word_map")),
-            )
-        finally:
-            model.pretrain = _op
-        out["gen_loss"] = _gen.get("loss")
-    total = loss_fn(batch, out)  # stamps loss_mlm / loss_itm / loss_twc / loss_gen into `out`
-
-    tcls = out.get("textcls_scores")
-    pcls = out.get("pollutecls_scores")
-    cs   = out.get("contrastive_scores")
-    o2r  = out.get("o2r_block")
-    lm, li, lt = out.get("loss_mlm"), out.get("loss_itm"), out.get("loss_twc")
-    lg = out.get("loss_gen")
-    gen_on = out.get("gen_loss") is not None
-
-    # ── DIAGNOSTIC DUMP (always printed, so you can SEE where a problem is) ──
-    print(f"\n[diag] batch size = {k}")
-    print("[diag] forward tensors:")
-    print(f"    MLM  textcls_scores   : {_tensor_health(tcls)}")
-    print(f"    ITM  pollutecls_scores: {_tensor_health(pcls)}")
-    print(f"    TWC  contrastive_scores: {_tensor_health(cs)}")
-
-    print("[diag] loss components:")
-    for nm, lv in [("loss_mlm", lm), ("loss_itm", li), ("loss_twc", lt),
-                   ("loss_gen", lg), ("TOTAL", total)]:
-        if lv is None:
-            print(f"    {nm:9s}: None")
-        else:
-            finite = bool(torch.isfinite(lv).all())
-            print(f"    {nm:9s}: {lv.item():.5f}  finite={finite}")
-
-    # MLM detail
-    if tcls is not None:
-        tgt = batch["cmb_text_mask_label"]
-        msk = tgt != -1
-        n_masked = int(msk.sum().item())
-        if n_masked > 0:
-            mlm_acc = (tcls.argmax(-1)[msk] == tgt[msk]).float().mean().item()
-            print(f"[diag] MLM: masked_positions={n_masked}, batch_token_acc={mlm_acc:.3f}")
-        else:
-            print("[diag] MLM: NO masked positions in this batch!")
-
-    # ITM detail
-    tp = batch["tag_pollute"]
-    print(f"[diag] ITM: tag_pollute dist -> polluted={int((tp==1).sum())}, clean={int((tp==0).sum())}")
-
-    # TWC detail (label distribution + positive/negative logit separation)
-    if use_twc and cs is not None and o2r is not None:
-        n_pos = int((o2r > 0.5).sum()); n_semi = int(((o2r > 0.0) & (o2r <= 0.5)).sum())
-        n_neg = int((o2r == 0.0).sum()); n_ign = int((o2r == -1).sum())
-        print(f"[diag] TWC labels: positives(>0.5)={n_pos}, semi(0–0.5]={n_semi}, "
-              f"negatives(==0)={n_neg}, ignored(-1)={n_ign}")
-        pos_l = cs[o2r > 0.5]; neg_l = cs[o2r == 0.0]
-        pm = pos_l.mean().item() if pos_l.numel() else float("nan")
-        nm = neg_l.mean().item() if neg_l.numel() else float("nan")
-        print(f"[diag] TWC logits: mean(positive)={pm:.3f} vs mean(negative)={nm:.3f} "
-              f"(positive should trend higher as training proceeds)")
-        ls = getattr(model, "logit_scale", None)
-        if ls is not None:
-            print(f"[diag] TWC logit_scale(raw)={ls.item():.3f}, exp≈{float(torch.exp(ls.detach())):.2f}")
+    
+    # PreSTU SplitOCR direct loss or legacy loss
+    if "loss" in out and out["loss"] is not None:
+        total = out["loss"]
+        out["loss_gen"] = total
+    else:
+        if batch.get("gen_labels") is not None and batch.get("gen_input_ids") is not None:
+            _op = model.pretrain
+            model.pretrain = False
+            try:
+                _gen = model(
+                    input_ids=batch.get("gen_input_ids"),
+                    attention_mask=batch.get("gen_attention_mask"),
+                    pixel_values=batch.get("pixel_values"),
+                    pil_images=batch.get("pil_images"),
+                    ocr_info=batch.get("ocr_info"),
+                    ocr_mask_token=batch.get("ocr_mask_token"),
+                    ocr_mask_box=batch.get("ocr_mask_box"),
+                    labels=batch.get("gen_labels"),
+                    twa_ocr_char=batch.get("gen_twa_ocr_char", batch.get("twa_ocr_char")),
+                    twa_ocr_char_mask=batch.get("gen_twa_ocr_char_mask", batch.get("twa_ocr_char_mask")),
+                    twa_word_ids=batch.get("gen_twa_word_ids", batch.get("twa_word_ids")),
+                    ocr_to_word_map=batch.get("gen_ocr_to_word_map", batch.get("ocr_to_word_map")),
+                )
+            finally:
+                model.pretrain = _op
+            out["gen_loss"] = _gen.get("loss")
+        total = loss_fn(batch, out)
 
     checks = []
     def chk(name, ok, detail=""):
         checks.append((name, bool(ok), detail))
 
-    # ── MLM checks (only when encoder-head MLM is active; DROPPED in cloze modes) ──
-    if not gen_on:
-        chk("[MLM] head produced logits", tcls is not None)
-        chk("[MLM] has masked positions", int((batch["cmb_text_mask_label"] != -1).sum()) > 0)
-        chk("[MLM] loss_mlm finite", lm is not None and bool(torch.isfinite(lm).all()))
-    else:
-        print("  ℹ️ [MLM] encoder-head MLM dropped in cloze mode — masked-prediction "
-              "is done by the decoder (grounded-cloze / span-infill).")
-
-    # ── ITM checks ────────────────────────────────────────────────────────
-    chk("[ITM] head produced logits", pcls is not None)
-    if not (int((tp == 1).sum()) > 0 and int((tp == 0).sum()) > 0):
-        # Non-fatal: pollution is random per batch; a one-sided draw is not a bug.
-        print("  ⚠️ [ITM] this batch is one-sided (all polluted or all clean) — "
-              "not a code error, just an unlucky random draw.")
-    chk("[ITM] loss_itm finite", li is not None and bool(torch.isfinite(li).all()))
-
-    # ── TWC checks ────────────────────────────────────────────────────────
-    if use_twc:
-        chk("[TWC] contrastive_scores produced", cs is not None,
-            f"shape={tuple(cs.shape)}" if cs is not None else "MISSING => TWC branch was skipped!")
-        chk("[TWC] o2r_block produced", o2r is not None)
-        if cs is not None and o2r is not None:
-            chk("[TWC] score/label shapes match", tuple(cs.shape) == tuple(o2r.shape),
-                f"scores={tuple(cs.shape)} labels={tuple(o2r.shape)}")
-            chk("[TWC] scores finite", bool(torch.isfinite(cs).all()))
-            chk("[TWC] labels have positives (>0.5)", bool((o2r > 0.5).any()))
-            chk("[TWC] labels have negatives (==0)", bool((o2r == 0.0).any()))
-        chk("[TWC] loss_twc finite & > 0", lt is not None and bool(torch.isfinite(lt).all()) and lt.item() > 0)
+    # PreSTU SplitOCR check
+    chk("[SplitOCR] loss produced & finite", total is not None and bool(torch.isfinite(total).all()),
+        f"loss={total.item():.4f}" if total is not None else "None")
 
     # ── ITC checks (opt-in objective; only when ITC_WEIGHT>0) ──────────────
     _itcw = float(os.environ.get("ITC_WEIGHT", "0") or 0)
