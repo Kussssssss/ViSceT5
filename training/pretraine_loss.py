@@ -94,6 +94,10 @@ class ViT5PretrainLoss(nn.Module):
             if isinstance(v, torch.Tensor) and torch.isnan(v).any():
                 print(f"🚨 NAN DETECTED IN MODEL OUTPUT: {k}")
 
+        # PRESTU SplitOCR direct Seq2Seq loss
+        if "loss" in model_output and model_output["loss"] is not None:
+            return model_output["loss"]
+
         if "textcls_scores" not in model_output:
             device = sample_list.get("tag_pollute", torch.tensor(0)).device
             return torch.tensor(0.0, device=device, requires_grad=True)
@@ -473,6 +477,28 @@ class GlobalPretrainAccuracy(BaseMetric):
         self.twc_fn = PreTrainTWCAccuracy()
 
     def calculate(self, sample_list, model_output):
+        # 0. PreSTU SplitOCR metric path
+        if "labels" in sample_list and sample_list["labels"] is not None and "logits" in model_output and model_output["logits"] is not None:
+            logits = model_output["logits"]
+            labels = sample_list["labels"]
+            mask = (labels != -100)
+            if mask.any():
+                preds = logits.argmax(dim=-1)
+                token_acc = (preds[mask] == labels[mask]).float().mean().item()
+            else:
+                token_acc = 0.0
+            
+            _loss_tensor = model_output.get("loss", torch.tensor(0.0))
+            loss_val = _loss_tensor.item() if torch.is_tensor(_loss_tensor) else float(_loss_tensor)
+            device = logits.device
+            return torch.tensor(
+                [token_acc, token_acc, token_acc,
+                 loss_val, loss_val, loss_val,
+                 1.0, 1.0, loss_val, token_acc,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                device=device
+            )
+
         # 1. Lấy Acc
         mlm_acc = self.mlm_fn.calculate(sample_list, model_output)
         itm_acc = self.itm_fn.calculate(sample_list, model_output)

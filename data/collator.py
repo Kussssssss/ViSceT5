@@ -896,314 +896,98 @@ class ViT5VQADataCollator:
             self.itm_history.append((p, ocr_raw))
             if len(self.itm_history) > self.itm_history_max: self.itm_history.pop(0)
 
-        # Đọc cờ Ablation (Bật/Tắt OCR Augmentation)
-        adv_pro = self.adv_probability_pretrain if self.pretrain else self.adv_probability_finetune
-        use_ocr_aug = getattr(self, "use_ocr_aug_pretrain", True) if self.pretrain else getattr(self, "use_ocr_aug_finetune", False)
-
         # =========================================================
-        # NHÁNH PRETRAIN (CÓ MASKING VÀ POLLUTE)
+        # =========================================================
+        # NHÁNH PRETRAIN: PRESTU SPLITOCR (Task-Agnostic Core STU)
         # =========================================================
         if self.pretrain:
-            seeds = [random.randint(0, 2**32 - 1) for _ in uids]
             B = len(batch)
-            pollute_indices, tag_pollute_list = list(range(B)), [0] * B
+            split_prompts = []
+            split_targets = []
 
-            # Logic tạo ITM Pollute (Tráo ảnh)
-            if not getattr(self, "itm_pollute", True):
-                pass  # ITM_POLLUTE=0: no OCR swap — 100% samples image<->OCR matched
-            elif B > 1:
-                for i, s in enumerate(seeds):
-                    if s & 1 == 0: pollute_indices[i] = i; tag_pollute_list[i] = 0
-                    else:
-                        cands = list(range(B)); cands.remove(i); j = random.Random(s ^ 0xDEADBEEF).choice(cands)
-                        pollute_indices[i] = j; tag_pollute_list[i] = 1
-            else:
-                for i, s in enumerate(seeds):
-                    if (s & 1 == 0) or not self.itm_history: pollute_indices[i] = i; tag_pollute_list[i] = 0
-                    else:
-                        cands = [idx for idx, (hp, _) in enumerate(self.itm_history) if hp != paths[i]]
-                        if not cands: pollute_indices[i] = i; tag_pollute_list[i] = 0
-                        else: pollute_indices[i] = -(random.Random(s ^ 0xDEADBEEF).choice(cands) + 1); tag_pollute_list[i] = 1
+            ocr_info_list = []
+            twa_char_list = []
+            twa_char_mask_list = []
+            twa_word_ids_list = []
+            ocr_to_word_map_list = []
+            ocr_mask_list = []
 
-            tag_pollute = torch.tensor(tag_pollute_list, dtype=torch.long)
-
-            # Khởi tạo list
-            masked_q_ids_list, q_mask_label_list = [], []
-            ocr_info_list, o2r_list, r2o_list, group_ids_list = [], [], [], []
-            twa_char_list, twa_char_mask_list, twa_word_ids_list, ocr_to_word_map_list = [], [], [], []
-            ocr_mask_token_list, ocr_mask_box_list, ocr_lbl_tok_list, ocr_msk_inp_list = [], [], [], []
-
-            # Decoder pretrain = GROUNDED-CLOZE: in 'gen'/'gen_all' the decoder is
-            # trained to regenerate the CLEAN question words that also appear in the
-            # OCR (masked in the text branch), using a finetune-shaped forward. To
-            # recover them it must read the OCR feature branch → warms cross-attention
-            # with a CLEAN target (no OCR noise learned). See pretrain_decoder_plan.md.
-            _cloze_mode = str(getattr(self, "pretrain_ablation_mode", "")).lower().strip() in ("gen", "gen_all")
-            gen_masked_q_list = []   # encoder input: question with <extra_id_i> masks
-            gen_target_texts = []    # decoder target: "<extra_id_0> w0 ... <extra_id_k>"
-            gen_nmask_list = []      # #masked spans per sample (0 => no gen signal)
-            gen_span_types_list = [] # per-sample list[bool]: True=grounded span, False=random
-            # CLEAN single-set OCR branch fed to the cloze gen forward (the decoder
-            # reads the masked word FROM here); char/word from pad_ocr, det/rec/box
-            # from ocr_info.
-            gen_char_list, gen_char_mask_list, gen_word_ids_list, gen_map_list = [], [], [], []
-
-            # QUAN TRỌNG: Nối OCR vào câu hỏi để làm OCR-Aware MLM
-            combined_texts = []
-            words_per_i = []
             for i in range(B):
-                _q = qs[i].strip() if isinstance(qs[i], str) else ""
-                _qwords = _q.split()
-                if self.mlm_ocr_in_text:
-                    # Cũ: nối câu hỏi + OCR (còn "nạng" OCR-as-text). Giữ cho A/B.
-                    src_idx = pollute_indices[i]
-                    ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                    info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
-                    combined_texts.append(f"{_q} {' '.join(raw_texts)}".strip())
-                    _ow = [t for t in raw_texts if isinstance(t, str) and t.strip()]
-                    words_per_i.append(_qwords + _ow)
+                info, raw_texts = self._prepare_ocr(ocr_raw_list[i], max_len_in_batch=current_max_len)
+                norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts if isinstance(t, str) and _normalize_text(t, lowercase=True).strip()]
+
+                # --- 1. Sắp xếp không gian Top-Left -> Bottom-Right ---
+                N_words = len(norm_tokens)
+
+                # --- 2. Chọn điểm cắt ngẫu nhiên m in [0, N_words - 1] (PreSTU SplitOCR) ---
+                if N_words == 0:
+                    prefix_str = ""
+                    target_str = ""
                 else:
-                    # GIẢM NẠNG: chỉ câu hỏi (khớp finetune, OCR học qua nhánh feature: gen + TWC)
-                    combined_texts.append(_q)
-                    words_per_i.append(_qwords)
+                    # Random split point: m = 0 -> Full OCR; m > 0 -> Split continuation
+                    m = random.randint(0, max(0, N_words - 1))
+                    prefix_words = norm_tokens[:m]
+                    target_words = norm_tokens[m:]
+                    prefix_str = " ".join(prefix_words).strip()
+                    target_str = " ".join(target_words).strip()
 
-            if _cloze_mode:
-                # DECODER span-infill (grounded-cloze) is the SINGLE masked-prediction
-                # objective; the ENCODER-head MLM is dropped. So the encoder text branch
-                # gets the CLEAN question (matches finetune + gives TWC/ITM clean context),
-                # and cmb_text_mask_label is all -1 → mlm_loss = 0 (removed from total).
-                q_tok_clean = self.tokenizer(combined_texts, padding="max_length", truncation=True, max_length=self.txt_max_len, return_tensors="pt")
-                for i in range(B):
-                    masked_q_ids_list.append(q_tok_clean.input_ids[i])
-                    q_mask_label_list.append(torch.full_like(q_tok_clean.input_ids[i], -1))
-                cmb_attention_mask = q_tok_clean.attention_mask
-            elif self.mlm_mask_mode == "wholeword":
-                # 1a. WHOLE-WORD masking: quyết định mask ở mức TỪ rồi mới ghép subword →
-                # 'pepsi' bị mask trọn cả 3 subword, không còn subword để copy.
-                attn_list = []
-                for i in range(B):
-                    m_ids, qlab, attn = self._whole_word_mask(words_per_i[i], seeds[i] ^ 0x5A5A5A5A)
-                    masked_q_ids_list.append(m_ids)
-                    q_mask_label_list.append(qlab)
-                    attn_list.append(attn)
-                cmb_attention_mask = torch.stack(attn_list)
-            else:
-                # 1b. SUBWORD masking (BERT-style) — giữ cho ablation A/B.
-                q_tok_cmb = self.tokenizer(combined_texts, padding="max_length", truncation=True, max_length=self.txt_max_len, return_tensors="pt")
-                for i in range(B):
-                    gen = torch.Generator(device=q_tok_cmb.input_ids.device)
-                    gen.manual_seed((seeds[i] ^ 0x5A5A5A5A) & 0xFFFFFFFFFFFFFFFF)
-                    m_ids, qlab = self._random_word(q_tok_cmb.input_ids[i], self.tokenizer, self.mask_prob, gen, self.pad_id)
-                    attn = q_tok_cmb.attention_mask[i]
-                    qlab[attn == 0] = -1; m_ids[attn == 0] = self.pad_id
+                # Prompt chuẩn PreSTU
+                prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
+                split_prompts.append(prompt_text)
+                split_targets.append(target_str)
 
-                    if (qlab != -1).sum() == 0:
-                        valid = (attn == 1) & (q_tok_cmb.input_ids[i] != self.pad_id) & (q_tok_cmb.input_ids[i] != self.eos_id)
-                        idxs = torch.nonzero(valid, as_tuple=False)
-                        if idxs.numel() > 0: j = idxs[0, 0].item(); qlab[j] = q_tok_cmb.input_ids[i][j]; m_ids[j] = self.mask_token_id
+                # --- 3. Chuẩn bị đặc trưng OCR đa phương thức cho SceSpaVis / ViSceT5 ---
+                pad_ocr = norm_tokens[:current_max_len]
+                while len(pad_ocr) < current_max_len:
+                    pad_ocr.append(self.tokenizer.pad_token or "<pad>")
+                char_a, mask_a, flat_ids_a, lens_a = self._add_cons_ocr_info(pad_ocr, current_max_len)
 
-                    masked_q_ids_list.append(m_ids)
-                    q_mask_label_list.append(qlab)
-                cmb_attention_mask = q_tok_cmb.attention_mask
+                twa_char_list.append(char_a)
+                twa_char_mask_list.append(mask_a)
+                twa_word_ids_list.append(flat_ids_a)
 
-            # 2. XỬ LÝ LUỒNG OCR ĐỂ TÍNH TWC (GIỮ NGUYÊN VẸN, KHÔNG ĐỤC LỖ)
-            for i in range(B):
-                src_idx = pollute_indices[i]
-                ocr_data = ocr_raw_list[src_idx] if src_idx >= 0 else self.itm_history[max(0, min(-(src_idx + 1), len(self.itm_history) - 1))][1]
-                info, raw_texts = self._prepare_ocr(ocr_data, max_len_in_batch=current_max_len)
-                norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
+                indices_map = []
+                for j, l in enumerate(lens_a):
+                    indices_map.extend([j] * l.item())
+                ocr_to_word_map_list.append(torch.tensor(indices_map, dtype=torch.long))
 
-                if _cloze_mode:
-                    # T5 span-infill: mask OCR-overlap words (grounded) + a few random
-                    # (LM signal); target = clean words in sentinel format.
-                    masked_q, target_q, n_span, span_types = _build_grounded_cloze(
-                        qs[i], norm_tokens, rand_prob=getattr(self, "mlm_rand_prob", 0.15),
-                        seed=seeds[i] ^ 0xC10E,
-                        style=getattr(self, "gen_target_style", "sentinel"))
-                    gen_masked_q_list.append(masked_q)
-                    gen_target_texts.append(target_q)
-                    gen_nmask_list.append(n_span)
-                    gen_span_types_list.append(span_types)
-
-                if use_ocr_aug:
-                    pad_ocr, rel_ocr, o2r, r2o, _ = self._findRelatedOCR_adr(norm_tokens, current_max_len, adv_pro, self.contrastive_label_list, self.editlen)
-
-                    char_a, mask_a, flat_ids_a, lens_a = self._add_cons_ocr_info(pad_ocr, current_max_len)
-                    char_b, mask_b, flat_ids_b, lens_b = self._add_cons_ocr_info(rel_ocr, current_max_len)
-
-                    # --- Cloze OCR branch (decoder reads masked word here): SINGLE CLEAN set ---
-                    if _cloze_mode:
-                        gen_char_list.append(char_a)
-                        gen_char_mask_list.append(mask_a)
-                        gen_word_ids_list.append(flat_ids_a)
-                        _gmap = []
-                        for j, l in enumerate(lens_a): _gmap.extend([j] * l.item())
-                        gen_map_list.append(torch.tensor(_gmap, dtype=torch.long))
-
-                    # Nối Gốc và Augmented (Không hề đục lỗ!)
-                    twa_word_ids_list.append(torch.cat([flat_ids_a, flat_ids_b], dim=0))
-                    twa_char_list.append(torch.cat([char_a, char_b], dim=0))
-                    twa_char_mask_list.append(torch.cat([mask_a, mask_b], dim=0))
-
-                    indices_map = []
-                    for j, l in enumerate(torch.cat([lens_a, lens_b], dim=0)): indices_map.extend([j] * l.item())
-                    ocr_to_word_map_list.append(torch.tensor(indices_map, dtype=torch.long))
-
-                    if getattr(self, "twc_dup_box", True):
-                        boxes_all = torch.cat([info["boxes"], info["boxes"]], dim=0)
-                    else:
-                        # HARD-TWC: augmented half gets ZERO boxes → no positional
-                        # shortcut, forcing text-based matching (parallels the zero-pad
-                        # det/rec of the augmented half).
-                        boxes_all = torch.cat([info["boxes"], torch.zeros_like(info["boxes"])], dim=0)
-                    mask_all = torch.cat([info["word_mask"], info["word_mask"]], dim=0)
-                    o2r_list.append(o2r); r2o_list.append(r2o)
-
-                    # Per-word group key = (OCR-source image, normalized text) so the
-                    # model can re-link cross-sample tokens that are the SAME text of
-                    # the SAME image (e.g. one image asked with several questions in a
-                    # batch). PAD/ignored positions -> -1.
-                    if src_idx >= 0:
-                        _src_path = paths[src_idx]
-                    else:
-                        _hi = max(0, min(-(src_idx + 1), len(self.itm_history) - 1))
-                        _src_path = self.itm_history[_hi][0]
-                    grp = []
-                    for k in range(current_max_len):
-                        if k < len(norm_tokens) and o2r[k, k] != self.contrastive_ignore:
-                            grp.append(_stable_hash_int(f"{_src_path}|{norm_tokens[k]}") & 0x3FFFFFFF)
-                        else:
-                            grp.append(-1)
-                    group_ids_list.append(torch.tensor(grp, dtype=torch.long))
-
-                else:
-                    # Chế độ only_itm_mlm
-                    pad_ocr = norm_tokens[:current_max_len]
-                    while len(pad_ocr) < current_max_len: pad_ocr.append(self.tokenizer.pad_token or "<pad>")
-                    char_a, mask_a, flat_ids_a, lens_a = self._add_cons_ocr_info(pad_ocr, current_max_len)
-
-                    twa_word_ids_list.append(flat_ids_a)
-                    twa_char_list.append(char_a)
-                    twa_char_mask_list.append(mask_a)
-
-                    indices_map = []
-                    for j, l in enumerate(lens_a): indices_map.extend([j] * l.item())
-                    ocr_to_word_map_list.append(torch.tensor(indices_map, dtype=torch.long))
-
-                    boxes_all = info["boxes"]
-                    mask_all = info["word_mask"]
-
-                info["boxes_word_all"] = boxes_all; info["word_mask_all"] = mask_all
-                # ITC same-image key: đường dẫn ảnh CỦA CHÍNH sample (ảnh trong
-                # pixel_values — carrier của image_id), KHÔNG phải nguồn OCR pollute.
-                # Loss dùng để loại "câu hỏi anh em" / bản trùng cùng-ảnh (1 ảnh ~3
-                # câu hỏi thành 3 sample) khỏi negative của ITC — chúng vẫn thuộc về
-                # ảnh đó, phạt là false-negative.
-                info["itc_image_path"] = paths[i]
+                info["boxes_word_all"] = info["boxes"]
+                info["word_mask_all"] = info["word_mask"]
                 ocr_info_list.append(info)
-                ocr_mask_token_list.append(mask_all.clone()); ocr_mask_box_list.append(mask_all.clone())
+                ocr_mask_list.append(info["word_mask"].clone())
 
-            ocr_mask = torch.stack(ocr_mask_token_list).to(pixel_values.device)
+            # Tokenize SplitOCR Inputs (Prompt + Prefix) và Labels (Suffix Target)
+            prompt_tok = self.tokenizer(
+                split_prompts,
+                padding="max_length",
+                truncation=True,
+                max_length=self.txt_max_len,
+                return_tensors="pt"
+            )
+            target_tok = self.tokenizer(
+                split_targets,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tgt_max_len,
+                return_tensors="pt"
+            )
+            labels = target_tok.input_ids
+            labels[labels == self.pad_id] = -100
 
-            # Đóng gói kết quả cho Model
-            batch_dict = {
-                # Chỉ đưa chuỗi Text (đã nối OCR) vào làm Text Branch
-                "mlm_input_ids": torch.stack(masked_q_ids_list).to(pixel_values.device),
-                "attention_mask": cmb_attention_mask.to(pixel_values.device),
-
-                # Label là nhãn đục lỗ của chuỗi Text trên
-                "cmb_text_mask_label": torch.stack(q_mask_label_list).to(pixel_values.device),
-
-                "labels": lab.clone().fill_(-100).to(pixel_values.device) if lab is not None else None,
-                "pixel_values": pixel_values, "pil_images": pil_images,
-                "ocr_info": ocr_info_list, "ocr_mask_token": ocr_mask, "ocr_mask_box": ocr_mask,
-                "tag_pollute": tag_pollute.to(pixel_values.device),
+            return {
+                "input_ids": prompt_tok.input_ids.to(pixel_values.device),
+                "attention_mask": prompt_tok.attention_mask.to(pixel_values.device),
+                "labels": labels.to(pixel_values.device),
+                "pixel_values": pixel_values,
+                "pil_images": pil_images,
+                "ocr_info": ocr_info_list,
+                "ocr_mask_token": torch.stack(ocr_mask_list).to(pixel_values.device),
+                "ocr_mask_box": None,
                 "twa_ocr_char": torch.stack(twa_char_list).to(pixel_values.device),
                 "twa_ocr_char_mask": torch.stack(twa_char_mask_list).to(pixel_values.device),
                 "twa_word_ids": torch.nn.utils.rnn.pad_sequence(twa_word_ids_list, batch_first=True, padding_value=self.pad_id).to(pixel_values.device),
-                "ocr_to_word_map": torch.nn.utils.rnn.pad_sequence(ocr_to_word_map_list, batch_first=True, padding_value=-1).to(pixel_values.device)
+                "ocr_to_word_map": torch.nn.utils.rnn.pad_sequence(ocr_to_word_map_list, batch_first=True, padding_value=-1).to(pixel_values.device),
             }
-
-            if use_ocr_aug:
-                batch_dict["o2r_labels"] = torch.stack(o2r_list).to(pixel_values.device)
-                batch_dict["r2o_labels"] = torch.stack(r2o_list).to(pixel_values.device)
-                batch_dict["twc_group_ids"] = torch.stack(group_ids_list).to(pixel_values.device)
-            else:
-                batch_dict["o2r_labels"] = None
-                batch_dict["r2o_labels"] = None
-                batch_dict["twc_group_ids"] = None
-
-            if _cloze_mode and any(n > 0 for n in gen_nmask_list):
-                # GROUNDED-CLOZE. Encoder input = question with OCR-overlapping words
-                # replaced by <extra_id_i> masks; decoder target = those CLEAN words
-                # (sentinel format). The masked words are absent from the text branch
-                # but present in the OCR feature branch, so the decoder must READ the
-                # OCR feature to recover them — warms cross-attention on a CLEAN target.
-                gen_cap = min(64, self.txt_max_len)
-                gen_tok = self.tokenizer(
-                    gen_target_texts, padding="max_length", truncation=True,
-                    max_length=gen_cap, return_tensors="pt",
-                )
-                gen_labels = gen_tok.input_ids.clone()
-                gen_labels[gen_labels == self.pad_id] = -100
-                # Samples with NO overlapping word carry no grounding signal — fully
-                # ignore them (all -100) so the decoder isn't trained to emit a bare EOS.
-                for _bi, _ns in enumerate(gen_nmask_list):
-                    if _ns == 0:
-                        gen_labels[_bi] = -100
-
-                # Per-target-token type for the grounded/random accuracy split:
-                #   1 = GROUNDED span token, 0 = RANDOM span token, -1 = sentinel/pad
-                # (excluded). Spans are delimited by the <extra_id_i> sentinels, in order.
-                if not hasattr(self, "_sentinel_ids"):
-                    self._sentinel_ids = {self.tokenizer.convert_tokens_to_ids(f"<extra_id_{k}>")
-                                          for k in range(0, 100)}
-                gen_type = torch.full_like(gen_labels, -1)
-                if getattr(self, "gen_target_style", "sentinel") == "qa":
-                    # RAW single-span target (no sentinels): every content token takes
-                    # the span's type; only pad/eos stay excluded (-1).
-                    _eos = self.tokenizer.eos_token_id
-                    for _bi in range(gen_labels.size(0)):
-                        st = gen_span_types_list[_bi] if _bi < len(gen_span_types_list) else []
-                        if not st or gen_nmask_list[_bi] == 0:
-                            continue
-                        _t = 1 if st[0] else 0
-                        for _pos, _tid in enumerate(gen_tok.input_ids[_bi].tolist()):
-                            if _tid != self.pad_id and _tid != _eos:
-                                gen_type[_bi, _pos] = _t
-                else:
-                    for _bi in range(gen_labels.size(0)):
-                        st = gen_span_types_list[_bi] if _bi < len(gen_span_types_list) else []
-                        if not st:
-                            continue
-                        span_ptr = -1
-                        for _pos, _tid in enumerate(gen_tok.input_ids[_bi].tolist()):
-                            if _tid in self._sentinel_ids:
-                                span_ptr += 1
-                            elif _tid != self.pad_id and 0 <= span_ptr < len(st):
-                                gen_type[_bi, _pos] = 1 if st[span_ptr] else 0
-                batch_dict["gen_mlm_type"] = gen_type.to(pixel_values.device)
-
-                gen_in = self.tokenizer(
-                    gen_masked_q_list, padding="max_length", truncation=True,
-                    max_length=self.txt_max_len, return_tensors="pt",
-                )
-                batch_dict["gen_input_ids"] = gen_in.input_ids.to(pixel_values.device)
-                batch_dict["gen_attention_mask"] = gen_in.attention_mask.to(pixel_values.device)
-                batch_dict["gen_labels"] = gen_labels.to(pixel_values.device)
-
-                # Dedicated single-set CLEAN OCR branch the decoder reads the masked
-                # word from; det/rec/box (visual) come from the shared ocr_info (model
-                # auto-crops to this word count). Falls back to shared twa_* if absent.
-                if gen_word_ids_list:
-                    batch_dict["gen_twa_ocr_char"] = torch.stack(gen_char_list).to(pixel_values.device)
-                    batch_dict["gen_twa_ocr_char_mask"] = torch.stack(gen_char_mask_list).to(pixel_values.device)
-                    batch_dict["gen_twa_word_ids"] = torch.nn.utils.rnn.pad_sequence(
-                        gen_word_ids_list, batch_first=True, padding_value=self.pad_id).to(pixel_values.device)
-                    batch_dict["gen_ocr_to_word_map"] = torch.nn.utils.rnn.pad_sequence(
-                        gen_map_list, batch_first=True, padding_value=-1).to(pixel_values.device)
-
-            return batch_dict
 
         # =========================================================
         # NHÁNH FINETUNE / INFERENCE
