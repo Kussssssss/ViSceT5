@@ -303,6 +303,44 @@ def _mlm_masked_acc(out, batch, device):
     return (pred[mask] == tgt[mask]).float().mean().item(), n
 
 
+def _debug_split_ocr(model, data_collator, dataset, device, n_show=5):
+    """Readable SplitOCR debug: show the SplitOCR prompt (prefix words), the
+    gold target words, and the model prediction."""
+    print("\n" + "=" * 70)
+    print("🔎 [PreSTU SplitOCR DEBUG] Prompt (Prefix) -> Target vs Predicted")
+    print("=" * 70)
+    k = min(8, len(dataset))
+    if k < 1:
+        return
+    tok = data_collator.tokenizer
+    batch = data_collator([dataset[i] for i in range(k)])
+    batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
+    model.eval()
+    with torch.no_grad():
+        out = model(**batch)
+    logits = out.get("logits")
+    if logits is None:
+        model.train()
+        return
+    pred = logits.argmax(-1)
+    labels = batch["labels"]
+    in_ids = batch["input_ids"]
+    shown = 0
+    for i in range(labels.size(0)):
+        pos = [p for p, t in enumerate(labels[i].tolist()) if t != -100]
+        prompt = tok.decode([int(t) for t in in_ids[i].tolist() if int(t) != data_collator.pad_id], skip_special_tokens=True).strip()
+        gold = tok.decode([int(labels[i][p]) for p in pos], skip_special_tokens=True).strip()
+        prd = tok.decode([int(pred[i][p].item()) for p in pos], skip_special_tokens=True).strip()
+        print(f"  [sample {i}] Prompt: {prompt[:90]}")
+        print(f"              Target: {gold[:80]}")
+        print(f"              Pred  : {prd[:80]}")
+        shown += 1
+        if shown >= n_show:
+            break
+    print("=" * 70 + "\n")
+    model.train()
+
+
 def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
     """Human-readable MLM debug: for a few CLEAN samples, show the masked input text
     and, for each masked WORD, the gold token vs the model's prediction (argmax).
@@ -369,64 +407,6 @@ def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
     model.train()
 
 
-def _debug_gen_cloze(model, data_collator, dataset, device, n_show=5):
-    """Readable grounded-cloze debug: show the MASKED question (encoder input), the
-    CLEAN target words, and the model output — i.e. whether the decoder recovers the
-    OCR-overlapping words by reading the OCR feature branch."""
-    print("\n" + "=" * 70)
-    print("🔎 [MLM DEBUG] decoder span-infill (MLM): masked question → predicted word (target vs output)")
-    print("=" * 70)
-    k = min(8, len(dataset))
-    if k < 2:
-        print("  skip"); return
-    tok = data_collator.tokenizer
-    batch = data_collator([dataset[i] for i in range(k)])
-    batch = {kk: (vv.to(device) if torch.is_tensor(vv) else vv) for kk, vv in batch.items()}
-    if batch.get("gen_labels") is None or batch.get("gen_input_ids") is None:
-        print("  (no gen targets in batch)"); return
-    model.eval()
-    orig = getattr(model, "pretrain", False)
-    model.pretrain = False
-    try:
-        with torch.no_grad():
-            out = model(
-                input_ids=batch.get("gen_input_ids"),
-                attention_mask=batch.get("gen_attention_mask"),
-                pixel_values=batch.get("pixel_values"),
-                pil_images=batch.get("pil_images"),
-                ocr_info=batch.get("ocr_info"),
-                ocr_mask_token=batch.get("ocr_mask_token"),
-                ocr_mask_box=batch.get("ocr_mask_box"),
-                labels=batch.get("gen_labels"),
-                twa_ocr_char=batch.get("gen_twa_ocr_char", batch.get("twa_ocr_char")),
-                twa_ocr_char_mask=batch.get("gen_twa_ocr_char_mask", batch.get("twa_ocr_char_mask")),
-                twa_word_ids=batch.get("gen_twa_word_ids", batch.get("twa_word_ids")),
-                ocr_to_word_map=batch.get("gen_ocr_to_word_map", batch.get("ocr_to_word_map")),
-            )
-    finally:
-        model.pretrain = orig
-    logits = out.get("logits")
-    if logits is None:
-        print("  (no logits)"); model.train(); return
-    pred = logits.argmax(-1)
-    labels = batch["gen_labels"]
-    gen_in = batch["gen_input_ids"]
-    print("  (masked words removed from the question; decoder must read them from OCR features)")
-    shown = 0
-    for i in range(labels.size(0)):
-        pos = [p for p, t in enumerate(labels[i].tolist()) if t != -100]
-        if not pos:
-            continue  # no cloze span for this sample
-        masked_q = tok.decode([int(t) for t in gen_in[i].tolist() if int(t) != data_collator.pad_id],
-                              skip_special_tokens=False).strip()
-        gold = tok.decode([int(labels[i][p]) for p in pos], skip_special_tokens=True).strip()
-        prd = tok.decode([int(pred[i][p].item()) for p in pos], skip_special_tokens=True).strip()
-        print(f"  [sample {i}] masked Q: {masked_q[:100]}")
-        print(f"              target  : {gold[:80]}")
-        print(f"              output  : {prd[:80]}")
-        shown += 1
-        if shown >= n_show:
-            break
     if shown == 0:
         print("  (no cloze spans in this batch — no question∩OCR overlap)")
     print("=" * 70 + "\n")
@@ -998,22 +978,8 @@ def main(args_list=None):
     verify_metrics = trainer.evaluate()
 
     # Readable debug AFTER training (MOCK always; FULL only if TWC_TRAIN_LOG=1).
-    # In cloze modes the decoder span-infill IS the masked-prediction; encoder-head
-    # MLM is dropped, so only the cloze debug is meaningful.
     if pretrain_debug:
-        if _cloze:
-            _debug_gen_cloze(model, data_collator, val_dataset, DEVICE)
-        else:
-            _debug_mlm_predictions(model, data_collator, val_dataset, DEVICE)
-
-    # OCR-ablation grounding evidence — run in cloze modes even on the FULL run (cheap,
-    # one-time, ~12 batches) since it is the key proof that grounded acc comes from
-    # reading OCR. Disable with env OCR_ABLATION=0.
-    if _cloze and os.environ.get("OCR_ABLATION", "1") not in ("0", "false", "False"):
-        try:
-            _debug_ocr_ablation(model, data_collator, val_dataset, DEVICE)
-        except Exception as e:
-            print(f"⚠️ [OCR-ABLATION] skipped: {type(e).__name__}: {e}")
+        _debug_split_ocr(model, data_collator, val_dataset, DEVICE)
 
     # Save best
     trainer.save_model(training_args.output_dir)
