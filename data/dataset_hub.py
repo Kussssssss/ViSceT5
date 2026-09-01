@@ -402,15 +402,64 @@ class DatasetHubLoader:
         ocr_dir = p.get("ocr_dir")
         mapper = spec["mapper_fn"]
         rows = []
-        for split, json_path in ann.items():
-            # Bỏ qua split có JSON hỏng (vd file tải nhầm không phải JSON) thay vì
-            # crash cả build — split khác vẫn dùng được (finetune chỉ cần train/val).
-            try:
-                data = _load_json(json_path)
-            except Exception as e:
-                print(f"⚠️ [Hub] Bỏ qua split '{split}': đọc JSON lỗi ({type(e).__name__}: {e}).")
-                continue
-            rows.extend(mapper(data, img_dir, split, ocr_dir))
+        if ann:
+            for split, json_path in ann.items():
+                # Bỏ qua split có JSON hỏng (vd file tải nhầm không phải JSON) thay vì
+                # crash cả build — split khác vẫn dùng được (finetune chỉ cần train/val).
+                try:
+                    data = _load_json(json_path)
+                except Exception as e:
+                    print(f"⚠️ [Hub] Bỏ qua split '{split}': đọc JSON lỗi ({type(e).__name__}: {e}).")
+                    continue
+                rows.extend(mapper(data, img_dir, split, ocr_dir))
+        elif img_dir and os.path.isdir(img_dir):
+            # PURE IMAGE + OCR PAIRS (e.g. VinText, EVJVQA pre-training datasets without separate QA json)
+            img_index = _file_index(img_dir, _is_img)
+            ocr_index = _file_index(ocr_dir, _is_ocr) if (ocr_dir and os.path.isdir(ocr_dir)) else {}
+            
+            items = []
+            for fname, fpath in img_index.items():
+                stem = os.path.splitext(fname)[0]
+                ocr_path = None
+                for ext in [".npy", ".npz"]:
+                    if f"{stem}{ext}" in ocr_index:
+                        ocr_path = ocr_index[f"{stem}{ext}"]
+                        break
+                if ocr_path is None and stem.isdigit():
+                    stem_int = str(int(stem))
+                    for ext in [".npy", ".npz"]:
+                        if f"{stem_int}{ext}" in ocr_index:
+                            ocr_path = ocr_index[f"{stem_int}{ext}"]
+                            break
+                if ocr_path is None and stem.isdigit():
+                    stem_12 = f"{int(stem):012d}"
+                    for ext in [".npy", ".npz"]:
+                        if f"{stem_12}{ext}" in ocr_index:
+                            ocr_path = ocr_index[f"{stem_12}{ext}"]
+                            break
+                items.append({
+                    "image_filename": fname,
+                    "image_path": fpath,
+                    "ocr_path": ocr_path,
+                })
+            
+            items.sort(key=lambda x: x["image_filename"])
+            n_val = max(1, int(len(items) * 0.05)) if len(items) > 20 else max(1, len(items) // 5)
+            
+            for idx, it in enumerate(items):
+                split = "validation" if idx >= len(items) - n_val else "train"
+                rows.append({
+                    "dataset": None,
+                    "split": split,
+                    "id": f"{dataset_name}_{idx}",
+                    "image_id": idx,
+                    "image_filename": it["image_filename"],
+                    "question": "",
+                    "answer": "",
+                    "all_answers": [],
+                    "image_path": it["image_path"],
+                    "ocr_path": it["ocr_path"],
+                })
         df = pd.DataFrame(rows)
         if "dataset" in df.columns:
             df["dataset"] = dataset_name

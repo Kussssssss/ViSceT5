@@ -600,34 +600,44 @@ def main(args_list=None):
         hub = DatasetHubLoader(raw_dir, out_dir)
         
         import yaml
-        config_path = f"configs/data/{data_args.dataset_name}.yaml"
-        if os.path.exists(config_path):
-            with open(config_path, 'r', encoding='utf-8') as f:
-                ds_cfg = yaml.safe_load(f)
-            hub.register_dataset(
-                dataset_name=ds_cfg['dataset_name'],
-                task_type="VQA",
-                image_zip_id=ds_cfg['image'].get('drive_id'),
-                image_dir_override='',
-                ocr_zip_id=ds_cfg['ocr'].get('drive_id'),
-                ocr_dir_override='',
-                splits={
-                    "train":      {"id": ds_cfg['dataset']['train'].get('drive_id') or ds_cfg['dataset']['train'].get('dir'), "url": None},
-                    "validation": {"id": ds_cfg['dataset']['validation'].get('drive_id') or ds_cfg['dataset']['validation'].get('dir'), "url": None},
-                    "test":       {"id": ds_cfg['dataset']['test'].get('drive_id') or ds_cfg['dataset']['test'].get('dir'), "url": None},
-                }
-            )
-            hub.prepare(data_args.dataset_name)
-        else:
-            print(f"⚠️ Dataset config not found at {config_path}. Assuming it's already registered or manually ready.")
+        ds_names = [d.strip() for d in data_args.dataset_name.split(",") if d.strip()]
+        all_train_dfs, all_val_dfs = [], []
         
-        try:
-            dfs = hub.load_task(data_args.dataset_name)
-            train_df = dfs["train"]
-            val_df = dfs["validation"]
-        except Exception as e:
-            print(f"❌ Failed to load dataset {data_args.dataset_name} from Hub: {e}")
-            print("Please run scripts/prepare_dataset.py first.")
+        for ds_name in ds_names:
+            config_path = f"configs/data/{ds_name}.yaml"
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    ds_cfg = yaml.safe_load(f)
+                
+                ds_sec = ds_cfg.get('dataset', {})
+                hub.register_dataset(
+                    dataset_name=ds_cfg['dataset_name'],
+                    task_type="VQA",
+                    image_zip_id=ds_cfg.get('image', {}).get('drive_id'),
+                    image_dir_override='',
+                    ocr_zip_id=ds_cfg.get('ocr', {}).get('drive_id'),
+                    ocr_dir_override='',
+                    splits={
+                        "train":      {"id": ds_sec.get('train', {}).get('drive_id') or ds_sec.get('train', {}).get('dir'), "url": None},
+                        "validation": {"id": ds_sec.get('validation', {}).get('drive_id') or ds_sec.get('validation', {}).get('dir'), "url": None},
+                        "test":       {"id": ds_sec.get('test', {}).get('drive_id') or ds_sec.get('test', {}).get('dir'), "url": None},
+                    }
+                )
+                print(f"⬇️  Preparing {ds_name} via Hub...")
+                hub.prepare(ds_name)
+                dfs = hub.load_task(ds_name)
+                if len(dfs["train"]) > 0: all_train_dfs.append(dfs["train"])
+                if len(dfs["validation"]) > 0: all_val_dfs.append(dfs["validation"])
+                print(f"   ✅ {ds_name} Ready: {len(dfs['train'])} train, {len(dfs['validation'])} val.")
+            else:
+                print(f"⚠️ Dataset config not found at {config_path}. Assuming it's already registered or manually ready.")
+        
+        if all_train_dfs:
+            train_df = pd.concat(all_train_dfs, ignore_index=True).sample(frac=1, random_state=training_args.seed).reset_index(drop=True)
+            val_df = pd.concat(all_val_dfs, ignore_index=True).sample(frac=1, random_state=training_args.seed).reset_index(drop=True) if all_val_dfs else pd.DataFrame()
+            print(f"🔄 Combined Pretrain Datasets: {len(train_df)} train, {len(val_df)} val samples.")
+        else:
+            print("❌ No datasets loaded. Please run scripts/prepare_dataset.py first.")
             return
 
     if training_args.smoke_test:
