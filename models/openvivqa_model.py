@@ -132,7 +132,7 @@ class OpenViVQAModel(PreTrainedModel):
         )
 
         # Khởi tạo Bộ tiền xử lý ảnh
-        img_sz = int(getattr(config, "image_size", None) or getattr(config, "vs_target_size", None) or getattr(self.qa_clip.config, "image_size", 224))
+        img_sz = int(getattr(config, "vs_target_size", getattr(self.qa_clip.config, "image_size", 224)))
         self.image_processor = CLIPImageProcessor(
             do_resize=bool(getattr(config, "do_resize", True)),
             do_center_crop=bool(getattr(config, "do_center_crop", False)),

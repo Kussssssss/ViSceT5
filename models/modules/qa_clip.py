@@ -220,46 +220,12 @@ class InstructCLIPEncoder(nn.Module):
             return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
         return BaseModelOutput(last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions)
 
-class FlexibleCLIPVisionEmbeddings(CLIPVisionEmbeddings):
-    def forward(self, pixel_values: torch.FloatTensor) -> torch.Tensor:
-        batch_size = pixel_values.shape[0]
-        patch_embeds = self.patch_embedding(pixel_values)  # shape = [batch_size, embed_dim, grid_h, grid_w]
-        grid_h, grid_w = patch_embeds.shape[2], patch_embeds.shape[3]
-        patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
-
-        class_embeds = self.class_embedding.expand(batch_size, 1, -1)
-        embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
-
-        num_positions = embeddings.shape[1]
-        orig_positions = self.position_embedding.weight.shape[0]
-
-        if num_positions == orig_positions:
-            pos_emb = self.position_embedding(self.position_ids)
-        else:
-            # 2D Bicubic Positional Embedding Interpolation (PreSTU / ViT standard)
-            orig_grid = int(round((orig_positions - 1) ** 0.5))  # typically 14 for 224x224
-            cls_pos = self.position_embedding.weight[:1, :].unsqueeze(0)  # (1, 1, D)
-            patch_pos = self.position_embedding.weight[1:, :].unsqueeze(0)  # (1, orig_grid*orig_grid, D)
-            D = patch_pos.shape[-1]
-            patch_pos = patch_pos.transpose(1, 2).reshape(1, D, orig_grid, orig_grid)
-            patch_pos_interp = F.interpolate(
-                patch_pos.float(),
-                size=(grid_h, grid_w),
-                mode="bicubic",
-                align_corners=False,
-            ).to(patch_pos.dtype)
-            patch_pos_interp = patch_pos_interp.flatten(2).transpose(1, 2)  # (1, grid_h*grid_w, D)
-            pos_emb = torch.cat([cls_pos, patch_pos_interp], dim=1)
-
-        embeddings = embeddings + pos_emb
-        return embeddings
-
 class CLIPVisionTransformer(nn.Module):
     def __init__(self, config: CLIPVisionConfig):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
-        self.embeddings = FlexibleCLIPVisionEmbeddings(config)
+        self.embeddings = CLIPVisionEmbeddings(config)
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.encoder = InstructCLIPEncoder(config)
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
