@@ -733,72 +733,69 @@ class OpenViVQAModel(PreTrainedModel):
             vs_out = {}
 
         # ----------------------------------------------------
-        # 3. ABLATION MODULE: OCR CONSFORMER
+        # 3. ABLATION MODULE: OCR CONSFORMER (Only used in Finetune when OCR features provided)
         # ----------------------------------------------------
-        assert twa_word_ids is not None, "twa_word_ids required"
-        assert ocr_to_word_map is not None, "ocr_to_word_map required"
-        assert twa_ocr_char is not None, "twa_ocr_char required"
-        assert twa_ocr_char_mask is not None, "twa_ocr_char_mask required"
-        assert ocr_info is not None, "ocr_info required"
+        if not self.pretrain and twa_word_ids is not None and ocr_info is not None:
+            word_ids_for_ocr = twa_word_ids.to(device)
+            pad_id = self.vit5.config.pad_token_id
+            token_mask_for_ocr = (word_ids_for_ocr != pad_id).long()
+            ocr_map = ocr_to_word_map.to(device).long() if ocr_to_word_map is not None else None
+            L_tok = word_ids_for_ocr.size(1)
 
-        word_ids_for_ocr = twa_word_ids.to(device)
-        pad_id = self.vit5.config.pad_token_id
-        token_mask_for_ocr = (word_ids_for_ocr != pad_id).long()
-        ocr_map = ocr_to_word_map.to(device).long()
-        L_tok = word_ids_for_ocr.size(1)
+            if ocr_map is not None and ocr_map.size(1) != L_tok: 
+                ocr_map = _pad_or_crop_lastdim_int(ocr_map, L_tok, pad_value=-1)
+            if token_mask_for_ocr.size(1) != L_tok: 
+                token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
 
-        if ocr_map.size(1) != L_tok: 
-            ocr_map = _pad_or_crop_lastdim_int(ocr_map, L_tok, pad_value=-1)
-        if token_mask_for_ocr.size(1) != L_tok: 
-            token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
+            char_ids_for_ocr = twa_ocr_char.to(device) if twa_ocr_char is not None else None
+            char_mask_for_ocr = twa_ocr_char_mask.to(device) if twa_ocr_char_mask is not None else None
+            ocr_box_mask_for_ocr = ocr_mask_box.to(device).long() if ocr_mask_box is not None else None
 
-        char_ids_for_ocr = twa_ocr_char.to(device)
-        char_mask_for_ocr = twa_ocr_char_mask.to(device)
-        ocr_box_mask_for_ocr = ocr_mask_box.to(device).long() if ocr_mask_box is not None else None
+            if use_ocr:
+                ocr_fused_feat = self._encode_ocr_features(
+                    ocr_info,
+                    word_ids_for_ocr,
+                    ocr_map,
+                    char_ids_for_ocr,
+                    char_mask_for_ocr,
+                    token_mask_for_ocr,
+                    ocr_box_mask_for_ocr,
+                    device,
+                )
+            else:
+                ocr_fused_feat, mask_ocr = self._encode_ocr_baseline_features(
+                    ocr_info, word_ids_for_ocr, ocr_map, twa_ocr_char,
+                    twa_ocr_char_mask, token_mask_for_ocr, ocr_box_mask_for_ocr, device
+                )
+                token_mask_for_ocr = mask_ocr
 
-        if use_ocr:
-            ocr_fused_feat = self._encode_ocr_features(
-                ocr_info,
-                word_ids_for_ocr,
-                ocr_map,
-                char_ids_for_ocr,
-                char_mask_for_ocr,
-                token_mask_for_ocr,
-                ocr_box_mask_for_ocr,
-                device,
-            )
+            L_tok = word_ids_for_ocr.size(1)
+            if ocr_fused_feat.size(1) != L_tok:
+                ocr_fused_feat = _pad_or_crop_lastdim(ocr_fused_feat, L_tok, pad_value=0.0)
+            if token_mask_for_ocr.size(1) != L_tok:
+                token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
+
+            _blocks = [
+                (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
+                (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
+                (ocr_fused_feat,           token_mask_for_ocr.long()),
+            ]
         else:
-            # Baseline: hợp nhất TUYẾN TÍNH thay cho Constituent/Group/SpatialCircle.
-            # Cũng ở TOKEN-LEVEL (L_tok) như đường ON → ablation chỉ đổi phần xử lý,
-            # KHÔNG đổi độ dài chuỗi (trước đây baseline trả word-level nên ngắn hơn ~1.8x).
-            ocr_fused_feat, mask_ocr = self._encode_ocr_baseline_features(
-                ocr_info, word_ids_for_ocr, ocr_map, twa_ocr_char,
-                twa_ocr_char_mask, token_mask_for_ocr, ocr_box_mask_for_ocr, device
-            )
-            token_mask_for_ocr = mask_ocr
+            # PRESTU SPLITOCR PRE-TRAINING: Strictly fuses Image Pixels and Text Prompt
+            _blocks = [
+                (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
+                (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
+            ]
 
-        # Cả hai đường giờ đều token-level → pad/crop về L_tok cho cả hai (thường là no-op).
-        L_tok = word_ids_for_ocr.size(1)
-        if ocr_fused_feat.size(1) != L_tok:
-            ocr_fused_feat = _pad_or_crop_lastdim(ocr_fused_feat, L_tok, pad_value=0.0)
-        if token_mask_for_ocr.size(1) != L_tok:
-            token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
-
-        # Per-component non-finite diagnostic (NaN AND inf) — names the exact culprit
-        # feeding fused_seq + its magnitude, so the pretrain guard below is never a guess.
-        # FWD_DIAG=1: mở kiểm tra này cho CẢ finetune (chỉ in log, không đổi tính toán) —
-        # cần để biết thành phần nào của fused_seq sinh NaN khi enc_out báo NaN.
+        # Per-component non-finite diagnostic (NaN AND inf)
         if getattr(self, "_pretrain_stage", False) or os.environ.get("FWD_DIAG") == "1":
-            # pixel_values / txt_hidden_states = ĐẦU VÀO THỰC của QA-CLIP (txt_emb ở dưới
-            # là txt_emb_for_enc — tensor KHÁC, nên trước đây không lộ ra thủ phạm).
             if os.environ.get("FWD_DIAG") == "1":
                 _bad_w = [n for n, p in self.qa_clip.named_parameters() if not torch.isfinite(p).all()]
                 if _bad_w:
                     print(f"🚨 [FWD_DIAG] qa_clip có {len(_bad_w)} TRỌNG SỐ non-finite, vd: {_bad_w[:3]}")
             for _cn, _ct in (("pixel_values", pixel_values_dev),
                              ("txt_hidden_states(->qa_clip)", txt_emb_for_clip),
-                             ("txt_emb", txt_emb_for_enc), ("img_tokens", img_pack["img_tokens"]),
-                             ("ocr_fused_feat", ocr_fused_feat)):
+                             ("txt_emb", txt_emb_for_enc), ("img_tokens", img_pack["img_tokens"])):
                 if not torch.isfinite(_ct).all():
                     _f = _ct.detach().float()
                     _n_nan = int(torch.isnan(_f).sum()); _n_inf = int(torch.isinf(_f).sum())
@@ -806,15 +803,6 @@ class OpenViVQAModel(PreTrainedModel):
                     _rng = (f"finite[min={_fin.min():.3g},max={_fin.max():.3g}]" if _fin.numel() else "all-nonfinite")
                     print(f"🚨 [FORWARD CHECK] {_cn} non-finite: nan={_n_nan} inf={_n_inf} {_rng}")
 
-        # CONCAT CHUỖI VÀO ENCODER — CHỈ nối các khối THỰC SỰ CÓ token.
-        # Với AVF Gated Residual Fusion, visual_search làm giàu img_tokens trực tiếp qua
-        # cross-attention có gate ReZero thay vì nối 50 tokens phân tâm vào fused_seq.
-        # Nhờ đó chuỗi fused_seq luôn có đúng [text, image, ocr] và bit-for-bit == baseline tại gate=0.
-        _blocks = [
-            (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
-            (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
-            (ocr_fused_feat,           token_mask_for_ocr.long()),
-        ]
         _blocks = [(f, mk) for (f, mk) in _blocks if f.size(1) > 0]
         fused_seq = torch.cat([f for f, _ in _blocks], dim=1)
         fused_mask = torch.cat([mk for _, mk in _blocks], dim=1)
