@@ -905,16 +905,14 @@ class ViT5VQADataCollator:
             split_prompts = []
             split_targets = []
 
-            ocr_info_list = []
-            twa_char_list = []
-            twa_char_mask_list = []
-            twa_word_ids_list = []
-            ocr_to_word_map_list = []
-            ocr_mask_list = []
-
+            pad_tok = self.tokenizer.pad_token or "<pad>"
             for i in range(B):
                 info, raw_texts = self._prepare_ocr(ocr_raw_list[i], max_len_in_batch=current_max_len)
-                norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts if isinstance(t, str) and _normalize_text(t, lowercase=True).strip()]
+                norm_tokens = [
+                    _normalize_text(t, lowercase=True).strip()
+                    for t in raw_texts
+                    if isinstance(t, str) and _normalize_text(t, lowercase=True).strip() and _normalize_text(t, lowercase=True).strip() not in {pad_tok, "<pad>", "<unk>", "</s>"}
+                ]
 
                 # --- 1. Sắp xếp không gian Top-Left -> Bottom-Right ---
                 N_words = len(norm_tokens)
@@ -935,26 +933,6 @@ class ViT5VQADataCollator:
                 prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
                 split_prompts.append(prompt_text)
                 split_targets.append(target_str)
-
-                # --- 3. Chuẩn bị đặc trưng OCR đa phương thức cho SceSpaVis / ViSceT5 ---
-                pad_ocr = norm_tokens[:current_max_len]
-                while len(pad_ocr) < current_max_len:
-                    pad_ocr.append(self.tokenizer.pad_token or "<pad>")
-                char_a, mask_a, flat_ids_a, lens_a = self._add_cons_ocr_info(pad_ocr, current_max_len)
-
-                twa_char_list.append(char_a)
-                twa_char_mask_list.append(mask_a)
-                twa_word_ids_list.append(flat_ids_a)
-
-                indices_map = []
-                for j, l in enumerate(lens_a):
-                    indices_map.extend([j] * l.item())
-                ocr_to_word_map_list.append(torch.tensor(indices_map, dtype=torch.long))
-
-                info["boxes_word_all"] = info["boxes"]
-                info["word_mask_all"] = info["word_mask"]
-                ocr_info_list.append(info)
-                ocr_mask_list.append(info["word_mask"].clone())
 
             # Tokenize SplitOCR Inputs (Prompt + Prefix) và Labels (Suffix Target)
             prompt_tok = self.tokenizer(
@@ -980,13 +958,6 @@ class ViT5VQADataCollator:
                 "labels": labels.to(pixel_values.device),
                 "pixel_values": pixel_values,
                 "pil_images": pil_images,
-                "ocr_info": ocr_info_list,
-                "ocr_mask_token": torch.stack(ocr_mask_list).to(pixel_values.device),
-                "ocr_mask_box": None,
-                "twa_ocr_char": torch.stack(twa_char_list).to(pixel_values.device),
-                "twa_ocr_char_mask": torch.stack(twa_char_mask_list).to(pixel_values.device),
-                "twa_word_ids": torch.nn.utils.rnn.pad_sequence(twa_word_ids_list, batch_first=True, padding_value=self.pad_id).to(pixel_values.device),
-                "ocr_to_word_map": torch.nn.utils.rnn.pad_sequence(ocr_to_word_map_list, batch_first=True, padding_value=-1).to(pixel_values.device),
             }
 
         # =========================================================
