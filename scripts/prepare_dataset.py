@@ -15,18 +15,20 @@ def main(args):
     RAW_DATASET_DIR = os.path.join(args.data_dir, "raw")
     OUT_DIR = os.path.join(args.data_dir, "processed")
 
-    # 2. Load dataset config
-    with open(args.config, 'r', encoding='utf-8') as f:
-        config = yaml.safe_load(f)
-
-    vocab_cfg_path = os.path.join(os.path.dirname(args.config), "vocab.yaml")
+    # 2. Parse config paths (supports comma-separated list)
+    cfg_paths = [c.strip() for c in args.config.split(",") if c.strip()]
+    
+    # Download vocab if available in the first config's directory
+    first_cfg = cfg_paths[0]
+    first_cfg_dir = os.path.dirname(first_cfg) if os.path.exists(first_cfg) else "configs/data"
+    vocab_cfg_path = os.path.join(first_cfg_dir, "vocab.yaml")
     if os.path.exists(vocab_cfg_path):
         with open(vocab_cfg_path, 'r', encoding='utf-8') as f:
             vocab_cfg = yaml.safe_load(f) or {}
             
         term_id = vocab_cfg.get("term_vocab_id", "")
         viet_id = vocab_cfg.get("viet_vocab_id", "")
-        out_vocab_dir = os.path.dirname(args.config)
+        out_vocab_dir = first_cfg_dir
         
         from utils.io_utils import download_file
         if term_id:
@@ -36,62 +38,73 @@ def main(args):
             print("\n📥 Downloading viet_vocab.txt...")
             download_file(viet_id, os.path.join(out_vocab_dir, "viet_vocab.txt"))
 
-    NAME_SET1 = config['dataset_name']
-    
-    # Resolve image source
-    image_dir = config['image'].get('dir', '')
-    image_id = config['image'].get('drive_id', '')
-
-    if image_dir and os.path.isdir(image_dir):
-        image_dir_override = image_dir
-        image_zip_id = None
-    else:
-        image_dir_override = ''
-        image_zip_id = image_id
-
-    # Resolve ocr source
-    ocr_dir = config['ocr'].get('dir', '') if 'ocr' in config else ''
-    ocr_id = config['ocr'].get('drive_id', '') if 'ocr' in config else ''
-    if ocr_dir and os.path.isdir(ocr_dir):
-        ocr_dir_override = ocr_dir
-        ocr_zip_id = None
-    else:
-        ocr_dir_override = ''
-        ocr_zip_id = ocr_id
-
-    # Resolve train/validation/test splits
-    def resolve_split(section):
-        local_dir = section.get('dir', '')
-        drive_id = section.get('drive_id', '')
-        if local_dir and os.path.exists(local_dir):
-            return local_dir
-        return drive_id
-
-    train_id = resolve_split(config['dataset']['train'])
-    val_id = resolve_split(config['dataset']['validation'])
-    test_id = resolve_split(config['dataset']['test'])
-
     hub = DatasetHubLoader(RAW_DATASET_DIR, OUT_DIR)
+    all_train_dfs, all_val_dfs, all_test_dfs = [], [], []
 
-    # 3. Register dataset
-    hub.register_dataset(
-        dataset_name=NAME_SET1,
-        task_type="VQA",
-        image_zip_id=image_zip_id,
-        image_dir_override=image_dir_override,
-        ocr_zip_id=ocr_zip_id,
-        ocr_dir_override=ocr_dir_override,
-        splits={
-            "train":      {"id": train_id, "url": None},
-            "validation": {"id": val_id, "url": None},
-            "test":       {"id": test_id, "url": None},
-        },
-    )
+    for cfg_entry in cfg_paths:
+        if not os.path.exists(cfg_entry):
+            cand = os.path.join("configs", "data", f"{cfg_entry}.yaml")
+            if os.path.exists(cand):
+                cfg_entry = cand
+            else:
+                print(f"⚠️ Config not found: {cfg_entry}; skipping.")
+                continue
 
-    print(f"\n⬇️  Downloading & Extracting Dataset {NAME_SET1}...")
-    path_info1 = hub.prepare(NAME_SET1)
-    dfs1 = hub.load_task(NAME_SET1)
-    print(f"   ✅ {NAME_SET1} Ready: {len(dfs1['train'])} train samples.")
+        with open(cfg_entry, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+
+        NAME_SET = config['dataset_name']
+        
+        # Resolve image source
+        image_dir = config.get('image', {}).get('dir', '')
+        image_id = config.get('image', {}).get('drive_id', '')
+        image_dir_override = image_dir if (image_dir and os.path.isdir(image_dir)) else ''
+        image_zip_id = None if image_dir_override else image_id
+
+        # Resolve ocr source
+        ocr_dir = config.get('ocr', {}).get('dir', '')
+        ocr_id = config.get('ocr', {}).get('drive_id', '')
+        ocr_dir_override = ocr_dir if (ocr_dir and os.path.isdir(ocr_dir)) else ''
+        ocr_zip_id = None if ocr_dir_override else ocr_id
+
+        # Resolve train/validation/test splits
+        def resolve_split(section):
+            if not isinstance(section, dict):
+                return ''
+            local_dir = section.get('dir', '')
+            drive_id = section.get('drive_id', '')
+            if local_dir and os.path.exists(local_dir):
+                return local_dir
+            return drive_id
+
+        ds_sec = config.get('dataset', {})
+        train_id = resolve_split(ds_sec.get('train', {}))
+        val_id = resolve_split(ds_sec.get('validation', {}))
+        test_id = resolve_split(ds_sec.get('test', {}))
+
+        # Register dataset
+        hub.register_dataset(
+            dataset_name=NAME_SET,
+            task_type="VQA",
+            image_zip_id=image_zip_id,
+            image_dir_override=image_dir_override,
+            ocr_zip_id=ocr_zip_id,
+            ocr_dir_override=ocr_dir_override,
+            splits={
+                "train":      {"id": train_id, "url": None},
+                "validation": {"id": val_id, "url": None},
+                "test":       {"id": test_id, "url": None},
+            },
+        )
+
+        print(f"\n⬇️  Downloading & Extracting Dataset {NAME_SET}...")
+        hub.prepare(NAME_SET)
+        dfs = hub.load_task(NAME_SET)
+        print(f"   ✅ {NAME_SET} Ready: {len(dfs['train'])} train, {len(dfs['validation'])} val samples.")
+        
+        if len(dfs["train"]) > 0: all_train_dfs.append(dfs["train"])
+        if len(dfs["validation"]) > 0: all_val_dfs.append(dfs["validation"])
+        if len(dfs["test"]) > 0: all_test_dfs.append(dfs["test"])
 
     def merge_and_shuffle(df_list, split_name):
         if not df_list: return pd.DataFrame()
@@ -100,14 +113,16 @@ def main(args):
         print(f"   -> Prepared [{split_name.upper()}]: Total {len(combined)} samples.")
         return combined
 
-    print("\n🔄 Preparing final dataset splits...")
-    final_train_df = merge_and_shuffle([dfs1["train"]], "train")
-    final_val_df = merge_and_shuffle([dfs1["validation"]], "validation")
-    final_test_df = merge_and_shuffle([dfs1["test"]], "test")
+    print("\n🔄 Preparing final merged dataset splits...")
+    final_train_df = merge_and_shuffle(all_train_dfs, "train")
+    final_val_df = merge_and_shuffle(all_val_dfs, "validation")
+    final_test_df = merge_and_shuffle(all_test_dfs, "test")
 
-    print("\n📊 FINAL DATASET STATISTICS:")
+    print("\n📊 FINAL MERGED DATASET STATISTICS:")
     print(f"   - Training Samples:   {len(final_train_df)}")
     print(f"   - Validation Samples: {len(final_val_df)}")
+    print(f"   - Test Samples:       {len(final_test_df)}")
+    print(f"   - Columns:            {list(final_train_df.columns)}")
     print(f"   - Test Samples:       {len(final_test_df)}")
     print(f"   - Columns:            {list(final_train_df.columns)}")
 

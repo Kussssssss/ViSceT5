@@ -1,0 +1,17 @@
+dataset_name: VinText
+dataset:
+  train:
+    dir: ''
+    drive_id: ''
+  validation:
+    dir: ''
+    drive_id: ''
+  test:
+    dir: ''
+    drive_id: ''
+image:
+  dir: ''
+  drive_id: '1UUQhNvzgpZy7zXBFQp0Qox-BBjunZ0ml'
+ocr:
+  dir: ''
+  drive_id: '1LXDeOec8vTsGQ6J-4EnQV4fbN7XysvGT'

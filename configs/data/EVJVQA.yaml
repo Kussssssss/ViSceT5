@@ -1,0 +1,17 @@
+dataset_name: EVJVQA
+dataset:
+  train:
+    dir: ''
+    drive_id: ''
+  validation:
+    dir: ''
+    drive_id: ''
+  test:
+    dir: ''
+    drive_id: ''
+image:
+  dir: ''
+  drive_id: '1TSRasu5BiHfVxAZxWzwOljkQhtSzOBgz'
+ocr:
+  dir: ''
+  drive_id: '1HtTD1VbZoW66an31HPQ57oBbAujfSt7w'

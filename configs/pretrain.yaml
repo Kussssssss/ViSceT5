@@ -1,4 +1,4 @@
-dataset_name: "ViTextVQA"
+dataset_name: "VinText,EVJVQA"
 data_dir: "./datasets"
 vocab_path: "configs/data/term_vocab.txt"
 viet_vocab_path: "configs/data/viet_vocab.txt"
