@@ -165,3 +165,4 @@ checkpoints/
 !notebooks/finetune_colab.ipynb
 !notebooks/pretrain_colab.ipynb
 !notebooks/verify_data_resolution_colab.ipynb
+!notebooks/pretrain_splitocr_kaggle.ipynb
