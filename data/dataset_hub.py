@@ -397,7 +397,14 @@ class DatasetHubLoader:
                         _safe_remove(zip_path_ocr)
                         _safe_rmtree(raw_dir_ocr)
 
-        self.paths[dataset_name] = {"out_dir": out_dir, "annotations": ann_out, "image_dir": image_dir, "ocr_dir": ocr_dir}
+        self.paths[dataset_name] = {
+            "out_dir": out_dir,
+            "annotations": ann_out,
+            "image_dir": image_dir,
+            "ocr_dir": ocr_dir,
+            "image_root": image_root,
+            "ocr_root": ocr_root,
+        }
         return self.paths[dataset_name]
 
     def build_df(self, dataset_name: str) -> pd.DataFrame:
@@ -408,6 +415,8 @@ class DatasetHubLoader:
         ann = p["annotations"]
         img_dir = p["image_dir"]
         ocr_dir = p.get("ocr_dir")
+        img_root = p.get("image_root") or img_dir
+        ocr_root = p.get("ocr_root") or ocr_dir
         mapper = spec["mapper_fn"]
         rows = []
         if ann:
@@ -420,10 +429,11 @@ class DatasetHubLoader:
                     print(f"⚠️ [Hub] Bỏ qua split '{split}': đọc JSON lỗi ({type(e).__name__}: {e}).")
                     continue
                 rows.extend(mapper(data, img_dir, split, ocr_dir))
-        elif img_dir and os.path.isdir(img_dir):
+        elif img_root and os.path.isdir(img_root):
             # PURE IMAGE + OCR PAIRS (e.g. VinText, EVJVQA pre-training datasets without separate QA json)
-            img_index = _file_index(img_dir, _is_img)
-            ocr_index = _file_index(ocr_dir, _is_ocr) if (ocr_dir and os.path.isdir(ocr_dir)) else {}
+            # Scan toàn bộ cây thư mục từ img_root và ocr_root để không bỏ sót các thư mục con (train, val, test)
+            img_index = _file_index(img_root, _is_img)
+            ocr_index = _file_index(ocr_root, _is_ocr) if (ocr_root and os.path.isdir(ocr_root)) else {}
             
             items = []
             for fname, fpath in img_index.items():
