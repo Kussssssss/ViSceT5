@@ -34,7 +34,10 @@ def _download_gdown_id(file_id: str, out_path: str, fuzzy: bool = True):
         tag = "primary" if idx == 0 else f"backup #{idx}"
         try:
             url = f"https://drive.google.com/uc?id={fid}"
-            gdown.download(url=url, output=out_path, quiet=False)
+            try:
+                gdown.download(id=fid, output=out_path, quiet=False, fuzzy=True)
+            except Exception:
+                gdown.download(url=url, output=out_path, quiet=False)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
                 if idx > 0:
                     print(f"✅ Downloaded via {tag} id: {fid}")
@@ -329,17 +332,18 @@ class DatasetHubLoader:
         spec = self.registry[dataset_name]
         out_dir = _ensure_dir(os.path.join(self.out_root, dataset_name))
         ann_out = {}
-        for split, conf in spec["splits"].items():
-            id_ = conf.get("id")
-            url = conf.get("url")
-            # Bỏ qua split không có nguồn (id/url rỗng) — vd test bị gỡ khi id sai/thiếu.
-            # Không raise, chỉ skip → build_df sẽ không có split đó (finetune chỉ cần train/val).
-            if not (id_ and str(id_).strip()) and not url:
-                print(f"ℹ️ [Hub] Bỏ qua split '{split}' (không có drive_id/url).")
-                continue
-            out_p = os.path.join(out_dir, f"{dataset_name}_{split}.json")
-            _maybe_download(id_, url, out_p)
-            ann_out[split] = out_p
+        has_any_split = any((conf.get("id") and str(conf.get("id")).strip()) or conf.get("url") for conf in spec["splits"].values())
+        if not has_any_split:
+            print(f"ℹ️ [Hub] Dataset '{dataset_name}' là tập Image+OCR thuần túy (không có file QA JSON).")
+        else:
+            for split, conf in spec["splits"].items():
+                id_ = conf.get("id")
+                url = conf.get("url")
+                if not (id_ and str(id_).strip()) and not url:
+                    continue
+                out_p = os.path.join(out_dir, f"{dataset_name}_{split}.json")
+                _maybe_download(id_, url, out_p)
+                ann_out[split] = out_p
 
         image_dir, ocr_dir = None, None
 
@@ -358,8 +362,10 @@ class DatasetHubLoader:
                     if not spec["image_zip_id"]:
                         raise ValueError("image_zip_id or image_zip_path is required when image_dir_override is not provided.")
                     zip_path_img = os.path.join(raw_dir_img, spec["image_zip_name"])
+                    print(f"⬇️ [Hub] Đang tải tập ảnh '{dataset_name}' từ Google Drive (ID: {spec['image_zip_id']})...")
                     _maybe_download(spec["image_zip_id"], None, zip_path_img)
 
+                print(f"📦 [Hub] Đang giải nén tập ảnh '{dataset_name}'...")
                 _extract_zip(zip_path_img, image_root)
                 image_dir = _find_leaf_dir(image_root, _is_img)
 
@@ -380,8 +386,10 @@ class DatasetHubLoader:
                     zip_path_ocr = spec.get("ocr_zip_path")
                     if zip_path_ocr is None:
                         zip_path_ocr = os.path.join(raw_dir_ocr, spec["ocr_zip_name"])
+                        print(f"⬇️ [Hub] Đang tải tập OCR '{dataset_name}' từ Google Drive (ID: {spec['ocr_zip_id']})...")
                         _maybe_download(spec["ocr_zip_id"], None, zip_path_ocr)
 
+                    print(f"📦 [Hub] Đang giải nén tập OCR '{dataset_name}'...")
                     _extract_zip(zip_path_ocr, ocr_root)
                     ocr_dir = _find_leaf_dir(ocr_root, _is_ocr)
 
