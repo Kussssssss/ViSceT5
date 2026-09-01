@@ -455,11 +455,12 @@ class DatasetHubLoader:
                         if f"{stem_12}{ext}" in ocr_index:
                             ocr_path = ocr_index[f"{stem_12}{ext}"]
                             break
-                items.append({
-                    "image_filename": fname,
-                    "image_path": fpath,
-                    "ocr_path": ocr_path,
-                })
+                if ocr_path is not None and os.path.exists(ocr_path):
+                    items.append({
+                        "image_filename": fname,
+                        "image_path": fpath,
+                        "ocr_path": ocr_path,
+                    })
             
             items.sort(key=lambda x: x["image_filename"])
             n_val = max(1, int(len(items) * 0.05)) if len(items) > 20 else max(1, len(items) // 5)
