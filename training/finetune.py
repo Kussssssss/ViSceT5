@@ -246,7 +246,7 @@ def main(args_list=None):
 
     # 4. Tokenizer & Model
     if ckpt_to_load:
-        tokenizer = AutoTokenizer.from_pretrained(ckpt_to_load, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(ckpt_to_load, local_files_only=True, use_fast=False)
         # OpenViVQAConfig isn't registered with AutoConfig (model_type 'openvivqa'),
         # so AutoConfig.from_pretrained would raise. Build the custom config directly.
         try:
@@ -263,7 +263,7 @@ def main(args_list=None):
             print("🛡️ [finetune] warm-start từ pretrain-ckpt → bật config.clamp_vision "
                   "(giữ đúng hàm forward mà trọng số đã học)")
     else:
-        tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
+        tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base", use_fast=False)
         config = OpenViVQAConfig()
 
     # FINETUNE: các submodule PRETRAIN-ONLY (ITC heads) được gate theo config.pretrain

@@ -83,7 +83,7 @@ def main():
         print_consistency_check(fp_finetune_ref, fp_reloaded,
                                 title="CHECKPOINT CONSISTENCY (Finetuned bundle -> Reloaded)")
 
-    tok_reload = AutoTokenizer.from_pretrained(BEST_DIR, local_files_only=True)
+    tok_reload = AutoTokenizer.from_pretrained(BEST_DIR, local_files_only=True, use_fast=False)
     ip_reload = CLIPImageProcessor.from_pretrained(os.path.join(BEST_DIR, "image_processor"))
 
     best_model.image_processor = ip_reload

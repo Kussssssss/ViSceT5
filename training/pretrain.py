@@ -686,7 +686,7 @@ def main(args_list=None):
 
     # 4. Tokenizer & Model
     if ckpt_to_load:
-        tokenizer = AutoTokenizer.from_pretrained(ckpt_to_load, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(ckpt_to_load, local_files_only=True, use_fast=False)
         # OpenViVQAConfig isn't registered with AutoConfig (model_type 'openvivqa'),
         # so AutoConfig.from_pretrained would raise. Build the custom config directly.
         try:
@@ -696,7 +696,7 @@ def main(args_list=None):
             config = OpenViVQAConfig()
     else:
         # Fallback to defaults
-        tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
+        tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base", use_fast=False)
         config = OpenViVQAConfig()
 
     model = OpenViVQAModel(config)
