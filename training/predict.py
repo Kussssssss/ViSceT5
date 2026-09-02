@@ -424,7 +424,7 @@ def main():
     model.eval()
     model.pretrain = False
 
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_dir, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(ckpt_dir, local_files_only=True, use_fast=False)
 
     ip_dir = os.path.join(ckpt_dir, "image_processor")
     if os.path.isdir(ip_dir):
