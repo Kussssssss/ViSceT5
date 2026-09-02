@@ -3,7 +3,7 @@ data/dataset_hub.py
 DatasetHubLoader — downloads, extracts, builds DataFrames for VQA datasets.
 """
 
-import os, json, zipfile, shutil
+import os, json, zipfile, shutil, re
 from typing import Optional, Dict, Any, List, Tuple, Callable
 import pandas as pd
 
@@ -35,7 +35,7 @@ def _download_gdown_id(file_id: str, out_path: str, fuzzy: bool = True):
         try:
             url = f"https://drive.google.com/uc?id={fid}"
             try:
-                gdown.download(id=fid, output=out_path, quiet=False, fuzzy=True)
+                gdown.download(id=fid, output=out_path, quiet=False)
             except Exception:
                 gdown.download(url=url, output=out_path, quiet=False)
             if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
@@ -158,6 +158,44 @@ def _resolve_in_tree(image_dir, filename, pred):
     """Tìm filename ở bất kỳ thư mục con nào dưới CÙNG cấp với image_dir (parent)."""
     root = os.path.dirname(image_dir.rstrip("/\\")) or image_dir
     return _file_index(root, pred).get(filename)
+
+
+def _find_ocr_match(fname: str, ocr_index: Dict[str, str]) -> Optional[str]:
+    """Tìm đường dẫn OCR tương ứng với ảnh theo đa dạng định dạng tên file."""
+    stem = os.path.splitext(fname)[0]
+    
+    # 1. Trực tiếp và chữ thường
+    candidates = [
+        f"{stem}.npy", f"{stem}.npz",
+        f"{stem.lower()}.npy", f"{stem.lower()}.npz"
+    ]
+    
+    # 2. Loại bỏ các tiền tố phổ biến (im, img, image, gt,...)
+    clean_stem = re.sub(r'^(gt_|im_|img_|image_|im)', '', stem, flags=re.IGNORECASE)
+    if clean_stem != stem:
+        candidates.extend([
+            f"{clean_stem}.npy", f"{clean_stem}.npz",
+            f"gt_{clean_stem}.npy", f"gt_{clean_stem}.npz",
+            f"gt_im{clean_stem}.npy", f"gt_im{clean_stem}.npz",
+            f"im{clean_stem}.npy", f"im_{clean_stem}.npy"
+        ])
+        
+    # 3. Trích xuất các chữ số (ví dụ: im0722 -> 722, 0722, 000000000722)
+    digits = re.findall(r'\d+', stem)
+    if digits:
+        val = int(digits[-1])
+        for num_s in [str(val), f"{val:04d}", f"{val:05d}", f"{val:012d}"]:
+            candidates.extend([
+                f"{num_s}.npy", f"{num_s}.npz",
+                f"gt_{num_s}.npy", f"gt_{num_s}.npz",
+                f"im{num_s}.npy", f"im_{num_s}.npy",
+                f"gt_im{num_s}.npy"
+            ])
+            
+    for cand in candidates:
+        if cand in ocr_index:
+            return ocr_index[cand]
+    return None
 
 
 def _default_vqa_mapper(
@@ -437,24 +475,7 @@ class DatasetHubLoader:
             
             items = []
             for fname, fpath in img_index.items():
-                stem = os.path.splitext(fname)[0]
-                ocr_path = None
-                for ext in [".npy", ".npz"]:
-                    if f"{stem}{ext}" in ocr_index:
-                        ocr_path = ocr_index[f"{stem}{ext}"]
-                        break
-                if ocr_path is None and stem.isdigit():
-                    stem_int = str(int(stem))
-                    for ext in [".npy", ".npz"]:
-                        if f"{stem_int}{ext}" in ocr_index:
-                            ocr_path = ocr_index[f"{stem_int}{ext}"]
-                            break
-                if ocr_path is None and stem.isdigit():
-                    stem_12 = f"{int(stem):012d}"
-                    for ext in [".npy", ".npz"]:
-                        if f"{stem_12}{ext}" in ocr_index:
-                            ocr_path = ocr_index[f"{stem_12}{ext}"]
-                            break
+                ocr_path = _find_ocr_match(fname, ocr_index)
                 if ocr_path is not None and os.path.exists(ocr_path):
                     items.append({
                         "image_filename": fname,
@@ -462,13 +483,19 @@ class DatasetHubLoader:
                         "ocr_path": ocr_path,
                     })
             
+            print(f"ℹ️ [Hub] Dataset '{dataset_name}': Quét thấy {len(img_index)} ảnh và {len(ocr_index)} file OCR. Khớp thành công: {len(items)} cặp.")
+            if len(items) == 0:
+                print(f"⚠️ [Hub] CẢNH BÁO: Không có cặp Image+OCR nào khớp cho dataset '{dataset_name}'.")
+                print(f"       -> Thư mục ảnh: {img_root} (tìm thấy {len(img_index)} ảnh)")
+                print(f"       -> Thư mục OCR: {ocr_root} (tìm thấy {len(ocr_index)} file OCR)")
+            
             items.sort(key=lambda x: x["image_filename"])
             n_val = max(1, int(len(items) * 0.05)) if len(items) > 20 else max(1, len(items) // 5)
             
             for idx, it in enumerate(items):
                 split = "validation" if idx >= len(items) - n_val else "train"
                 rows.append({
-                    "dataset": None,
+                    "dataset": dataset_name,
                     "split": split,
                     "id": f"{dataset_name}_{idx}",
                     "image_id": idx,
@@ -479,11 +506,9 @@ class DatasetHubLoader:
                     "image_path": it["image_path"],
                     "ocr_path": it["ocr_path"],
                 })
-        df = pd.DataFrame(rows)
-        if "dataset" in df.columns:
-            df["dataset"] = dataset_name
-        else:
-            df.insert(0, "dataset", dataset_name)
+        cols = ["dataset", "split", "id", "image_id", "image_filename", "question", "answer", "all_answers", "image_path", "ocr_path"]
+        df = pd.DataFrame(rows, columns=cols if not rows else None)
+        df["dataset"] = dataset_name
         return df
 
     def load_task(self, dataset_name: str) -> Dict[str, pd.DataFrame]:
