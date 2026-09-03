@@ -81,6 +81,9 @@ class OpenViVQAConfig(PretrainedConfig):
         ocrseq_pool_size: int = 3,
         ocrseq_use_spatial: bool = True,
         ocrseq_dropout: float = 0.1,
+        num_bbox_bins: int = 1000,
+        lambda_bbox_ce: float = 1.0,
+        pretrain_use_vs: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -161,3 +164,6 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ocrseq_pool_size = int(ocrseq_pool_size)
         self.ocrseq_use_spatial = bool(ocrseq_use_spatial)
         self.ocrseq_dropout = float(ocrseq_dropout)
+        self.num_bbox_bins = int(num_bbox_bins)
+        self.lambda_bbox_ce = float(lambda_bbox_ce)
+        self.pretrain_use_vs = bool(pretrain_use_vs)

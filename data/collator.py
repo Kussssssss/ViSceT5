@@ -904,35 +904,63 @@ class ViT5VQADataCollator:
             B = len(batch)
             split_prompts = []
             split_targets = []
+            batch_prefix_boxes = []
+            batch_target_boxes = []
 
             pad_tok = self.tokenizer.pad_token or "<pad>"
             for i in range(B):
                 info, raw_texts = self._prepare_ocr(ocr_raw_list[i], max_len_in_batch=current_max_len)
-                norm_tokens = [
-                    _normalize_text(t, lowercase=True).strip()
-                    for t in raw_texts
+                valid_idx = [
+                    idx for idx, t in enumerate(raw_texts)
                     if isinstance(t, str) and _normalize_text(t, lowercase=True).strip() and _normalize_text(t, lowercase=True).strip() not in {pad_tok, "<pad>", "<unk>", "</s>"}
                 ]
+                norm_tokens = [_normalize_text(raw_texts[idx], lowercase=True).strip() for idx in valid_idx]
+                raw_boxes = info["boxes"]
+                if len(valid_idx) > 0:
+                    valid_boxes = raw_boxes[valid_idx].clone().detach().float()
+                else:
+                    valid_boxes = torch.zeros((0, 4), dtype=torch.float)
 
-                # --- 1. Sắp xếp không gian Top-Left -> Bottom-Right ---
                 N_words = len(norm_tokens)
-
-                # --- 2. Chọn điểm cắt ngẫu nhiên m in [0, N_words - 1] (PreSTU SplitOCR) ---
                 if N_words == 0:
                     prefix_str = ""
                     target_str = ""
+                    p_boxes = torch.zeros((0, 4), dtype=torch.float)
+                    t_boxes = torch.zeros((0, 4), dtype=torch.long)
                 else:
-                    # Random split point: m = 0 -> Full OCR; m > 0 -> Split continuation
+                    # Random split point: m in [0, N_words - 1]
                     m = random.randint(0, max(0, N_words - 1))
                     prefix_words = norm_tokens[:m]
                     target_words = norm_tokens[m:]
                     prefix_str = " ".join(prefix_words).strip()
                     target_str = " ".join(target_words).strip()
 
-                # Prompt chuẩn PreSTU
+                    p_boxes = valid_boxes[:m]
+                    t_boxes_float = valid_boxes[m:]
+                    t_boxes = (t_boxes_float * 1000.0).long().clamp(0, 999)
+
                 prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
                 split_prompts.append(prompt_text)
                 split_targets.append(target_str)
+                batch_prefix_boxes.append(p_boxes)
+                batch_target_boxes.append(t_boxes)
+
+            # Pad prefix_box_coords and target_bbox_bins across the batch
+            max_p_len = max([b.size(0) for b in batch_prefix_boxes], default=0)
+            max_p_len = max(max_p_len, 1)
+            prefix_box_coords = torch.zeros(B, max_p_len, 4, dtype=torch.float)
+            prefix_box_mask = torch.zeros(B, max_p_len, dtype=torch.long)
+            for i, pb in enumerate(batch_prefix_boxes):
+                if pb.size(0) > 0:
+                    prefix_box_coords[i, :pb.size(0)] = pb
+                    prefix_box_mask[i, :pb.size(0)] = 1
+
+            max_t_len = max([b.size(0) for b in batch_target_boxes], default=0)
+            max_t_len = max(max_t_len, 1)
+            target_bbox_bins = torch.full((B, max_t_len, 4), -100, dtype=torch.long)
+            for i, tb in enumerate(batch_target_boxes):
+                if tb.size(0) > 0:
+                    target_bbox_bins[i, :tb.size(0)] = tb
 
             # Tokenize SplitOCR Inputs (Prompt + Prefix) và Labels (Suffix Target)
             prompt_tok = self.tokenizer(
@@ -958,6 +986,9 @@ class ViT5VQADataCollator:
                 "labels": labels.to(pixel_values.device),
                 "pixel_values": pixel_values,
                 "pil_images": pil_images,
+                "target_bbox_bins": target_bbox_bins.to(pixel_values.device),
+                "prefix_box_coords": prefix_box_coords.to(pixel_values.device),
+                "prefix_box_mask": prefix_box_mask.to(pixel_values.device),
             }
 
         # =========================================================

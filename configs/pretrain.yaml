@@ -7,6 +7,9 @@ loss_ablation_mode: "all"
 ablation_use_qaclip: true
 ablation_use_vs: true
 ablation_use_ocr: true
+num_bbox_bins: 1000
+lambda_bbox_ce: 1.0
+pretrain_use_vs: true
 
 output_dir: "./output/pretrain"
 logging_dir: "./output/pretrain/logs"

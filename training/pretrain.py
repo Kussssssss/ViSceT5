@@ -334,6 +334,17 @@ def _debug_split_ocr(model, data_collator, dataset, device, n_show=5):
         print(f"  [sample {i}] Prompt: {prompt[:90]}")
         print(f"              Target: {gold[:80]}")
         print(f"              Pred  : {prd[:80]}")
+        if "bbox_logits" in out and "target_bbox_bins" in batch:
+            bb_logits = out["bbox_logits"]
+            bb_targets = batch["target_bbox_bins"]
+            if i < bb_targets.size(0) and i < bb_logits.size(0):
+                bb_mask = (bb_targets[i] != -100)
+                if bb_mask.any():
+                    pred_bins = bb_logits[i].argmax(-1)
+                    gt_box = bb_targets[i][0].tolist()
+                    pr_box = pred_bins[0].tolist()
+                    print(f"              Target Box[0]: {gt_box}")
+                    print(f"              Pred Box[0]  : {pr_box}")
         shown += 1
         if shown >= n_show:
             break

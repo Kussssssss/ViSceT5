@@ -238,6 +238,13 @@ class OpenViVQAModel(PreTrainedModel):
         # TWC (theo notebook gốc / TWA paper): similarity tính trực tiếp trên
         # word-feature đã L2-normalize từ encoder — KHÔNG dùng projection head riêng.
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+        # ── Dual-Target PreSTU BBox Classification Head (Coordinate Binning) ────
+        self.num_bbox_bins = int(getattr(config, "num_bbox_bins", 1000))
+        self.lambda_bbox_ce = float(getattr(config, "lambda_bbox_ce", 1.0))
+        self.bbox_cls_head = nn.Linear(self.d_model, 4 * self.num_bbox_bins)
+        self.mask_box_embed = nn.Parameter(torch.zeros(1, 1, self.d_model))
+        nn.init.normal_(self.mask_box_embed, std=0.02)
         self.generation_config = GenerationConfig(
             max_new_tokens=int(getattr(config, "generation_max_new_tokens", 27)),
             num_beams=int(getattr(config, "generation_num_beams", 4)),
@@ -650,8 +657,10 @@ class OpenViVQAModel(PreTrainedModel):
         twc_split_word_idx: Optional[torch.LongTensor] = None,
         tag_pollute: Optional[torch.LongTensor] = None,
         o2r_labels: Optional[torch.FloatTensor] = None,
-        r2o_labels: Optional[torch.FloatTensor] = None,
         twc_group_ids: Optional[torch.LongTensor] = None,
+        target_bbox_bins: Optional[torch.LongTensor] = None,
+        prefix_box_coords: Optional[torch.FloatTensor] = None,
+        prefix_box_mask: Optional[torch.LongTensor] = None,
         return_visual_search_debug: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -781,11 +790,30 @@ class OpenViVQAModel(PreTrainedModel):
                 (ocr_fused_feat,           token_mask_for_ocr.long()),
             ]
         else:
-            # PRESTU SPLITOCR PRE-TRAINING: Strictly fuses Image Pixels and Text Prompt
+            # PRESTU DUAL-TARGET PRE-TRAINING:
+            # Fuses Image Pixels (ViT + VS), Text Prompt (with OCR prefix), Prefix BBoxes, and Target BBox Queries
             _blocks = [
                 (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
                 (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
             ]
+            if prefix_box_coords is not None and prefix_box_coords.size(1) > 0:
+                prefix_box_emb = self.ocr_lite_box_proj(prefix_box_coords.to(device).to(dtype=self.target_dtype))
+                if prefix_box_mask is not None:
+                    p_mask = prefix_box_mask.to(device).long()
+                else:
+                    p_mask = torch.ones(B, prefix_box_emb.size(1), device=device, dtype=torch.long)
+                _blocks.append((prefix_box_emb, p_mask))
+
+            mask_box_start = None
+            mask_box_end = None
+            if target_bbox_bins is not None and target_bbox_bins.size(1) > 0:
+                K = target_bbox_bins.size(1)
+                mask_box_tokens = self.mask_box_embed.expand(B, K, -1).to(dtype=self.target_dtype)
+                mask_box_mask = (target_bbox_bins[:, :, 0] != -100).long().to(device)
+                curr_len = sum(f.size(1) for f, _ in _blocks if f.size(1) > 0)
+                mask_box_start = curr_len
+                mask_box_end = curr_len + K
+                _blocks.append((mask_box_tokens, mask_box_mask))
 
         # Per-component non-finite diagnostic (NaN AND inf)
         if getattr(self, "_pretrain_stage", False) or os.environ.get("FWD_DIAG") == "1":
@@ -832,7 +860,27 @@ class OpenViVQAModel(PreTrainedModel):
         enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=fused_mask, return_dict=True)
         if torch.isnan(enc_out.last_hidden_state).any(): print("🚨 [FORWARD CHECK] enc_out.last_hidden_state has NaN")
 
+        bbox_logits = None
+        bbox_loss = None
+        if mask_box_start is not None and target_bbox_bins is not None and target_bbox_bins.size(1) > 0:
+            h_boxes = enc_out.last_hidden_state[:, mask_box_start:mask_box_end, :]
+            bbox_logits = self.bbox_cls_head(h_boxes).view(B, -1, 4, self.num_bbox_bins)
+            target_dev = target_bbox_bins.to(device)
+            valid_mask = (target_dev != -100)
+            if valid_mask.any():
+                loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                bbox_loss = loss_fct(
+                    bbox_logits.view(-1, self.num_bbox_bins),
+                    target_dev.view(-1)
+                )
+            else:
+                bbox_loss = torch.tensor(0.0, device=device, dtype=self.target_dtype)
+
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
+        if bbox_logits is not None:
+            out_dict["bbox_logits"] = bbox_logits
+        if bbox_loss is not None:
+            out_dict["bbox_loss"] = bbox_loss
 
         if labels is not None:
             outputs = self.vit5(
@@ -843,12 +891,19 @@ class OpenViVQAModel(PreTrainedModel):
                 output_hidden_states=False,
                 return_dict=True,
             )
-            out_dict["loss"] = outputs.loss
+            text_loss = outputs.loss
+            out_dict["text_loss"] = text_loss
             out_dict["logits"] = outputs.logits
+            if bbox_loss is not None and torch.isfinite(bbox_loss):
+                out_dict["loss"] = text_loss + self.lambda_bbox_ce * bbox_loss
+            else:
+                out_dict["loss"] = text_loss
             if return_visual_search_debug:
                 out_dict["vs_debug"] = vs_out
                 out_dict["clip_input_ids"] = q_ids_for_clip.detach().cpu()
             return out_dict
+        elif bbox_loss is not None and torch.isfinite(bbox_loss):
+            out_dict["loss"] = self.lambda_bbox_ce * bbox_loss
 
         if self.pretrain and cmb_text_mask_label is not None:
             mlm_labels = cmb_text_mask_label.to(device)
