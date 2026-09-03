@@ -242,7 +242,12 @@ class OpenViVQAModel(PreTrainedModel):
         # ── Dual-Target PreSTU BBox Classification Head (Coordinate Binning) ────
         self.num_bbox_bins = int(getattr(config, "num_bbox_bins", 1000))
         self.lambda_bbox_ce = float(getattr(config, "lambda_bbox_ce", 1.0))
-        self.bbox_cls_head = nn.Linear(self.d_model, 4 * self.num_bbox_bins)
+        self.bbox_cls_head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.GELU(),
+            T5LayerNorm(self.d_model, eps=1e-12),
+            nn.Linear(self.d_model, 4 * self.num_bbox_bins),
+        )
         self.mask_box_embed = nn.Parameter(torch.zeros(1, 1, self.d_model))
         nn.init.normal_(self.mask_box_embed, std=0.02)
         self.generation_config = GenerationConfig(
@@ -868,11 +873,24 @@ class OpenViVQAModel(PreTrainedModel):
             target_dev = target_bbox_bins.to(device)
             valid_mask = (target_dev != -100)
             if valid_mask.any():
-                loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-                bbox_loss = loss_fct(
+                # 1. CE Loss with Label Smoothing for smooth coordinate distribution
+                loss_ce_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.1)
+                ce_loss = loss_ce_fct(
                     bbox_logits.view(-1, self.num_bbox_bins),
                     target_dev.view(-1)
                 )
+
+                # 2. Continuous Metric Distance Penalty: Soft-Argmax Expected Coordinate L1 Loss
+                probs = torch.softmax(bbox_logits, dim=-1) # [B, K, 4, num_bins]
+                bin_vals = torch.linspace(0.0, 1.0, self.num_bbox_bins, device=device, dtype=probs.dtype)
+                pred_coords = torch.sum(probs * bin_vals, dim=-1) # [B, K, 4] in [0, 1]
+                target_coords = (target_dev.float() / float(self.num_bbox_bins)).clamp(0.0, 1.0)
+
+                coord_mask = valid_mask.float()
+                l1_dist = (torch.abs(pred_coords - target_coords) * coord_mask).sum() / coord_mask.sum().clamp_min(1.0)
+
+                # Hybrid Loss: Probability distribution sharpness + Geometric L1 proximity
+                bbox_loss = ce_loss + 2.0 * l1_dist
             else:
                 bbox_loss = torch.tensor(0.0, device=device, dtype=self.target_dtype)
 
