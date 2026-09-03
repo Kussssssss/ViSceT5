@@ -3,10 +3,11 @@ data_dir: "./datasets"
 vocab_path: "configs/data/term_vocab.txt"
 viet_vocab_path: "configs/data/viet_vocab.txt"
 
-loss_ablation_mode: "all"
+loss_ablation_mode: "prestu"
 ablation_use_qaclip: true
 ablation_use_vs: true
-ablation_use_ocr: true
+ablation_use_ocr: false
+use_ocr_aug_pretrain: false
 num_bbox_bins: 1000
 lambda_bbox_ce: 1.0
 pretrain_use_vs: true

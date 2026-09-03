@@ -733,24 +733,19 @@ def main(args_list=None):
 
     # Apply config overrides
     mode = model_args.loss_ablation_mode
-    # 'gen_all' = generative decoder pretrain + MLM/ITM/TWC auxiliaries (needs OCR-aug + TWC).
-    # 'gen'     = generative decoder pretrain + MLM/ITM only (no TWC/OCR-aug).
-    use_twc = mode in ["all", "only_twc_ocr_aug", "gen_all"]
-    use_ocr_aug = mode in ["all", "only_twc_ocr_aug", "gen_all"]
+    # PRESTU DUAL-TARGET PRETRAINING:
+    # Character embeddings and OCR-augmentation (noise/correction) are completely omitted from pretrain
+    # to focus purely on Pixel-to-Text and Spatial BBox learning. They are reserved for finetune.
+    use_twc = False
+    use_ocr_aug = False
     
     model.pretrain = True
-    # Marks this model instance as being in the PRETRAIN stage so the forward's
-    # numerical guard (fused_seq nan_to_num) activates even inside the gen forward
-    # (which flips self.pretrain=False). Finetune never sets this → forward untouched.
     model._pretrain_stage = True
-    # Persisted flag: weights are trained UNDER the vision clamp → any later stage
-    # (finetune/predict) loading this checkpoint must keep the clamp (part of the
-    # learned function). Lives in config so it survives save/load automatically.
     model.config.clamp_vision = True
     model.config.pretrain = True
     model.config.pretrain_ablation_mode = mode
-    model.config.use_twc = use_twc
-    model.config.use_ocr_aug_finetune = use_ocr_aug
+    model.config.use_twc = False
+    model.config.use_ocr_aug_finetune = False
     
     model.to(DEVICE)
 
