@@ -310,7 +310,13 @@ class ViT5PretrainLoss(nn.Module):
                     self._itc_ikey_q = _dik if self._itc_ikey_q is None else \
                         torch.cat([self._itc_ikey_q, _dik], 0)[-self.itc_queue_size:]
 
-        if mode in ["full", "all"]:
+        if mode in ["prestu", "split_ocr", "dual_target"]:
+            # PreSTU / Dual-Target direct loss from forward()
+            if "loss" in model_output and model_output["loss"] is not None:
+                return model_output["loss"]
+            total_loss = gen_loss if gen_loss is not None else torch.tensor(0.0, device=mlm_loss.device)
+
+        elif mode in ["full", "all"]:
             total_loss = mlm_loss + pollute_loss + contrastive_loss
 
         elif mode in ["gen_all", "gen"]:
