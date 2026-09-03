@@ -477,7 +477,7 @@ class GlobalPretrainAccuracy(BaseMetric):
         self.twc_fn = PreTrainTWCAccuracy()
 
     def calculate(self, sample_list, model_output):
-        # 0. PreSTU SplitOCR metric path
+        # 0. PreSTU SplitOCR & Dual-Target metric path
         if "labels" in sample_list and sample_list["labels"] is not None and "logits" in model_output and model_output["logits"] is not None:
             logits = model_output["logits"]
             labels = sample_list["labels"]
@@ -488,14 +488,30 @@ class GlobalPretrainAccuracy(BaseMetric):
             else:
                 token_acc = 0.0
             
+            bbox_acc = 0.0
+            if "target_bbox_bins" in sample_list and sample_list["target_bbox_bins"] is not None and "bbox_logits" in model_output and model_output["bbox_logits"] is not None:
+                bb_logits = model_output["bbox_logits"]
+                bb_targets = sample_list["target_bbox_bins"]
+                bb_mask = (bb_targets != -100)
+                if bb_mask.any():
+                    bb_preds = bb_logits.argmax(dim=-1)
+                    # Tolerance: within 20 bins (~2% of coordinate span across 1000 bins)
+                    bbox_acc = ((bb_preds[bb_mask] - bb_targets[bb_mask]).abs() <= 20).float().mean().item()
+
+            total_acc = 0.5 * (token_acc + bbox_acc) if bbox_acc > 0 else token_acc
             _loss_tensor = model_output.get("loss", torch.tensor(0.0))
             loss_val = _loss_tensor.item() if torch.is_tensor(_loss_tensor) else float(_loss_tensor)
+            _t_loss = model_output.get("text_loss", _loss_tensor)
+            t_loss_val = _t_loss.item() if torch.is_tensor(_t_loss) else float(_t_loss)
+            _b_loss = model_output.get("bbox_loss", torch.tensor(0.0))
+            b_loss_val = _b_loss.item() if torch.is_tensor(_b_loss) else float(_b_loss)
+
             device = logits.device
             return torch.tensor(
-                [token_acc, token_acc, token_acc,
-                 loss_val, loss_val, loss_val,
-                 1.0, 1.0, loss_val, token_acc,
-                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                [total_acc, token_acc, bbox_acc,
+                 t_loss_val, b_loss_val, loss_val,
+                 1.0, 1.0, t_loss_val, token_acc,
+                 0.0, 0.0, 0.0, 0.0, b_loss_val, bbox_acc],
                 device=device
             )
 
