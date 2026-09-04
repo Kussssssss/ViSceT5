@@ -40,6 +40,7 @@ from configs.ocr_config import DEFAULT_OCR_CONFIG
 from models import OpenViVQAModel
 from models.modules import Vision_Encode_Ocr_Feature
 from data import ViT5VQADataCollator, ViT5VQADataset
+from utils.model_utils import safe_load_tokenizer
 
 configure_env(output_path=OUTPUT_PATH)
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -424,7 +425,7 @@ def main():
     model.eval()
     model.pretrain = False
 
-    tokenizer = AutoTokenizer.from_pretrained(ckpt_dir, local_files_only=True, use_fast=False)
+    tokenizer = safe_load_tokenizer(ckpt_dir, local_files_only=True, use_fast=False)
 
     ip_dir = os.path.join(ckpt_dir, "image_processor")
     if os.path.isdir(ip_dir):

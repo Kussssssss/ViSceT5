@@ -28,6 +28,7 @@ from models import OpenViVQAModel
 from models.modules import Vision_Encode_Ocr_Feature
 from data import ViT5VQADataCollator, ViT5VQADataset
 from data.data_loader import train_df, val_df
+from utils.model_utils import safe_load_tokenizer
 from training.metrics import (
     TaskSpecificTrainer,
     build_compute_metrics_finetune,
@@ -83,7 +84,7 @@ def main():
         print_consistency_check(fp_finetune_ref, fp_reloaded,
                                 title="CHECKPOINT CONSISTENCY (Finetuned bundle -> Reloaded)")
 
-    tok_reload = AutoTokenizer.from_pretrained(BEST_DIR, local_files_only=True, use_fast=False)
+    tok_reload = safe_load_tokenizer(BEST_DIR, local_files_only=True, use_fast=False)
     ip_reload = CLIPImageProcessor.from_pretrained(os.path.join(BEST_DIR, "image_processor"))
 
     best_model.image_processor = ip_reload
