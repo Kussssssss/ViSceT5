@@ -293,6 +293,12 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         elif "tokenizer" in sig.parameters and "processing_class" in kwargs and "tokenizer" not in kwargs:
             kwargs["tokenizer"] = kwargs.pop("processing_class")
         super().__init__(*args, **kwargs)
+        if not hasattr(self, "tokenizer") or self.tokenizer is None:
+            if hasattr(self, "processing_class") and self.processing_class is not None:
+                self.tokenizer = self.processing_class
+        elif not hasattr(self, "processing_class") or self.processing_class is None:
+            if hasattr(self, "tokenizer") and self.tokenizer is not None:
+                self.processing_class = self.tokenizer
         self.pretrain_loss_fn = pretrain_loss_fn
         self.pretrain_acc_fn = pretrain_acc_fn
         self._running_loss = 0.0
@@ -352,19 +358,16 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             print(f"🚨 [Trainer Check] step {self.state.global_step}: NaN/inf WEIGHTS already in {corrupted[:10]} "
                   f"(+{max(0,len(corrupted)-10)} more) — model is corrupted upstream.")
 
-        if num_items_in_batch is not None:
-            try:
-                loss = super().training_step(model, inputs, num_items_in_batch=num_items_in_batch, **kwargs)
-            except TypeError:
-                try:
-                    loss = super().training_step(model, inputs, num_items_in_batch)
-                except TypeError:
-                    loss = super().training_step(model, inputs)
-        else:
-            try:
-                loss = super().training_step(model, inputs, **kwargs)
-            except TypeError:
-                loss = super().training_step(model, inputs)  # forward + backward (grads now set)
+        import inspect
+        super_params = inspect.signature(super().training_step).parameters
+        step_kwargs = {}
+        if "num_items_in_batch" in super_params and num_items_in_batch is not None:
+            step_kwargs["num_items_in_batch"] = num_items_in_batch
+        for k, v in kwargs.items():
+            if k in super_params:
+                step_kwargs[k] = v
+
+        loss = super().training_step(model, inputs, **step_kwargs)
 
         if not torch.isfinite(loss):
             print(f"🚨 [Trainer Check] Loss is non-finite at step {self.state.global_step}: {loss.item()}")
@@ -581,7 +584,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                          "r_correct": r_correct, "r_total": r_total}
         return loss, stats
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
         if "tag_pollute" in inputs and inputs["tag_pollute"].ndim > 1:
             inputs["tag_pollute"] = inputs["tag_pollute"].squeeze(-1)
 
@@ -625,9 +628,9 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                         ignore_index=-100
                     )
 
-        return loss if not return_outputs else (loss, outputs)
+        return (loss, outputs) if return_outputs else loss
 
-    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None, **kwargs):
         with torch.no_grad():
             # Chuẩn hoá inputs
             inputs = self._prepare_inputs(inputs)
@@ -712,16 +715,19 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 "twa_word_ids": inputs.get("twa_word_ids"),
                 "ocr_to_word_map": inputs.get("ocr_to_word_map"),
             }
+            gen_kwargs.update({k: v for k, v in kwargs.items() if v is not None})
             gen_kwargs = {k: v for k, v in gen_kwargs.items() if v is not None}
 
             generated_tokens = base.generate(**gen_kwargs)
 
             if generated_tokens.shape[-1] < self.args.generation_max_length:
                 pad_len = self.args.generation_max_length - generated_tokens.shape[-1]
+                tok = getattr(self, "tokenizer", None) or getattr(self, "processing_class", None)
+                pad_token_id = getattr(tok, "pad_token_id", 0) if tok is not None else 0
                 generated_tokens = F.pad(
                     generated_tokens,
                     (0, pad_len),
-                    value=self.tokenizer.pad_token_id,
+                    value=pad_token_id,
                 )
 
             if prediction_loss_only:
