@@ -113,11 +113,11 @@ class MMCLIPEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor,
-        causal_attention_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        causal_attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = False,
-        instruct_states: torch.Tensor = None,
-        instruct_masks: torch.Tensor = None,
+        instruct_states: Optional[torch.Tensor] = None,
+        instruct_masks: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.FloatTensor]:
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
@@ -138,6 +138,31 @@ class MMCLIPEncoderLayer(nn.Module):
         if output_attentions:
             outputs += (attn_weights,)
         return outputs
+
+def _call_clip_encoder_layer(
+    layer: nn.Module,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    causal_attention_mask: Optional[torch.Tensor] = None,
+    output_attentions: Optional[bool] = False,
+    **extra_kwargs,
+):
+    import inspect
+    sig = inspect.signature(layer.forward)
+    params = sig.parameters
+
+    kwargs = {}
+    if "attention_mask" in params:
+        kwargs["attention_mask"] = attention_mask
+    if "causal_attention_mask" in params:
+        kwargs["causal_attention_mask"] = causal_attention_mask
+    if "output_attentions" in params:
+        kwargs["output_attentions"] = output_attentions
+    for k, v in extra_kwargs.items():
+        if k in params and v is not None:
+            kwargs[k] = v
+
+    return layer(hidden_states, **kwargs)
 
 class InstructCLIPEncoder(nn.Module):
     def __init__(self, config: CLIPConfig):
@@ -174,43 +199,33 @@ class InstructCLIPEncoder(nn.Module):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             if self.gradient_checkpointing and self.training:
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        return module(*inputs, output_attentions)
+                def create_custom_forward(module, **fixed_kwargs):
+                    def custom_forward(h_states):
+                        return _call_clip_encoder_layer(module, h_states, **fixed_kwargs)
                     return custom_forward
-                if isinstance(encoder_layer, CLIPEncoderLayer):
-                    layer_outputs = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(encoder_layer),
-                        hidden_states,
-                        attention_mask,
-                        causal_attention_mask,
-                    )
-                else:
-                    layer_outputs = torch.utils.checkpoint.checkpoint(
-                        create_custom_forward(encoder_layer),
-                        hidden_states,
-                        attention_mask,
-                        causal_attention_mask,
+
+                layer_outputs = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(
+                        encoder_layer,
+                        attention_mask=attention_mask,
+                        causal_attention_mask=causal_attention_mask,
+                        output_attentions=output_attentions,
                         instruct_states=instruct_states,
                         instruct_masks=instruct_masks,
-                    )
+                    ),
+                    hidden_states,
+                    use_reentrant=False,
+                )
             else:
-                if isinstance(encoder_layer, CLIPEncoderLayer):
-                    layer_outputs = encoder_layer(
-                        hidden_states,
-                        attention_mask,
-                        causal_attention_mask,
-                        output_attentions=output_attentions,
-                    )
-                else:
-                    layer_outputs = encoder_layer(
-                        hidden_states,
-                        attention_mask,
-                        causal_attention_mask,
-                        output_attentions=output_attentions,
-                        instruct_states=instruct_states,
-                        instruct_masks=instruct_masks,
-                    )
+                layer_outputs = _call_clip_encoder_layer(
+                    encoder_layer,
+                    hidden_states,
+                    attention_mask=attention_mask,
+                    causal_attention_mask=causal_attention_mask,
+                    output_attentions=output_attentions,
+                    instruct_states=instruct_states,
+                    instruct_masks=instruct_masks,
+                )
             hidden_states = layer_outputs[0]
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
