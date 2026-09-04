@@ -342,7 +342,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         self.optimizer = torch.optim.AdamW(groups, lr=base, betas=(0.9, 0.999), eps=1e-8)
         return self.optimizer
 
-    def training_step(self, model, inputs):
+    def training_step(self, model, inputs, num_items_in_batch=None, **kwargs):
         base_model = self._unwrap(model)
         # Detect weights that are ALREADY corrupted (means a previous step slipped
         # a bad update through — should not happen once the guard below works).
@@ -352,7 +352,19 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             print(f"🚨 [Trainer Check] step {self.state.global_step}: NaN/inf WEIGHTS already in {corrupted[:10]} "
                   f"(+{max(0,len(corrupted)-10)} more) — model is corrupted upstream.")
 
-        loss = super().training_step(model, inputs)  # forward + backward (grads now set)
+        if num_items_in_batch is not None:
+            try:
+                loss = super().training_step(model, inputs, num_items_in_batch=num_items_in_batch, **kwargs)
+            except TypeError:
+                try:
+                    loss = super().training_step(model, inputs, num_items_in_batch)
+                except TypeError:
+                    loss = super().training_step(model, inputs)
+        else:
+            try:
+                loss = super().training_step(model, inputs, **kwargs)
+            except TypeError:
+                loss = super().training_step(model, inputs)  # forward + backward (grads now set)
 
         if not torch.isfinite(loss):
             print(f"🚨 [Trainer Check] Loss is non-finite at step {self.state.global_step}: {loss.item()}")
