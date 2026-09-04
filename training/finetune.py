@@ -28,9 +28,7 @@ from data.dataset import ViT5VQADataset
 from data.collator import ViT5VQADataCollator
 from training.metrics import TaskSpecificTrainer, build_compute_metrics_finetune
 from utils.io_utils import download_and_extract_checkpoint
-from utils.model_utils import safe_load_tokenizer, patch_transformers_convert_to_native_format
-
-patch_transformers_convert_to_native_format()
+from utils.model_utils import safe_load_tokenizer
 
 def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     import yaml

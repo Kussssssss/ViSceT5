@@ -38,9 +38,7 @@ from data.collator import ViT5VQADataCollator
 from training.pretraine_loss import ViT5PretrainLoss, GlobalPretrainAccuracy
 from training.metrics import TaskSpecificTrainer, simple_pretrain_aggregator
 from utils.io_utils import download_and_extract_checkpoint
-from utils.model_utils import safe_load_tokenizer, patch_transformers_convert_to_native_format
-
-patch_transformers_convert_to_native_format()
+from utils.model_utils import safe_load_tokenizer
 
 # --- Torch >= 2.6 compat for resume ---------------------------------------------
 # PyTorch 2.6 flipped torch.load's default to weights_only=True. HF Trainer's
