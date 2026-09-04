@@ -166,13 +166,19 @@ def simple_pretrain_aggregator(eval_pred):
         return {"pretrain_acc": mean_acc}
     else:
         mean_vals = np.mean(preds, axis=0)
-        # Cloze method: encoder-head MLM is dropped → loss_mlm ≡ 0, so it is NOT
-        # reported (a permanent-0 column is misleading). Masked-prediction quality is
-        # loss_cloze; acc slot is ITM alone. loss_mlm stays available in the raw vector
-        # (idx3) for legacy modes but is omitted from the displayed metrics.
-        # ITM (pollute) is the dead binary head (ITM_WEIGHT=0), replaced by ITC — so
-        # acc_itm/loss_itm are NOT shown (they'd sit at chance and confuse). The
-        # alignment objective now is ITC, reported with BOTH loss_itc + acc_itc below.
+
+        # PreSTU SplitOCR Dual-Target mode (6 metrics: total_acc, text_acc, bbox_acc, text_loss, bbox_loss, total_loss)
+        if mean_vals.shape[0] == 6:
+            return {
+                "pretrain_acc": float(mean_vals[0]),
+                "acc_text": float(mean_vals[1]),
+                "acc_bbox": float(mean_vals[2]),
+                "loss_text": float(mean_vals[3]),
+                "loss_bbox": float(mean_vals[4]),
+                "loss_total": float(mean_vals[5]),
+            }
+
+        # Legacy TWA / MLM / TWC / ITC ablation modes
         result = {
             "pretrain_acc": float(mean_vals[0]),
             "acc_twc": float(mean_vals[2]),
@@ -181,22 +187,13 @@ def simple_pretrain_aggregator(eval_pred):
         if mean_vals.shape[0] >= 8:
             result["twc_pos_recall"] = float(mean_vals[6])
             result["twc_neg_recall"] = float(mean_vals[7])
-        # The masked-prediction is still MLM — just done generatively by the DECODER
-        # (span-infill) instead of an encoder head. So it is reported as loss_mlm/acc_mlm
-        # (the decoder values, vec idx8/idx9); the old encoder-head loss_mlm (idx3, ≡0)
-        # is not shown.
         if mean_vals.shape[0] >= 9:
             result["loss_mlm"] = float(mean_vals[8])
         if mean_vals.shape[0] >= 10:
             result["acc_mlm"] = float(mean_vals[9])
-        # Grounded/random split: sum the per-batch token counts (idx10..13) → exact
-        # token-weighted accuracy. grounded = decoder recovered an OCR word (grounding);
-        # random = an LM-prior word.
         if preds.shape[1] >= 14:
             g_correct = float(np.sum(preds[:, 10])); g_total = float(np.sum(preds[:, 11]))
             r_correct = float(np.sum(preds[:, 12])); r_total = float(np.sum(preds[:, 13]))
-            # ALWAYS emit both keys (0.0 when no tokens) so
-            # metric_for_best_model='acc_mlm_grounded' can never hit a missing key.
             result["acc_mlm_grounded"] = (g_correct / g_total) if g_total > 0 else 0.0
             result["acc_mlm_random"] = (r_correct / r_total) if r_total > 0 else 0.0
         if mean_vals.shape[0] >= 15:
@@ -486,7 +483,18 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             avg_acc = self._running_acc / self._running_cnt
             current_epoch = self.state.epoch or 0.0
 
-            if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) >= 6:
+            if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) == 6:
+                txt_a = batch_acc[1].item()
+                box_a = batch_acc[2].item()
+                txt_l = batch_acc[3].item()
+                box_l = batch_acc[4].item()
+                print(
+                    f"[Pretrain SplitOCR] step={step_idx} | epoch={current_epoch:.3f} | "
+                    f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
+                    f"Text -> Loss:{txt_l:.4f}, Acc:{txt_a:.4f} | "
+                    f"BBox -> Loss:{box_l:.4f}, Acc:{box_a:.4f}"
+                )
+            elif isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) > 6:
                 twc_a = batch_acc[2].item()
                 twc_l = batch_acc[5].item()
                 gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0
