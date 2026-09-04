@@ -873,28 +873,31 @@ def main(args_list=None):
         # 'question' (v3) | 'ocr' (v4: image↔chuỗi-OCR — câu hỏi template không đủ
         # thông tin đặc-định-ảnh nên ITC ghim ln(4); chuỗi OCR định danh ảnh duy nhất
         # → học được + ép CLIP mở băng học đọc scene text). Pretrain-only attr.
-        model._itc_text_source = _its
-    print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
-          f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
-          f"mlm_rand_prob={getattr(data_collator,'mlm_rand_prob',0.15)} "
-          f"itm_weight={os.environ.get('ITM_WEIGHT','0')} | "
-          f"gen_style={getattr(data_collator,'gen_target_style','sentinel')} "
-          f"itm_pollute={getattr(data_collator,'itm_pollute',True)} "
-          f"itc_queue={os.environ.get('ITC_QUEUE','0')} "
-          f"itc_dup_tau={os.environ.get('ITC_DUP_TAU','0')} "
-          f"itc_text_pool={getattr(model,'_itc_text_pool','embed')} "
-          f"itc_text_source={getattr(model,'_itc_text_source','question')}")
-
-    _cloze = str(mode).lower().strip() in ("gen", "gen_all")
-    if _cloze:
-        _itmw = os.environ.get("ITM_WEIGHT", "0")
-        print(f">>> [pretrain] objective = MLM (decoder span-infill) + TWC"
-              f"{' + ITM' if _itmw not in ('0','false','False') else ' (ITM off: dead at chance)'} "
-              "| MLM = mask OCR-overlap + random words, distinct <extra_id_i>, decoder regenerates "
-              "them (not an encoder head) | question-only encoder")
+    if str(mode).lower().strip() in ("prestu", "split_ocr", "dual_target"):
+        print(f">>> [pretrain] PreSTU SplitOCR Mode: Pure Dual-Target Pretraining (OCR Text CE Loss + Spatial BBox CE Loss)")
+        print(f">>> [pretrain] Configuration: num_bbox_bins={getattr(model_args, 'num_bbox_bins', 1000)}, lambda_bbox_ce={getattr(model_args, 'lambda_bbox_ce', 1.0)} | No TWC/MLM/ITC/ITM")
     else:
-        print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
-              f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | (legacy encoder-MLM path)")
+        print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
+              f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
+              f"mlm_rand_prob={getattr(data_collator,'mlm_rand_prob',0.15)} "
+              f"itm_weight={os.environ.get('ITM_WEIGHT','0')} | "
+              f"gen_style={getattr(data_collator,'gen_target_style','sentinel')} "
+              f"itm_pollute={getattr(data_collator,'itm_pollute',True)} "
+              f"itc_queue={os.environ.get('ITC_QUEUE','0')} "
+              f"itc_dup_tau={os.environ.get('ITC_DUP_TAU','0')} "
+              f"itc_text_pool={getattr(model,'_itc_text_pool','embed')} "
+              f"itc_text_source={getattr(model,'_itc_text_source','question')}")
+
+        _cloze = str(mode).lower().strip() in ("gen", "gen_all")
+        if _cloze:
+            _itmw = os.environ.get("ITM_WEIGHT", "0")
+            print(f">>> [pretrain] objective = MLM (decoder span-infill) + TWC"
+                  f"{' + ITM' if _itmw not in ('0','false','False') else ' (ITM off: dead at chance)'} "
+                  "| MLM = mask OCR-overlap + random words, distinct <extra_id_i>, decoder regenerates "
+                  "them (not an encoder head) | question-only encoder")
+        else:
+            print(f">>> [pretrain] MLM mask mode = {data_collator.mlm_mask_mode} | ocr_in_text = {data_collator.mlm_ocr_in_text} "
+                  f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | (legacy encoder-MLM path)")
 
     # 6. Trainer
     trainer = TaskSpecificTrainer(

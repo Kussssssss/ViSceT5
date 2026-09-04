@@ -514,10 +514,7 @@ class GlobalPretrainAccuracy(BaseMetric):
 
             device = logits.device
             return torch.tensor(
-                [total_acc, token_acc, bbox_acc,
-                 t_loss_val, b_loss_val, loss_val,
-                 1.0, 1.0, t_loss_val, token_acc,
-                 0.0, 0.0, 0.0, 0.0, b_loss_val, bbox_acc],
+                [total_acc, token_acc, bbox_acc, t_loss_val, b_loss_val, loss_val],
                 device=device
             )
 
