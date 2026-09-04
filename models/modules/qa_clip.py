@@ -226,9 +226,18 @@ class InstructCLIPEncoder(nn.Module):
                     instruct_states=instruct_states,
                     instruct_masks=instruct_masks,
                 )
-            hidden_states = layer_outputs[0]
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
+            if isinstance(layer_outputs, (tuple, list)):
+                hidden_states = layer_outputs[0]
+                if output_attentions:
+                    all_attentions = all_attentions + (layer_outputs[1] if len(layer_outputs) > 1 else None,)
+            elif hasattr(layer_outputs, "last_hidden_state"):
+                hidden_states = layer_outputs.last_hidden_state
+                if output_attentions:
+                    all_attentions = all_attentions + (getattr(layer_outputs, "attentions", None),)
+            else:
+                hidden_states = layer_outputs
+                if output_attentions:
+                    all_attentions = all_attentions + (None,)
         if output_hidden_states:
             encoder_states = encoder_states + (hidden_states,)
         if not return_dict:
@@ -269,16 +278,22 @@ class CLIPVisionTransformer(nn.Module):
             instruct_states=instruct_states,
             instruct_masks=instruct_masks,
         )
-        last_hidden_state = encoder_outputs[0]
+        if isinstance(encoder_outputs, (tuple, list)):
+            last_hidden_state = encoder_outputs[0]
+        elif hasattr(encoder_outputs, "last_hidden_state"):
+            last_hidden_state = encoder_outputs.last_hidden_state
+        else:
+            last_hidden_state = encoder_outputs
         pooled_output = last_hidden_state[:, 0, :]
         pooled_output = self.post_layernorm(pooled_output)
         if not return_dict:
-            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
+            extra = encoder_outputs[1:] if isinstance(encoder_outputs, (tuple, list)) else ()
+            return (last_hidden_state, pooled_output) + extra
         return BaseModelOutputWithPooling(
             last_hidden_state=last_hidden_state,
             pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
+            hidden_states=getattr(encoder_outputs, "hidden_states", None),
+            attentions=getattr(encoder_outputs, "attentions", None),
         )
 
 class QACLIPEncoder(CLIPPreTrainedModel):
