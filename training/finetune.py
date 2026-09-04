@@ -34,55 +34,94 @@ def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     import yaml
     is_jupyter = any("ipykernel" in arg or "colab" in arg for arg in sys.argv) or (len(sys.argv) > 0 and ("ipykernel_launcher" in sys.argv[0] or "colab_kernel_launcher" in sys.argv[0]))
     if args_list is not None:
-        args = args_list
+        raw_args = list(args_list)
     elif is_jupyter:
         print(f"[Jupyter/Colab] Environment detected. Using default config: {default_yaml}")
-        args = [default_yaml] if default_yaml is not None else []
+        raw_args = [default_yaml] if default_yaml is not None else []
     else:
-        args = sys.argv[1:]
-        
-    if len(args) >= 1 and args[0].endswith(".yaml"):
-        yaml_file = os.path.abspath(args[0])
-        print(f"Loading configuration from YAML: {yaml_file}")
-        with open(yaml_file, "r", encoding="utf-8") as f:
-            yaml_dict = yaml.safe_load(f) or {}
-            
-        cli_args = args[1:]
-        if len(cli_args) > 0:
-            print(f"Applying CLI overrides: {cli_args}")
-            option_to_dest = {}
-            for action in parser._actions:
-                for option_string in action.option_strings:
-                    option_to_dest[option_string] = action.dest
-            
-            explicit_dests = set()
-            for arg in cli_args:
-                if arg.startswith("-"):
-                    opt = arg.split("=")[0]
-                    if opt in option_to_dest:
-                        explicit_dests.add(option_to_dest[opt])
-                    elif opt.startswith("--no-") and opt.replace("--no-", "--") in option_to_dest:
-                        explicit_dests.add(option_to_dest[opt.replace("--no-", "--")])
-            
-            # Temporarily disable action.required to avoid argparse complaining about missing required options
-            original_required = {}
-            for action in parser._actions:
-                original_required[action] = action.required
-                action.required = False
-            
-            try:
-                parsed_namespace = parser.parse_args(args=cli_args)
-            finally:
-                # Restore original required attributes
-                for action, req in original_required.items():
-                    action.required = req
-                    
-            for dest in explicit_dests:
+        raw_args = list(sys.argv[1:])
+
+    yaml_file = None
+    cli_args = []
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg in ("--config", "-c"):
+            if i + 1 < len(raw_args):
+                yaml_file = raw_args[i + 1]
+                i += 2
+                continue
+            else:
+                i += 1
+                continue
+        elif arg.startswith("--config="):
+            yaml_file = arg.split("=", 1)[1]
+            i += 1
+            continue
+        elif arg.startswith("-c="):
+            yaml_file = arg.split("=", 1)[1]
+            i += 1
+            continue
+        elif i == 0 and (arg.endswith(".yaml") or arg.endswith(".yml")):
+            yaml_file = arg
+            i += 1
+            continue
+        else:
+            cli_args.append(arg)
+            i += 1
+
+    if yaml_file is None and default_yaml is not None and os.path.exists(default_yaml):
+        yaml_file = default_yaml
+
+    yaml_dict = {}
+    if yaml_file:
+        yaml_file = os.path.abspath(yaml_file)
+        if os.path.exists(yaml_file):
+            print(f"Loading configuration from YAML: {yaml_file}")
+            with open(yaml_file, "r", encoding="utf-8") as f:
+                yaml_dict = yaml.safe_load(f) or {}
+        else:
+            print(f"Warning: Config YAML not found: {yaml_file}")
+
+    if len(cli_args) > 0:
+        print(f"Applying CLI overrides: {cli_args}")
+        option_to_dest = {}
+        for action in parser._actions:
+            for option_string in action.option_strings:
+                option_to_dest[option_string] = action.dest
+
+        explicit_dests = set()
+        for arg in cli_args:
+            if arg.startswith("-"):
+                opt = arg.split("=")[0]
+                if opt in option_to_dest:
+                    explicit_dests.add(option_to_dest[opt])
+                elif opt.startswith("--no-") and opt.replace("--no-", "--") in option_to_dest:
+                    explicit_dests.add(option_to_dest[opt.replace("--no-", "--")])
+
+        # Temporarily disable action.required to avoid argparse complaining about missing required options
+        original_required = {}
+        for action in parser._actions:
+            original_required[action] = action.required
+            action.required = False
+
+        try:
+            parsed_namespace, remaining_args = parser.parse_known_args(args=cli_args)
+            if remaining_args:
+                print(f"⚠️ Unrecognized or extra CLI arguments: {remaining_args}")
+        finally:
+            # Restore original required attributes
+            for action, req in original_required.items():
+                action.required = req
+
+        for dest in explicit_dests:
+            if hasattr(parsed_namespace, dest):
                 yaml_dict[dest] = getattr(parsed_namespace, dest)
-                
+
+    if yaml_dict:
         return parser.parse_dict(yaml_dict, allow_extra_keys=True)
     else:
-        return parser.parse_args_into_dataclasses(args=args)
+        return parser.parse_args_into_dataclasses(args=cli_args)
 
 def _patch_torch_load_weights_only():
     """PyTorch >= 2.6 đổi mặc định torch.load(weights_only=True). Transformers 4.45 gọi

@@ -13,6 +13,10 @@ class ModelArguments:
         default=None,
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
+    config: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to YAML configuration file"}
+    )
     # Ablation Flags
     ablation_use_qaclip: bool = field(
         default=True,
