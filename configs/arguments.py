@@ -57,6 +57,22 @@ class ModelArguments:
         default=False,
         metadata={"help": "Include OCR tokens in the MLM encoder text branch. False (default) = question-only (removes OCR-as-text copy crutch, aligns with finetune; OCR learned via gen+TWC). True = old question+OCR."}
     )
+    num_bbox_bins: int = field(
+        default=1000,
+        metadata={"help": "Number of discrete coordinate bins for BBox prediction."}
+    )
+    lambda_bbox_ce: float = field(
+        default=1.0,
+        metadata={"help": "Weight of BBox loss relative to text generation loss."}
+    )
+    pretrain_use_vs: bool = field(
+        default=True,
+        metadata={"help": "Whether to use Visual Search (AVF) in pretrain."}
+    )
+    use_ocr_aug_pretrain: bool = field(
+        default=False,
+        metadata={"help": "Whether to apply OCR augmentation in pretrain (default False)."}
+    )
 
 @dataclass
 class DataArguments:
