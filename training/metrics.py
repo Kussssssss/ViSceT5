@@ -369,8 +369,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
 
         loss = super().training_step(model, inputs, **step_kwargs)
 
-        if not torch.isfinite(loss):
-            print(f"🚨 [Trainer Check] Loss is non-finite at step {self.state.global_step}: {loss.item()}")
+        if not bool(torch.isfinite(loss).all()):
+            print(f"🚨 [Trainer Check] Loss is non-finite at step {self.state.global_step}: {loss.mean().item()}")
 
         # CRITICAL GUARD. transformers 4.38/4.45 have no `_clip_grad_norm` hook and
         # clip gradients via accelerate AFTER this method returns. Their
@@ -469,10 +469,10 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         with torch.no_grad():
             batch_acc = acc_fn.calculate(inputs, outputs)
             if isinstance(batch_acc, torch.Tensor):
-                batch_acc_val = batch_acc[0].item() if batch_acc.ndim > 0 else batch_acc.item()
+                batch_acc_val = batch_acc[0].mean().item() if batch_acc.ndim > 0 else batch_acc.item()
             else:
                 batch_acc_val = float(batch_acc)
-            loss_val = loss.item()
+            loss_val = loss.mean().item() if isinstance(loss, torch.Tensor) else float(loss)
 
         self._running_loss += loss_val
         self._running_acc += batch_acc_val
@@ -612,10 +612,10 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                     with torch.no_grad():
                         acc_val = acc_fn.calculate(inputs, outputs)
                         if isinstance(acc_val, torch.Tensor):
-                            acc_val = acc_val[0].item() if acc_val.ndim > 0 else acc_val.item()
+                            acc_val = acc_val[0].mean().item() if acc_val.ndim > 0 else acc_val.item()
                         else:
                             acc_val = float(acc_val)
-                        print(f"Debug Step {self.state.global_step}: Loss={loss.item():.4f}, Acc={acc_val:.4f}")
+                        print(f"Debug Step {self.state.global_step}: Loss={loss.mean().item():.4f}, Acc={acc_val:.4f}")
         else:
             loss = outputs.get("loss")
             if loss is None:
@@ -654,6 +654,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                     outputs["gen_r_correct"] = gen_stats["r_correct"]
                     outputs["gen_r_total"] = gen_stats["r_total"]
                 loss = loss_fn(inputs, outputs)
+                if isinstance(loss, torch.Tensor) and loss.ndim > 0:
+                    loss = loss.mean()
                 acc_tensor = acc_fn.calculate(inputs, outputs)
 
                 if prediction_loss_only:
