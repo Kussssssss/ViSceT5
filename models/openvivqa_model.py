@@ -388,7 +388,7 @@ class OpenViVQAModel(PreTrainedModel):
         out = {"img_tokens": img_tokens, "img_attn_mask": img_attn_mask}
 
         # Tính bản đồ nhiệt (Heatmap) cho Visual Search
-        if qa_out.attentions is not None:
+        if qa_out.attentions is not None and len(qa_out.attentions) > 0 and qa_out.attentions[-1] is not None:
             last_attn = qa_out.attentions[-1]
             if T > 0:
                 # Question-Guided Attention (Lấy tương tác giữa Image Patches và Text)
