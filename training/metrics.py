@@ -665,11 +665,14 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                     acc_tensor = torch.tensor(acc_tensor, device=loss.device)
 
                 preds = acc_tensor.unsqueeze(0).detach()
+                # Crucial for HuggingFace Trainer: evaluation_loop checks `all_labels is not None`
+                # before calling compute_metrics. If labels is None, compute_metrics is completely skipped,
+                # causing KeyError on `metric_for_best_model` (e.g. eval_pretrain_acc) during checkpoint saving.
                 labels = inputs.get("tag_pollute")
                 if isinstance(labels, torch.Tensor):
                     labels = labels.detach()
                 else:
-                    labels = None
+                    labels = torch.zeros(preds.size(0), dtype=torch.long, device=preds.device)
                 return (loss.detach(), preds, labels)
 
             # 2) FINETUNE BRANCH
