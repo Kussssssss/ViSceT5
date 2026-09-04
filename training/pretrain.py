@@ -103,7 +103,7 @@ def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
             for dest in explicit_dests:
                 yaml_dict[dest] = getattr(parsed_namespace, dest)
                 
-        return parser.parse_dict(yaml_dict)
+        return parser.parse_dict(yaml_dict, allow_extra_keys=True)
     else:
         return parser.parse_args_into_dataclasses(args=args)
 
