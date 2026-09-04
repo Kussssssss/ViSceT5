@@ -38,6 +38,9 @@ from data.collator import ViT5VQADataCollator
 from training.pretraine_loss import ViT5PretrainLoss, GlobalPretrainAccuracy
 from training.metrics import TaskSpecificTrainer, simple_pretrain_aggregator
 from utils.io_utils import download_and_extract_checkpoint
+from utils.model_utils import safe_load_tokenizer, patch_transformers_convert_to_native_format
+
+patch_transformers_convert_to_native_format()
 
 # --- Torch >= 2.6 compat for resume ---------------------------------------------
 # PyTorch 2.6 flipped torch.load's default to weights_only=True. HF Trainer's
@@ -697,7 +700,7 @@ def main(args_list=None):
 
     # 4. Tokenizer & Model
     if ckpt_to_load:
-        tokenizer = AutoTokenizer.from_pretrained(ckpt_to_load, local_files_only=True, use_fast=False)
+        tokenizer = safe_load_tokenizer(ckpt_to_load, local_files_only=True, use_fast=False)
         # OpenViVQAConfig isn't registered with AutoConfig (model_type 'openvivqa'),
         # so AutoConfig.from_pretrained would raise. Build the custom config directly.
         try:
@@ -707,7 +710,7 @@ def main(args_list=None):
             config = OpenViVQAConfig()
     else:
         # Fallback to defaults
-        tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base", use_fast=False)
+        tokenizer = safe_load_tokenizer("VietAI/vit5-base", use_fast=False)
         config = OpenViVQAConfig()
 
     model = OpenViVQAModel(config)

@@ -28,6 +28,9 @@ from data.dataset import ViT5VQADataset
 from data.collator import ViT5VQADataCollator
 from training.metrics import TaskSpecificTrainer, build_compute_metrics_finetune
 from utils.io_utils import download_and_extract_checkpoint
+from utils.model_utils import safe_load_tokenizer, patch_transformers_convert_to_native_format
+
+patch_transformers_convert_to_native_format()
 
 def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     import yaml
@@ -246,7 +249,7 @@ def main(args_list=None):
 
     # 4. Tokenizer & Model
     if ckpt_to_load:
-        tokenizer = AutoTokenizer.from_pretrained(ckpt_to_load, local_files_only=True, use_fast=False)
+        tokenizer = safe_load_tokenizer(ckpt_to_load, local_files_only=True, use_fast=False)
         # OpenViVQAConfig isn't registered with AutoConfig (model_type 'openvivqa'),
         # so AutoConfig.from_pretrained would raise. Build the custom config directly.
         try:
@@ -263,7 +266,7 @@ def main(args_list=None):
             print("🛡️ [finetune] warm-start từ pretrain-ckpt → bật config.clamp_vision "
                   "(giữ đúng hàm forward mà trọng số đã học)")
     else:
-        tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base", use_fast=False)
+        tokenizer = safe_load_tokenizer("VietAI/vit5-base", use_fast=False)
         config = OpenViVQAConfig()
 
     # FINETUNE: các submodule PRETRAIN-ONLY (ITC heads) được gate theo config.pretrain
