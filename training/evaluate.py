@@ -147,7 +147,7 @@ def main():
         eval_dataset=val_dataset,
         data_collator=data_collator_reload,
         compute_metrics=compute_metrics_fn,
-        tokenizer=tok_reload,
+        processing_class=tok_reload,
     )
 
     print("=" * 80)

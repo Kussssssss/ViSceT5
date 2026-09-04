@@ -285,6 +285,13 @@ def build_compute_metrics_finetune(tokenizer_for_metrics):
 
 class TaskSpecificTrainer(Seq2SeqTrainer):
     def __init__(self, *args, pretrain_loss_fn=None, pretrain_acc_fn=None, **kwargs):
+        # HuggingFace Transformers >= 4.49 renamed `tokenizer` to `processing_class` in Trainer/Seq2SeqTrainer.
+        import inspect
+        sig = inspect.signature(Seq2SeqTrainer.__init__)
+        if "processing_class" in sig.parameters and "tokenizer" in kwargs and "processing_class" not in kwargs:
+            kwargs["processing_class"] = kwargs.pop("tokenizer")
+        elif "tokenizer" in sig.parameters and "processing_class" in kwargs and "tokenizer" not in kwargs:
+            kwargs["tokenizer"] = kwargs.pop("processing_class")
         super().__init__(*args, **kwargs)
         self.pretrain_loss_fn = pretrain_loss_fn
         self.pretrain_acc_fn = pretrain_acc_fn
