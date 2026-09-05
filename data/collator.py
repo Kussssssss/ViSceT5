@@ -187,6 +187,60 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
     target = " ".join(tgt_parts) + f" <extra_id_{sid}>"
     return " ".join(in_parts), target, sid, span_types
 
+
+def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[List[str], torch.Tensor]:
+    """
+    Sort tokens (list of str) and boxes (torch.Tensor of shape [N, 4])
+    in human reading order: top-to-bottom, then left-to-right (PreSTU section 2.1).
+    boxes format: [x1, y1, x2, y2].
+    """
+    if len(tokens) <= 1 or boxes.size(0) <= 1:
+        return tokens, boxes
+
+    items = []
+    for idx, (tok, box) in enumerate(zip(tokens, boxes)):
+        x1, y1, x2, y2 = box.tolist()
+        h = max(y2 - y1, 1e-4)
+        yc = (y1 + y2) / 2.0
+        items.append({
+            "tok": tok,
+            "box": box,
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "yc": yc,
+            "h": h,
+        })
+
+    # 1. Sắp xếp sơ bộ theo toạ độ đỉnh trên y1
+    items.sort(key=lambda it: it["y1"])
+
+    # 2. Gom nhóm theo từng dòng văn bản dựa vào độ trùng lặp trục dọc (vertical overlap)
+    lines = []
+    current_line = [items[0]]
+    for item in items[1:]:
+        line_yc = sum(it["yc"] for it in current_line) / len(current_line)
+        line_h = sum(it["h"] for it in current_line) / len(current_line)
+        if abs(item["yc"] - line_yc) < max(line_h, item["h"]) * 0.5:
+            current_line.append(item)
+        else:
+            lines.append(current_line)
+            current_line = [item]
+    if current_line:
+        lines.append(current_line)
+
+    # 3. Sắp xếp trong từng dòng từ trái sang phải theo x1
+    sorted_items = []
+    for line in lines:
+        line.sort(key=lambda it: it["x1"])
+        sorted_items.extend(line)
+
+    sorted_tokens = [it["tok"] for it in sorted_items]
+    sorted_boxes = torch.stack([it["box"] for it in sorted_items])
+    return sorted_tokens, sorted_boxes
+
+
 class ViT5VQADataCollator:
     def __init__(
         self,
@@ -257,7 +311,7 @@ class ViT5VQADataCollator:
         # removed: its target is the noisy OCR output, indefensible without ground-truth;
         # revisit correction later with a real correct signal — synthetic-GT / multi-OCR.)
 
-        self.tgt_max_len = int(getattr(self.cfg, "text_max_target_length", 56))
+        self.tgt_max_len = 128 if self.pretrain else int(getattr(self.cfg, "text_max_target_length", 56))
         self.char_max_num = int(getattr(self.cfg, "char_max_num", 50))
 
         self.pad_id = int(getattr(self.tokenizer, "pad_token_id", 0))
@@ -928,12 +982,15 @@ class ViT5VQADataCollator:
                     p_boxes = torch.zeros((0, 4), dtype=torch.float)
                     t_boxes = torch.zeros((0, 4), dtype=torch.long)
                 else:
+                    # Sắp xếp theo trật tự đọc không gian: trên xuống dưới, trái sang phải (PreSTU Sec 2.1)
+                    norm_tokens, valid_boxes = _sort_ocr_reading_order(norm_tokens, valid_boxes)
+
                     # Random split point: m in [0, N_words - 1]
                     m = random.randint(0, max(0, N_words - 1))
                     prefix_words = norm_tokens[:m]
                     target_words = norm_tokens[m:]
-                    prefix_str = " ".join(prefix_words).strip()
-                    target_str = " ".join(target_words).strip()
+                    prefix_str = " </s> ".join(prefix_words).strip()
+                    target_str = " </s> ".join(target_words).strip()
 
                     p_boxes = valid_boxes[:m]
                     t_boxes_float = valid_boxes[m:]

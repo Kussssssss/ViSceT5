@@ -9,7 +9,8 @@ ablation_use_vs: true
 ablation_use_ocr: false
 use_ocr_aug_pretrain: false
 num_bbox_bins: 1000
-lambda_bbox_ce: 1.0
+lambda_bbox_ce: 0.3
+vision_unfreeze_last_n: 2
 pretrain_use_vs: true
 
 output_dir: "./output/pretrain"

@@ -786,6 +786,9 @@ def main(args_list=None):
     model.config.pretrain_ablation_mode = mode
     model.config.use_twc = False
     model.config.use_ocr_aug_finetune = False
+    _lam = float(getattr(model_args, "lambda_bbox_ce", 0.3))
+    model.lambda_bbox_ce = _lam
+    model.config.lambda_bbox_ce = _lam
     
     model.to(DEVICE)
 
@@ -795,6 +798,8 @@ def main(args_list=None):
     # is completely unaffected. n=0 keeps the frozen backbone (default).
     _vuf = int(getattr(model_args, "vision_unfreeze_last_n", 0))
     if _vuf > 0:
+        if "VISION_LR_SCALE" not in os.environ:
+            os.environ["VISION_LR_SCALE"] = "0.1"
         try:
             _layers = model.qa_clip.vision_model.encoder.layers
             _k = min(_vuf, len(_layers)); _cnt = 0
