@@ -504,7 +504,8 @@ class GlobalPretrainAccuracy(BaseMetric):
                     # Tolerance: within 20 bins (~2% of coordinate span across 1000 bins)
                     bbox_acc = ((bb_preds[bb_mask] - bb_targets[bb_mask]).abs() <= 20).float().mean().item()
 
-            total_acc = 0.5 * (token_acc + bbox_acc) if bbox_acc > 0 else token_acc
+            # Trọng số phản ánh cân bằng: 70% Sinh từ vựng (chính) + 30% Định vị toạ độ (bổ trợ)
+            total_acc = (0.7 * token_acc + 0.3 * bbox_acc) if bbox_acc > 0 else token_acc
             _loss_tensor = model_output.get("loss", torch.tensor(0.0))
             loss_val = _loss_tensor.mean().item() if torch.is_tensor(_loss_tensor) else float(_loss_tensor)
             _t_loss = model_output.get("text_loss", _loss_tensor)
