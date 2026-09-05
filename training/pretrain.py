@@ -873,6 +873,8 @@ def main(args_list=None):
         # 'question' (v3) | 'ocr' (v4: image↔chuỗi-OCR — câu hỏi template không đủ
         # thông tin đặc-định-ảnh nên ITC ghim ln(4); chuỗi OCR định danh ảnh duy nhất
         # → học được + ép CLIP mở băng học đọc scene text). Pretrain-only attr.
+        model._itc_text_source = _its
+
     if str(mode).lower().strip() in ("prestu", "split_ocr", "dual_target"):
         print(f">>> [pretrain] PreSTU SplitOCR Mode: Pure Dual-Target Pretraining (OCR Text CE Loss + Spatial BBox CE Loss)")
         print(f">>> [pretrain] Configuration: num_bbox_bins={getattr(model_args, 'num_bbox_bins', 1000)}, lambda_bbox_ce={getattr(model_args, 'lambda_bbox_ce', 1.0)} | No TWC/MLM/ITC/ITM")
