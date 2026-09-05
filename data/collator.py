@@ -989,8 +989,8 @@ class ViT5VQADataCollator:
                     m = random.randint(0, max(0, N_words - 1))
                     prefix_words = norm_tokens[:m]
                     target_words = norm_tokens[m:]
-                    prefix_str = " </s> ".join(prefix_words).strip()
-                    target_str = " </s> ".join(target_words).strip()
+                    prefix_str = " ".join(prefix_words).strip()
+                    target_str = " ".join(target_words).strip()
 
                     p_boxes = valid_boxes[:m]
                     t_boxes_float = valid_boxes[m:]
