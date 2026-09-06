@@ -59,9 +59,12 @@ def find_val_csv(val_path):
     standard_paths = [
         val_path,
         "./output/pretrain/merged_val.csv",
+        "./output/merged_val.csv",
         "/kaggle/working/pretrain_output/merged_val.csv",
         "/kaggle/working/ViSceT5/output/pretrain/merged_val.csv",
+        "/kaggle/working/ViSceT5/output/merged_val.csv",
         "./output/pretrain/val.csv",
+        "./output/val.csv",
         "./datasets/processed/merged_val.csv",
         "./datasets/merged_val.csv",
     ]
