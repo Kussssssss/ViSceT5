@@ -1,14 +1,19 @@
 # scripts/visualize_pretrain.py
 """
 Visualizes PreSTU SplitOCR model predictions:
-1. Ground-Truth: Image + GT Suffix BBoxes (Green) + Target Text
+1. Ground-Truth: Image + Prefix BBoxes (Blue) + Suffix BBoxes (Green) + Target Text
 2. Model Prediction: Image + Predicted BBoxes (Red) + Generated Text (T5 Decoder)
 3. Model Attention: Visual Search / Patch Attention Heatmap overlaid on image
+
+Can be run from CLI or imported as a function inside a Jupyter / Kaggle notebook:
+    from scripts.visualize_pretrain import visualize_pretrain_samples
+    visualize_pretrain_samples(checkpoint="./output/pretrain", num_samples=3)
 """
 
 import os
 import sys
 import argparse
+import glob
 import torch
 import numpy as np
 import pandas as pd
@@ -29,82 +34,103 @@ from data.collator import ViT5VQADataCollator
 from utils.model_utils import safe_load_tokenizer
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Visualize PreSTU SplitOCR Predictions and Attention")
-    parser.add_argument("--checkpoint", type=str, default="./output/pretrain",
-                        help="Path to checkpoint directory")
-    parser.add_argument("--val_csv", type=str, default="./output/pretrain/merged_val.csv",
-                        help="Path to merged validation CSV")
-    parser.add_argument("--sample_idx", type=int, default=0,
-                        help="Index of sample to visualize")
-    parser.add_argument("--num_samples", type=int, default=3,
-                        help="Number of samples to visualize")
-    parser.add_argument("--save_dir", type=str, default="./output/pretrain/visualizations",
-                        help="Directory to save output figures")
-    return parser.parse_args()
+def find_checkpoint_weights(ckpt_dir):
+    """Locate model weights in ckpt_dir or its checkpoint-* subdirectories."""
+    candidates = [ckpt_dir]
+    if os.path.isdir(ckpt_dir):
+        subdirs = [os.path.join(ckpt_dir, d) for d in os.listdir(ckpt_dir) if d.startswith("checkpoint-")]
+        subdirs.sort(key=lambda x: int(x.split("-")[-1]) if x.split("-")[-1].isdigit() else 0, reverse=True)
+        candidates = subdirs + candidates
+
+    for c in candidates:
+        sp = os.path.join(c, "model.safetensors")
+        bp = os.path.join(c, "pytorch_model.bin")
+        if os.path.exists(sp):
+            return c, sp, "safetensors"
+        if os.path.exists(bp):
+            return c, bp, "bin"
+    return ckpt_dir, None, None
 
 
-def main():
-    args = parse_args()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
-    os.makedirs(args.save_dir, exist_ok=True)
+def find_val_csv(val_path):
+    """Find validation CSV across standard project paths."""
+    if val_path and os.path.exists(val_path):
+        return val_path
+    standard_paths = [
+        val_path,
+        "./output/pretrain/merged_val.csv",
+        "/kaggle/working/pretrain_output/merged_val.csv",
+        "/kaggle/working/ViSceT5/output/pretrain/merged_val.csv",
+        "./output/pretrain/val.csv",
+        "./datasets/processed/merged_val.csv",
+        "./datasets/merged_val.csv",
+    ]
+    for p in standard_paths:
+        if p and os.path.exists(p):
+            return p
+    return None
 
-    ckpt_dir = args.checkpoint
-    print(f"Loading checkpoint from: {ckpt_dir}")
 
-    tokenizer = safe_load_tokenizer(ckpt_dir, local_files_only=True, use_fast=False)
+def visualize_pretrain_samples(
+    checkpoint="./output/pretrain",
+    val_csv=None,
+    sample_idx=0,
+    num_samples=3,
+    save_dir="./output/pretrain/visualizations",
+    show_plot=True,
+    device=None,
+):
+    """
+    Core function to visualize pretraining predictions and attention.
+    Callable directly inside Kaggle Notebook cells.
+    """
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Visualization device: {device}")
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    # 1. Resolve Checkpoint & Weights
+    best_ckpt, weights_path, w_type = find_checkpoint_weights(checkpoint)
+    print(f"Checkpoint directory: {best_ckpt}")
+
+    tokenizer = safe_load_tokenizer(best_ckpt, local_files_only=True, use_fast=False)
     if tokenizer is None:
         tokenizer = safe_load_tokenizer("VietAI/vit5-base", use_fast=False)
 
     try:
-        config = OpenViVQAConfig.from_pretrained(ckpt_dir, local_files_only=True)
+        config = OpenViVQAConfig.from_pretrained(best_ckpt, local_files_only=True)
     except Exception:
         config = OpenViVQAConfig()
 
     model = OpenViVQAModel(config)
 
-    from safetensors.torch import load_file
-    safe_path = os.path.join(ckpt_dir, "model.safetensors")
-    bin_path = os.path.join(ckpt_dir, "pytorch_model.bin")
-    state_dict = None
-    if os.path.exists(safe_path):
-        state_dict = load_file(safe_path)
-    elif os.path.exists(bin_path):
-        state_dict = torch.load(bin_path, map_location="cpu")
-    elif os.path.exists(ckpt_dir):
-        subdirs = [os.path.join(ckpt_dir, d) for d in os.listdir(ckpt_dir) if d.startswith("checkpoint-")]
-        if subdirs:
-            subdirs.sort(key=lambda x: int(x.split("-")[-1]))
-            latest_ckpt = subdirs[-1]
-            print(f"Found latest checkpoint subdir: {latest_ckpt}")
-            sp = os.path.join(latest_ckpt, "model.safetensors")
-            bp = os.path.join(latest_ckpt, "pytorch_model.bin")
-            state_dict = load_file(sp) if os.path.exists(sp) else (torch.load(bp, map_location="cpu") if os.path.exists(bp) else None)
-
-    if state_dict is not None:
+    if weights_path:
+        print(f"Loading weights from: {weights_path}")
+        if w_type == "safetensors":
+            from safetensors.torch import load_file
+            state_dict = load_file(weights_path)
+        else:
+            state_dict = torch.load(weights_path, map_location="cpu")
         clean_state_dict = {k[7:] if k.startswith("module.") else k: v for k, v in state_dict.items()}
         res = model.load_state_dict(clean_state_dict, strict=False)
         print(f"Loaded weights: missing={len(res.missing_keys)}, unexpected={len(res.unexpected_keys)}")
     else:
-        print("Warning: No weights found in checkpoint path.")
+        print("Warning: No pretrain weights file found. Visualizing with current model weights.")
 
     model.pretrain = True
     model.to(device)
     model.eval()
 
-    val_csv = args.val_csv
-    if not os.path.exists(val_csv):
-        for alt in ["./output/pretrain/val.csv", "./datasets/processed/merged_val.csv"]:
-            if os.path.exists(alt):
-                val_csv = alt
-                break
+    # 2. Resolve Validation Data
+    resolved_val_csv = find_val_csv(val_csv)
+    if not resolved_val_csv:
+        print(f"Error: Could not locate validation CSV. Checked {val_csv} and standard paths.")
+        return []
 
-    if not os.path.exists(val_csv):
-        print(f"Error: Validation CSV not found at {args.val_csv}")
-        return
+    print(f"Using validation CSV: {resolved_val_csv}")
+    val_df = pd.read_csv(resolved_val_csv)
 
-    val_df = pd.read_csv(val_csv)
     vision_ocr = Vision_Encode_Ocr_Feature(DEFAULT_OCR_CONFIG)
     val_dataset = ViT5VQADataset(val_df)
 
@@ -121,10 +147,12 @@ def main():
     )
 
     total_val = len(val_dataset)
-    start_idx = min(args.sample_idx, max(0, total_val - 1))
-    end_idx = min(start_idx + args.num_samples, total_val)
+    start_idx = min(sample_idx, max(0, total_val - 1))
+    end_idx = min(start_idx + num_samples, total_val)
 
-    print(f"Visualizing {end_idx - start_idx} samples (indices {start_idx} to {end_idx - 1})...\n")
+    print(f"\nProcessing {end_idx - start_idx} samples (indices {start_idx} to {end_idx - 1})...\n")
+
+    saved_figures = []
 
     for s_i in range(start_idx, end_idx):
         sample = val_dataset[s_i]
@@ -153,31 +181,43 @@ def main():
         lbl_ids[lbl_ids == -100] = tokenizer.pad_token_id or 0
         target_text = tokenizer.decode(lbl_ids, skip_special_tokens=True).strip()
 
+        # Prefix BBoxes
+        p_mask = batch["prefix_box_mask"][0].bool()
+        p_boxes = batch["prefix_box_coords"][0][p_mask].cpu().numpy()
+
+        # Target Suffix BBoxes
         gt_bins = batch["target_bbox_bins"][0]
         valid_bbox_mask = (gt_bins[:, 0] != -100)
         gt_boxes = (gt_bins[valid_bbox_mask].float() / 1000.0).cpu().numpy()
 
+        # Predicted Suffix BBoxes (Soft-argmax)
         bbox_logits = outputs.get("bbox_logits")
         if bbox_logits is not None:
             probs = torch.softmax(bbox_logits[0], dim=-1)
             bins = torch.linspace(0.0, 1.0, 1000, device=probs.device, dtype=probs.dtype)
             pred_coords = torch.sum(probs * bins, dim=-1)
-            pred_boxes = pred_coords[valid_bbox_mask].cpu().numpy()
+            pred_boxes = pred_coords[valid_bbox_mask.to(pred_coords.device)].cpu().numpy()
         else:
             pred_boxes = np.zeros((0, 4))
 
+        # Panel 1: Ground-Truth
         img_gt = pil_img.copy()
         draw_gt = ImageDraw.Draw(img_gt)
+        for box in p_boxes:
+            x1, y1, x2, y2 = box[0] * W0, box[1] * H0, box[2] * W0, box[3] * H0
+            draw_gt.rectangle([x1, y1, x2, y2], outline="blue", width=2)
         for box in gt_boxes:
             x1, y1, x2, y2 = box[0] * W0, box[1] * H0, box[2] * W0, box[3] * H0
             draw_gt.rectangle([x1, y1, x2, y2], outline="green", width=3)
 
+        # Panel 2: Prediction
         img_pred = pil_img.copy()
         draw_pred = ImageDraw.Draw(img_pred)
         for box in pred_boxes:
             x1, y1, x2, y2 = box[0] * W0, box[1] * H0, box[2] * W0, box[3] * H0
             draw_pred.rectangle([x1, y1, x2, y2], outline="red", width=3)
 
+        # Panel 3: Attention Heatmap
         overlay = pil_img.copy()
         vs_out = outputs.get("vs_debug")
         if vs_out is not None and "attn_grids" in vs_out and vs_out["attn_grids"] is not None:
@@ -190,29 +230,64 @@ def main():
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
         axes[0].imshow(img_gt)
-        axes[0].set_title(f"[GT Suffix Text]\n\"{target_text}\"\n(Green = GT Suffix Boxes)", color="green", fontsize=11)
+        gt_title = f'[Ground-Truth Suffix]\n"{target_text}"\n(Green: GT Suffix Boxes, Blue: Prefix Boxes)'
+        axes[0].set_title(gt_title, color="green", fontsize=10)
         axes[0].axis("off")
 
         axes[1].imshow(img_pred)
-        axes[1].set_title(f"[Model Predicted Suffix Text]\n\"{pred_text}\"\n(Red = Predicted Suffix Boxes)", color="red", fontsize=11)
+        pred_title = f'[Model Prediction]\n"{pred_text}"\n(Red: Predicted Suffix Boxes)'
+        axes[1].set_title(pred_title, color="red", fontsize=10)
         axes[1].axis("off")
 
         axes[2].imshow(overlay)
-        axes[2].set_title(f"[Visual Focus Attention Map]\n(Bright = Region model focuses on)", color="blue", fontsize=11)
+        axes[2].set_title("[Visual Focus Attention Heatmap]\n(Bright Region = Model is Looking Here)", color="blue", fontsize=10)
         axes[2].axis("off")
 
-        fig.suptitle(f"Sample #{s_i} | Prompt: {input_prompt[:80]}...", fontsize=12, fontweight="bold")
+        fig.suptitle(f"Sample #{s_i} | Prompt: {input_prompt[:75]}...", fontsize=12, fontweight="bold")
         plt.tight_layout()
 
-        out_path = os.path.join(args.save_dir, f"sample_{s_i}_eval.png")
+        out_path = os.path.join(save_dir, f"sample_{s_i}_eval.png")
         plt.savefig(out_path, dpi=150)
+        if show_plot:
+            plt.show()
         plt.close(fig)
-        print(f"Saved visualization to: {out_path}")
+
+        saved_figures.append(out_path)
+        print(f"Sample #{s_i}:")
         print(f"  Prompt : {input_prompt}")
         print(f"  GT     : {target_text}")
-        print(f"  Pred   : {pred_text}\n")
+        print(f"  Pred   : {pred_text}")
+        print(f"  Image  : {out_path}\n")
 
-    print(f"All visualizations saved to: {args.save_dir}")
+    print(f"All visualizations saved to: {save_dir}")
+    return saved_figures
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Visualize PreSTU SplitOCR Predictions and Attention")
+    parser.add_argument("--checkpoint", type=str, default="./output/pretrain",
+                        help="Path to checkpoint directory")
+    parser.add_argument("--val_csv", type=str, default=None,
+                        help="Path to validation CSV (auto-detected if omitted)")
+    parser.add_argument("--sample_idx", type=int, default=0,
+                        help="Index of sample to visualize")
+    parser.add_argument("--num_samples", type=int, default=3,
+                        help="Number of samples to visualize")
+    parser.add_argument("--save_dir", type=str, default="./output/pretrain/visualizations",
+                        help="Directory to save output figures")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    visualize_pretrain_samples(
+        checkpoint=args.checkpoint,
+        val_csv=args.val_csv,
+        sample_idx=args.sample_idx,
+        num_samples=args.num_samples,
+        save_dir=args.save_dir,
+        show_plot=False
+    )
 
 
 if __name__ == "__main__":
