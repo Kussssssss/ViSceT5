@@ -241,6 +241,86 @@ def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[Lis
     return sorted_tokens, sorted_boxes
 
 
+def _split_ocr_spatial_region(
+    tokens: List[str],
+    boxes: torch.Tensor,
+    full_ocr_prob: float = 0.15,
+) -> Tuple[List[str], torch.Tensor, List[str], torch.Tensor]:
+    """
+    Splits OCR tokens into Prefix (Input context) and Target (Prediction) based on
+    SPATIAL REGION CLUSTERING (Khoanh vùng cụm không gian).
+    
+    Instead of arbitrary sequence splitting where targets may be scattered across
+    the entire 224x224 image, this algorithm selects a localized spatial cluster
+    around a randomly chosen anchor box.
+    
+    1. Select a random anchor box.
+    2. Compute anisotropic distance d_i = (dx)^2 + 2.0 * (dy)^2 to prioritize same-line / same-sign words.
+    3. Pick the top-K closest boxes as the TARGET CLUSTER (K in [1, N-1]).
+    4. Remaining boxes form the PREFIX (Input).
+    5. Maintain reading-order (top-to-bottom, left-to-right) inside both sets.
+    """
+    N = len(tokens)
+    if N == 0 or boxes.size(0) == 0:
+        return (
+            [],
+            torch.zeros((0, 4), dtype=torch.float),
+            [],
+            torch.zeros((0, 4), dtype=torch.long),
+        )
+
+    if N == 1:
+        if random.random() < 0.5:
+            p_words, p_b = [], torch.zeros((0, 4), dtype=torch.float)
+            t_words, t_b = tokens, (boxes * 1000.0).long().clamp(0, 999)
+        else:
+            p_words, p_b = tokens, boxes.clone()
+            t_words, t_b = tokens, (boxes * 1000.0).long().clamp(0, 999)
+        return p_words, p_b, t_words, t_b
+
+    # Pure OCR mode (prob = full_ocr_prob, e.g. 15%): No prefix, target is the entire image text
+    if random.random() < full_ocr_prob:
+        p_words = []
+        p_b = torch.zeros((0, 4), dtype=torch.float)
+        t_words = list(tokens)
+        t_b = (boxes * 1000.0).long().clamp(0, 999)
+        return p_words, p_b, t_words, t_b
+
+    # SPATIAL CLUSTERING:
+    # 1. Compute center coordinates of all boxes
+    cx = (boxes[:, 0] + boxes[:, 2]) / 2.0
+    cy = (boxes[:, 1] + boxes[:, 3]) / 2.0
+
+    # 2. Pick a random anchor box
+    anchor_idx = random.randint(0, N - 1)
+    anc_x = cx[anchor_idx]
+    anc_y = cy[anchor_idx]
+
+    # 3. Anisotropic squared distance: weight dy by 2.0
+    dist = (cx - anc_x) ** 2 + 2.0 * (cy - anc_y) ** 2
+
+    # 4. Determine cluster size K (number of target words)
+    k = random.randint(1, max(1, N - 1))
+
+    # 5. Top-k nearest indices to anchor form the Target Cluster
+    nearest_indices = torch.argsort(dist)[:k].tolist()
+    target_idx_set = set(nearest_indices)
+    prefix_idx_set = [i for i in range(N) if i not in target_idx_set]
+
+    # 6. Preserve reading order inside both sets
+    sorted_target_idx = sorted(list(target_idx_set))
+    sorted_prefix_idx = sorted(prefix_idx_set)
+
+    target_words = [tokens[i] for i in sorted_target_idx]
+    t_boxes_float = boxes[sorted_target_idx]
+    t_boxes = (t_boxes_float * 1000.0).long().clamp(0, 999)
+
+    prefix_words = [tokens[i] for i in sorted_prefix_idx]
+    p_boxes = boxes[sorted_prefix_idx]
+
+    return prefix_words, p_boxes, target_words, t_boxes
+
+
 class ViT5VQADataCollator:
     def __init__(
         self,
@@ -985,16 +1065,10 @@ class ViT5VQADataCollator:
                     # Sắp xếp theo trật tự đọc không gian: trên xuống dưới, trái sang phải (PreSTU Sec 2.1)
                     norm_tokens, valid_boxes = _sort_ocr_reading_order(norm_tokens, valid_boxes)
 
-                    # Random split point: m in [0, N_words - 1]
-                    m = random.randint(0, max(0, N_words - 1))
-                    prefix_words = norm_tokens[:m]
-                    target_words = norm_tokens[m:]
+                    # Khoanh vùng cụm không gian mục tiêu (Spatial Region Clustering)
+                    prefix_words, p_boxes, target_words, t_boxes = _split_ocr_spatial_region(norm_tokens, valid_boxes)
                     prefix_str = " ".join(prefix_words).strip()
                     target_str = " ".join(target_words).strip()
-
-                    p_boxes = valid_boxes[:m]
-                    t_boxes_float = valid_boxes[m:]
-                    t_boxes = (t_boxes_float * 1000.0).long().clamp(0, 999)
 
                 prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
                 split_prompts.append(prompt_text)
