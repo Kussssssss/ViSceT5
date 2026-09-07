@@ -12,6 +12,7 @@ num_bbox_bins: 1000
 lambda_bbox_ce: 0.3
 vision_unfreeze_last_n: 4
 pretrain_use_vs: true
+vs_t5_guided: true
 
 output_dir: "./output/pretrain"
 logging_dir: "./output/pretrain/logs"
