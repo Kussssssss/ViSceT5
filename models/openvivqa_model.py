@@ -14,6 +14,7 @@ from models.modules.ocr_spatial import SemanticOCREmbedding, SpatialCirclePositi
 from models.modules.visual_search import VisualSearch, AVFFusion
 
 import os
+import math
 import torch
 import torch.nn as nn
 import numpy as np
@@ -25,6 +26,7 @@ from transformers import (
     CLIPImageProcessor,
     GenerationConfig,
 )
+from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.t5.modeling_t5 import T5LayerNorm
 
 def _any_device_fallback(**kwargs):
@@ -280,6 +282,7 @@ class OpenViVQAModel(PreTrainedModel):
                 num_heads=int(getattr(self.vit5.config, "num_attention_heads", 8)),
                 dropout=0.1
             )
+        self.vs_t5_guided = bool(getattr(self.config, "vs_t5_guided", True))
 
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
@@ -677,6 +680,7 @@ class OpenViVQAModel(PreTrainedModel):
         use_qaclip = bool(getattr(self.config, "ablation_use_qaclip", True))
         use_vs = bool(getattr(self.config, "ablation_use_vs", True))
         use_ocr = bool(getattr(self.config, "ablation_use_ocr", True))
+        run_t5_guided_vs = bool(use_vs and getattr(self, "vs_t5_guided", True) and self.pretrain)
 
         if input_ids is not None:
             q_ids_for_enc = input_ids.to(device)
@@ -722,13 +726,13 @@ class OpenViVQAModel(PreTrainedModel):
             txt_mask=txt_attn_mask_for_clip,
             fuse_with_text=use_qaclip,  # Tắt True/False ở đây
             return_attn=return_visual_search_debug,
-            need_attn_map=use_vs,       # chỉ AVF cần patch_scores
+            need_attn_map=(use_vs and not run_t5_guided_vs), # chỉ early AVF cần patch_scores từ CLIP
         )
 
         # ----------------------------------------------------
-        # 2. ABLATION MODULE: VISUAL SEARCH (AVF)
+        # 2. ABLATION MODULE: VISUAL SEARCH (AVF - EARLY PATH)
         # ----------------------------------------------------
-        if use_vs:
+        if use_vs and not run_t5_guided_vs:
             vs_out = self.visual_search(
                 img_tokens=img_pack["img_tokens"],
                 patch_scores=img_pack["patch_scores"],
@@ -797,6 +801,11 @@ class OpenViVQAModel(PreTrainedModel):
         else:
             # PRESTU DUAL-TARGET PRE-TRAINING:
             # Fuses Image Pixels (ViT + VS), Text Prompt (with OCR prefix), Prefix BBoxes, and Target BBox Queries
+            txt_len = txt_emb_for_enc.size(1)
+            img_start = txt_len
+            img_len = img_pack["img_tokens"].size(1)
+            img_end = img_start + img_len
+
             _blocks = [
                 (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
                 (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
@@ -848,8 +857,6 @@ class OpenViVQAModel(PreTrainedModel):
                 fused_mask = torch.cat([fused_mask, pad], dim=1)
 
         if not return_visual_search_debug:
-            for k in list(vs_out.keys()):
-                if k not in ("crop_tokens",): del vs_out[k]
             for k in list(img_pack.keys()):
                 if k not in ("img_tokens", "img_attn_mask", "patch_scores"): del img_pack[k]
 
@@ -862,8 +869,72 @@ class OpenViVQAModel(PreTrainedModel):
 
         # Notebook gốc / TWA paper: dùng mask 1D chuẩn — original và related token
         # được encode cùng nhau với full attention (KHÔNG chặn cross-half).
-        enc_out = self.vit5.encoder(inputs_embeds=fused_seq, attention_mask=fused_mask, return_dict=True)
+        want_enc_attn = bool(run_t5_guided_vs or return_visual_search_debug)
+        enc_out = self.vit5.encoder(
+            inputs_embeds=fused_seq,
+            attention_mask=fused_mask,
+            output_attentions=want_enc_attn,
+            return_dict=True
+        )
         if torch.isnan(enc_out.last_hidden_state).any(): print("🚨 [FORWARD CHECK] enc_out.last_hidden_state has NaN")
+
+        # ----------------------------------------------------
+        # 4. T5-GUIDED VISUAL SEARCH (LATE AVF FOR PRESTU)
+        # ----------------------------------------------------
+        if run_t5_guided_vs:
+            # Sinh heatmap patch_scores từ self-attention của T5 Encoder
+            if enc_out.attentions is not None and len(enc_out.attentions) > 0:
+                last_attn = enc_out.attentions[-1]  # [B, num_heads, N_total, N_total]
+                if mask_box_start is not None and mask_box_end is not None and mask_box_end > mask_box_start:
+                    # Chú ý từ Target Mask Queries và Text Prefix tới 196 patch ảnh
+                    mask_to_img = last_attn[:, :, mask_box_start:mask_box_end, img_start:img_end].mean(dim=[1, 2])
+                    txt_to_img = last_attn[:, :, :txt_len, img_start:img_end].mean(dim=[1, 2])
+                    patch_scores = 0.7 * mask_to_img + 0.3 * txt_to_img
+                else:
+                    non_img_idx = list(range(0, img_start)) + list(range(img_end, fused_seq.size(1)))
+                    if len(non_img_idx) > 0:
+                        patch_scores = last_attn[:, :, non_img_idx, img_start:img_end].mean(dim=[1, 2])
+                    else:
+                        patch_scores = last_attn[:, :, :, img_start:img_end].mean(dim=[1, 2])
+            else:
+                img_h = enc_out.last_hidden_state[:, img_start:img_end, :]
+                if mask_box_start is not None and mask_box_end is not None and mask_box_end > mask_box_start:
+                    ref_q = enc_out.last_hidden_state[:, mask_box_start:mask_box_end, :].mean(dim=1, keepdim=True)
+                else:
+                    ref_q = enc_out.last_hidden_state[:, :txt_len, :].mean(dim=1, keepdim=True)
+                patch_scores = (ref_q @ img_h.transpose(1, 2)).squeeze(1) / math.sqrt(D)
+
+            patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4).to(self.target_dtype)
+
+            # ConvNeXt-V2 Visual Search zoom-in trên ảnh gốc
+            vs_out = self.visual_search(
+                img_tokens=enc_out.last_hidden_state[:, img_start:img_end, :],
+                patch_scores=patch_scores,
+                pixel_values=pixel_values_dev,
+                return_debug=return_visual_search_debug,
+                pil_images=pil_images,
+            )
+            crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
+
+            # Late Residual Injection qua AVFFusion trực tiếp vào lát cắt ảnh của enc_out
+            if hasattr(self, "avf_fusion") and crop_tokens.size(1) > 0:
+                img_h = enc_out.last_hidden_state[:, img_start:img_end, :]
+                img_h_enriched = self.avf_fusion(img_h, crop_tokens)
+                updated_hs = torch.cat([
+                    enc_out.last_hidden_state[:, :img_start, :],
+                    img_h_enriched,
+                    enc_out.last_hidden_state[:, img_end:, :],
+                ], dim=1)
+                enc_out = BaseModelOutput(
+                    last_hidden_state=updated_hs,
+                    hidden_states=enc_out.hidden_states,
+                    attentions=enc_out.attentions,
+                )
+
+        if not return_visual_search_debug and vs_out:
+            for k in list(vs_out.keys()):
+                if k not in ("crop_tokens",): del vs_out[k]
+
 
         bbox_logits = None
         bbox_loss = None

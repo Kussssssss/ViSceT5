@@ -84,6 +84,7 @@ class OpenViVQAConfig(PretrainedConfig):
         num_bbox_bins: int = 1000,
         lambda_bbox_ce: float = 1.0,
         pretrain_use_vs: bool = True,
+        vs_t5_guided: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -167,3 +168,4 @@ class OpenViVQAConfig(PretrainedConfig):
         self.num_bbox_bins = int(num_bbox_bins)
         self.lambda_bbox_ce = float(lambda_bbox_ce)
         self.pretrain_use_vs = bool(pretrain_use_vs)
+        self.vs_t5_guided = bool(vs_t5_guided)
