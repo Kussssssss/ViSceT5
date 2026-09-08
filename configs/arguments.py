@@ -91,6 +91,14 @@ class ModelArguments:
                           "patches), crop injected back into the encoder image states via AVFFusion. "
                           "False = EARLY path: heatmap from QA-CLIP attention before the T5 encoder."}
     )
+    vs_crop_encoder: str = field(
+        default="clip",
+        metadata={"help": "Backbone that encodes the AVF zoom-in crop. 'clip' (default) reuses the "
+                          "model's own CLIP ViT (AnyRes-style second view, shared weights, transfers "
+                          "to finetune, and CLIP actually has glyph sensitivity). 'convnext' keeps "
+                          "the old separate ConvNeXt-V2 backbone, which was trained for ImageNet "
+                          "classification and cannot read text."}
+    )
     use_ocr_aug_pretrain: bool = field(
         default=False,
         metadata={"help": "Whether to apply OCR augmentation in pretrain (default False)."}

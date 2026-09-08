@@ -115,6 +115,21 @@ class VisualSearch(nn.Module):
         self.register_buffer("cnn_mean", torch.tensor(cnn_mean, dtype=torch.float32), persistent=False)
         self.register_buffer("cnn_std", torch.tensor(cnn_std, dtype=torch.float32), persistent=False)
 
+        # -- BO MA HOA VUNG CAT --------------------------------------------------
+        # "clip"    : cho crop di qua CHINH CLIP ViT dang dung cho anh toan canh.
+        # "convnext": hanh vi cu (ConvNeXt-V2 rieng).
+        # Vi sao mac dinh doi sang "clip": ConvNeXt-V2-22k duoc huan luyen phan loai
+        # ImageNet - no ma hoa ket cau/vat the, CHUA BAO GIO duoc day ma hoa glyph. Crop
+        # co net den may thi no cung chi tra ve "tam bien co hoa van", nen gradient ve
+        # gate ReZero gan nhu bang 0 va AVF dung im. CLIP thi nguoc lai: huan luyen tren
+        # 400M anh web day chu (chinh vi the moi co "typographic attack"), nen co do nhay
+        # voi chu that. Them nua no DUNG CHUNG TRONG SO voi nhanh anh toan canh => nhung gi
+        # pretrain day duoc se chuyen giao sang finetune, thay vi nam trong mot backbone
+        # 27.87M tham so rieng ma finetune khong bao gio huong.
+        self.crop_encoder = str(getattr(self.cfg, "vs_crop_encoder", "clip")).lower().strip()
+        if self.crop_encoder not in ("clip", "convnext"):
+            self.crop_encoder = "clip"
+
         cnn_input_size = self._pick_size(self.processor)
         self.register_buffer("cnn_input_size", torch.tensor(cnn_input_size, dtype=torch.long))
 
@@ -126,6 +141,21 @@ class VisualSearch(nn.Module):
                              torch.tensor(self._proc_resize_target(self.processor, cnn_input_size),
                                           dtype=torch.long),
                              persistent=False)
+
+        if self.crop_encoder == "clip":
+            # Bo tien xu ly cua crop = bo cua CLIP (cung mean/std/kich thuoc voi anh toan canh).
+            self.crop_processor = self.vit_processor
+            self.crop_in_size = self._pick_size(self.vit_processor)
+            self.crop_resize_size = self._proc_resize_target(self.vit_processor, self.crop_in_size)
+            # ConvNeXt van duoc DUNG o tren de tieu RNG global dung thu tu (neu bo han loi
+            # goi, moi module dung sau se lech khoi tao giua cac cau hinh ablation), roi moi
+            # go di: tiet kiem 27.87M tham so + ~111MB VRAM, state_dict cung sach.
+            del self.cnn
+            self.cnn = None
+        else:
+            self.crop_processor = self.processor
+            self.crop_in_size = cnn_input_size
+            self.crop_resize_size = self._proc_resize_target(self.processor, cnn_input_size)
 
         self.register_buffer("attention_threshold", torch.tensor(0.7, dtype=torch.float32))
         self.register_buffer("temperature", torch.tensor(5.0, dtype=torch.float32))
@@ -389,7 +419,7 @@ class VisualSearch(nn.Module):
             # SÀN: không bao giờ cắt nhỏ hơn kích thước processor sẽ resize tới, nếu không
             # nó phóng to bằng nội suy và xoá sạch phần độ phân giải vừa lấy từ ảnh gốc.
             # Sàn cũng bị chặn bởi chính kích thước ảnh (ảnh nhỏ thì đành chịu nội suy).
-            side = max(side, float(min(int(self.cnn_resize_size.item()), W0, H0)))
+            side = max(side, float(min(int(self.crop_resize_size), W0, H0)))
             side = min(side, float(W0), float(H0))
             cx = min(max((x0 + x1) * 0.5, side * 0.5), float(W0) - side * 0.5)
             cy = min(max((y0 + y1) * 0.5, side * 0.5), float(H0) - side * 0.5)
@@ -399,36 +429,36 @@ class VisualSearch(nn.Module):
             T = max(0, min(int(round(cy - side * 0.5)), H0 - S))
             crops.append(img.convert("RGB").crop((L, T, L + S, T + S)))
 
-        out = self.processor(images=crops, return_tensors="pt")["pixel_values"]
+        out = self.crop_processor(images=crops, return_tensors="pt")["pixel_values"]
         return out.to(device=ref.device, dtype=torch.float32)
+
+    def _crop_pixels(self, pixel_values: torch.Tensor, boxes_224: torch.Tensor,
+                     pil_images: Optional[List[Image.Image]] = None) -> torch.Tensor:
+        """Cat vung attention va chuan hoa theo bo tien xu ly cua ENCODER CROP dang dung."""
+        B, C, H, W = pixel_values.shape
+        size = int(self.crop_in_size)
+
+        # Uu tien anh goc; chi roi ve grid_sample tren ban 224 khi khong co anh goc.
+        crops = self._crops_from_original(pil_images, boxes_224, size, pixel_values)
+        if crops is not None:
+            return crops
+
+        crops_vit_norm = self._crops_via_grid_sample(pixel_values, boxes_224, out_size=size)
+        if self.crop_encoder == "clip":
+            # pixel_values von da chuan hoa theo CLIP => crop cung vay, khong doi gi them.
+            return crops_vit_norm
+
+        vit_mean = self.vit_mean.view(1, C, 1, 1)
+        vit_std = self.vit_std.view(1, C, 1, 1)
+        cnn_mean = self.cnn_mean.view(1, C, 1, 1)
+        cnn_std = self.cnn_std.view(1, C, 1, 1)
+        return ((crops_vit_norm * vit_std + vit_mean) - cnn_mean) / cnn_std
 
     def _extract_roi_features(self, pixel_values: torch.Tensor, boxes_224: torch.Tensor,
                               pil_images: Optional[List[Image.Image]] = None):
-        B, C, H, W = pixel_values.shape
-        cnn_size = int(self.cnn_input_size.item())
-
-        # Ưu tiên ảnh gốc; chỉ rơi về grid_sample trên bản 224 khi không có ảnh gốc.
-        crops_cnn_norm = self._crops_from_original(pil_images, boxes_224, cnn_size, pixel_values)
-
-        if crops_cnn_norm is None:
-            crops_vit_norm = self._crops_via_grid_sample(
-                pixel_values,
-                boxes_224,
-                out_size=cnn_size
-            )
-
-            vit_mean = self.vit_mean.view(1, C, 1, 1)
-            vit_std = self.vit_std.view(1, C, 1, 1)
-            cnn_mean = self.cnn_mean.view(1, C, 1, 1)
-            cnn_std = self.cnn_std.view(1, C, 1, 1)
-
-            crops_denorm = crops_vit_norm * vit_std + vit_mean
-            crops_cnn_norm = (crops_denorm - cnn_mean) / cnn_std
-
+        crops_cnn_norm = self._crop_pixels(pixel_values, boxes_224, pil_images=pil_images)
         feats = self.cnn(pixel_values=crops_cnn_norm.to(self.cnn.dtype)).last_hidden_state
-
         cnn_activation = feats.mean(dim=1)
-
         B_out, C_out, Hp, Wp = feats.shape
         crop_tokens = feats.permute(0, 2, 3, 1).reshape(B_out, Hp * Wp, C_out)
         return crop_tokens, cnn_activation
@@ -532,17 +562,22 @@ class VisualSearch(nn.Module):
         y1 = y1.clamp_min(y0 + 1.0).clamp(max=float(self.image_size.item()))
         boxes_224 = torch.stack([x0, y0, x1, y1], dim=-1)
 
-        crop_tokens, cnn_activation = self._extract_roi_features(pixel_values, boxes_224,
-                                                                 pil_images=pil_images)
-
-        B_img_tok = img_tokens.size(0)
-        crop_mask = torch.ones(B_img_tok, crop_tokens.size(1), device=device, dtype=torch.long)
-
-        out = {"crop_tokens": crop_tokens, "crop_mask": crop_mask, "attn_summary": attn_summary}
+        if self.crop_encoder == "clip":
+            # Khong ma hoa o day: tra PIXEL da chuan hoa de model chay qua CHINH CLIP ViT
+            # cua no (dung chung trong so voi nhanh anh toan canh).
+            crop_pixels = self._crop_pixels(pixel_values, boxes_224, pil_images=pil_images)
+            cnn_activation = None
+            out = {"crop_pixels": crop_pixels, "attn_summary": attn_summary}
+        else:
+            crop_tokens, cnn_activation = self._extract_roi_features(pixel_values, boxes_224,
+                                                                     pil_images=pil_images)
+            crop_mask = torch.ones(img_tokens.size(0), crop_tokens.size(1),
+                                   device=device, dtype=torch.long)
+            out = {"crop_tokens": crop_tokens, "crop_mask": crop_mask, "attn_summary": attn_summary}
 
         if return_debug:
-            cnn_size = int(self.cnn_input_size.item())
-            debug_crops = self._crops_via_grid_sample(pixel_values, boxes_224, out_size=cnn_size)
+            debug_crops = self._crops_via_grid_sample(pixel_values, boxes_224,
+                                                      out_size=int(self.crop_in_size))
 
             out.update({
                 "attn_grids": attn_grids,

@@ -422,6 +422,33 @@ class OpenViVQAModel(PreTrainedModel):
         if return_attn: out["image_features_full"] = img_hs
         return out
 
+    def _avf_crop_tokens(self, vs_out, device, B, D,
+                         txt_emb=None, txt_mask=None, fuse_with_text=True):
+        """Token đặc trưng của vùng crop cho AVFFusion.
+
+        `VisualSearch` ở chế độ crop_encoder="clip" chỉ CẮT rồi trả pixel đã chuẩn hoá;
+        việc mã hoá làm ở đây, bằng CHÍNH `self.qa_clip` đang mã hoá ảnh toàn cảnh —
+        tức đúng công thức AnyRes/dynamic-tiling: cùng một encoder nhìn thêm một khung
+        thứ hai ở độ phân giải hiệu dụng cao hơn. Vì dùng chung trọng số nên độ nhạy với
+        chữ mà pretrain rèn được sẽ đi thẳng sang finetune. Chế độ "convnext" giữ nguyên
+        đường cũ (VisualSearch tự trả crop_tokens).
+        """
+        ct = vs_out.get("crop_tokens") if vs_out else None
+        if ct is None and vs_out and vs_out.get("crop_pixels") is not None:
+            crop_pack = self._encode_image(
+                pixel_values=vs_out["crop_pixels"].to(device),
+                device=device,
+                txt_emb=txt_emb,
+                txt_mask=txt_mask,
+                fuse_with_text=fuse_with_text,
+                return_attn=False,
+                need_attn_map=False,
+            )
+            ct = crop_pack["img_tokens"]
+        if ct is None:
+            ct = torch.zeros(B, 0, D, device=device, dtype=self.target_dtype)
+        return ct
+
     def _get_ocr_word_mask(
         self,
         info_i: Dict[str, Any],
@@ -757,7 +784,10 @@ class OpenViVQAModel(PreTrainedModel):
                 return_debug=return_visual_search_debug,
                 pil_images=pil_images,
             )
-            crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
+            crop_tokens = self._avf_crop_tokens(
+                vs_out, device, B, D,
+                txt_emb=txt_emb_for_clip, txt_mask=txt_attn_mask_for_clip,
+                fuse_with_text=use_qaclip)
             # GATED RESIDUAL FUSION: Toàn bộ thông tin từ crop của ConvNeXt được làm giàu
             # trực tiếp vào 196 img_tokens qua Cross-Attention có gate ReZero (tanh(gate)*delta).
             # KHÔNG nối thêm 49 crop_tokens và 1 attn_summary vào chuỗi fused_seq để tránh
@@ -961,7 +991,10 @@ class OpenViVQAModel(PreTrainedModel):
                 return_debug=return_visual_search_debug,
                 pil_images=pil_images,
             )
-            crop_tokens = vs_out.get("crop_tokens", torch.zeros(B, 0, D, device=device, dtype=self.target_dtype))
+            crop_tokens = self._avf_crop_tokens(
+                vs_out, device, B, D,
+                txt_emb=txt_emb_for_clip, txt_mask=txt_attn_mask_for_clip,
+                fuse_with_text=use_qaclip)
 
             # Late Residual Injection qua AVFFusion trực tiếp vào lát cắt ảnh của enc_out
             if hasattr(self, "avf_fusion") and crop_tokens.size(1) > 0:
@@ -980,7 +1013,7 @@ class OpenViVQAModel(PreTrainedModel):
 
         if not return_visual_search_debug and vs_out:
             for k in list(vs_out.keys()):
-                if k not in ("crop_tokens",): del vs_out[k]
+                if k not in ("crop_tokens", "crop_pixels"): del vs_out[k]
 
 
         bbox_logits = None
