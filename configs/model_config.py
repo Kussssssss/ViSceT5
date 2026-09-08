@@ -86,6 +86,7 @@ class OpenViVQAConfig(PretrainedConfig):
         lambda_ground: float = 0.5,
         pretrain_use_vs: bool = True,
         vs_t5_guided: bool = True,
+        vs_crop_encoder: str = "clip",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -171,3 +172,4 @@ class OpenViVQAConfig(PretrainedConfig):
         self.lambda_ground = float(lambda_ground)
         self.pretrain_use_vs = bool(pretrain_use_vs)
         self.vs_t5_guided = bool(vs_t5_guided)
+        self.vs_crop_encoder = str(vs_crop_encoder)
