@@ -188,14 +188,18 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
     return " ".join(in_parts), target, sid, span_types
 
 
-def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[List[str], torch.Tensor]:
+def _sort_ocr_reading_order(
+    tokens: List[str], boxes: torch.Tensor
+) -> Tuple[List[str], torch.Tensor, List[int]]:
     """
     Sort tokens (list of str) and boxes (torch.Tensor of shape [N, 4])
     in human reading order: top-to-bottom, then left-to-right (PreSTU section 2.1).
     boxes format: [x1, y1, x2, y2].
+
+    Tra ve them HOAN VI (order) de caller con giong hang duoc det/rec/... theo tu.
     """
     if len(tokens) <= 1 or boxes.size(0) <= 1:
-        return tokens, boxes
+        return tokens, boxes, list(range(len(tokens)))
 
     items = []
     for idx, (tok, box) in enumerate(zip(tokens, boxes)):
@@ -203,6 +207,7 @@ def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[Lis
         h = max(y2 - y1, 1e-4)
         yc = (y1 + y2) / 2.0
         items.append({
+            "idx": idx,
             "tok": tok,
             "box": box,
             "x1": x1,
@@ -238,14 +243,15 @@ def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[Lis
 
     sorted_tokens = [it["tok"] for it in sorted_items]
     sorted_boxes = torch.stack([it["box"] for it in sorted_items])
-    return sorted_tokens, sorted_boxes
+    sorted_order = [int(it["idx"]) for it in sorted_items]
+    return sorted_tokens, sorted_boxes, sorted_order
 
 
 def _split_ocr_spatial_region(
     tokens: List[str],
     boxes: torch.Tensor,
     full_ocr_prob: float = 0.15,
-) -> Tuple[List[str], torch.Tensor, List[str], torch.Tensor]:
+) -> Tuple[List[str], torch.Tensor, List[int], List[str], torch.Tensor, List[int]]:
     """
     Splits OCR tokens into Prefix (Input context) and Target (Prediction) based on
     SPATIAL REGION CLUSTERING (Khoanh vùng cụm không gian).
@@ -259,6 +265,9 @@ def _split_ocr_spatial_region(
     3. Pick the top-K closest boxes as the TARGET CLUSTER (K in [1, N-1]).
     4. Remaining boxes form the PREFIX (Input).
     5. Maintain reading-order (top-to-bottom, left-to-right) inside both sets.
+
+    Tra ve (prefix_words, prefix_boxes, prefix_idx, target_words, target_bins, target_idx);
+    hai danh sach chi so tro vao MANG DA SORT, de caller gom det/rec dung tu.
     """
     N = len(tokens)
     if N == 0 or boxes.size(0) == 0:
@@ -266,17 +275,20 @@ def _split_ocr_spatial_region(
             [],
             torch.zeros((0, 4), dtype=torch.float),
             [],
+            [],
             torch.zeros((0, 4), dtype=torch.long),
+            [],
         )
 
     if N == 1:
-        if random.random() < 0.5:
-            p_words, p_b = [], torch.zeros((0, 4), dtype=torch.float)
-            t_words, t_b = tokens, (boxes * 1000.0).long().clamp(0, 999)
-        else:
-            p_words, p_b = tokens, boxes.clone()
-            t_words, t_b = tokens, (boxes * 1000.0).long().clamp(0, 999)
-        return p_words, p_b, t_words, t_b
+        # Ảnh chỉ có 1 từ ⇒ prefix BẮT BUỘC rỗng. Nếu đưa chính từ đó vào prefix thì
+        # prefix == target: model chỉ cần copy lại chuỗi đầu vào là đạt L_text = 0,
+        # không phải đọc ảnh — đúng kiểu shortcut làm hỏng pretrain.
+        p_words = []
+        p_b = torch.zeros((0, 4), dtype=torch.float)
+        t_words = list(tokens)
+        t_b = (boxes * 1000.0).long().clamp(0, 999)
+        return p_words, p_b, [], t_words, t_b, [0]
 
     # Pure OCR mode (prob = full_ocr_prob, e.g. 15%): No prefix, target is the entire image text
     if random.random() < full_ocr_prob:
@@ -284,7 +296,7 @@ def _split_ocr_spatial_region(
         p_b = torch.zeros((0, 4), dtype=torch.float)
         t_words = list(tokens)
         t_b = (boxes * 1000.0).long().clamp(0, 999)
-        return p_words, p_b, t_words, t_b
+        return p_words, p_b, [], t_words, t_b, list(range(N))
 
     # SPATIAL CLUSTERING:
     # 1. Compute center coordinates of all boxes
@@ -318,7 +330,57 @@ def _split_ocr_spatial_region(
     prefix_words = [tokens[i] for i in sorted_prefix_idx]
     p_boxes = boxes[sorted_prefix_idx]
 
-    return prefix_words, p_boxes, target_words, t_boxes
+    return prefix_words, p_boxes, sorted_prefix_idx, target_words, t_boxes, sorted_target_idx
+
+
+def _boxes_to_patch_mask(boxes_norm: torch.Tensor, grid: int = 14) -> torch.Tensor:
+    """Raster hoá các box target (chuẩn hoá [0,1], xyxy) thành phân phối trên lưới grid×grid.
+
+    Đây là NHÃN GROUNDING: "với prompt này, vùng ảnh cần nhìn nằm ở các ô nào".
+    Giá trị mỗi ô = phần diện tích ô bị các box target phủ, rồi chuẩn hoá tổng = 1
+    (mềm chứ không nhị phân: ô bị phủ một nửa không đáng tin bằng ô bị phủ trọn).
+    Không có box nào → trả phân phối ĐỀU (grounding loss khi đó ≈ hằng số, vô hại).
+    """
+    m = torch.zeros(grid, grid, dtype=torch.float)
+    if boxes_norm is not None and boxes_norm.numel() > 0:
+        cell = 1.0 / grid
+        for b in boxes_norm:
+            x0, y0, x1, y1 = [float(v) for v in b[:4]]
+            x0, x1 = min(x0, x1), max(x0, x1)
+            y0, y1 = min(y0, y1), max(y0, y1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            gx0, gx1 = max(0, int(x0 * grid)), min(grid - 1, int((x1 - 1e-9) * grid))
+            gy0, gy1 = max(0, int(y0 * grid)), min(grid - 1, int((y1 - 1e-9) * grid))
+            for gy in range(gy0, gy1 + 1):
+                cy0, cy1 = gy * cell, (gy + 1) * cell
+                oh = max(0.0, min(y1, cy1) - max(y0, cy0))
+                if oh <= 0:
+                    continue
+                for gx in range(gx0, gx1 + 1):
+                    cx0, cx1 = gx * cell, (gx + 1) * cell
+                    ow = max(0.0, min(x1, cx1) - max(x0, cx0))
+                    if ow > 0:
+                        m[gy, gx] += (ow * oh) / (cell * cell)
+    tot = float(m.sum())
+    if tot <= 1e-8:
+        return torch.full((grid * grid,), 1.0 / (grid * grid), dtype=torch.float)
+    return (m / tot).reshape(-1)
+
+
+def _union_box(boxes_norm: torch.Tensor) -> Optional[torch.Tensor]:
+    """Box bao của cả cụm target (xyxy chuẩn hoá). None nếu không có box nào.
+
+    AVF chỉ cắt MỘT hình vuông, nên mục tiêu định vị đúng đơn vị là box hợp của cụm,
+    không phải từng từ một. Dự đoán từng từ theo chỉ số là bài set-prediction khó hơn
+    hẳn (query giống hệt nhau, K biến thiên) mà độ mịn thu được lại bị bước cắt vứt đi.
+    """
+    if boxes_norm is None or boxes_norm.numel() == 0:
+        return None
+    return torch.stack([
+        boxes_norm[:, 0].min(), boxes_norm[:, 1].min(),
+        boxes_norm[:, 2].max(), boxes_norm[:, 3].max(),
+    ]).clamp(0.0, 1.0)
 
 
 class ViT5VQADataCollator:
@@ -1040,6 +1102,16 @@ class ViT5VQADataCollator:
             split_targets = []
             batch_prefix_boxes = []
             batch_target_boxes = []
+            # Đặc trưng OCR mức TỪ của phần PREFIX: det/rec (SwinTextSpotter 256-d).
+            # Cùng thứ tự với batch_prefix_boxes để model cộng chúng vào một token/từ.
+            batch_prefix_det = []
+            batch_prefix_rec = []
+            d_det = int(getattr(self.cfg, "ocr_d_det", 256))
+            d_rec = int(getattr(self.cfg, "ocr_d_rec", 256))
+            n_bins = int(getattr(self.cfg, "num_bbox_bins", 200))
+            # Nhãn grounding 14x14 (vùng cần nhìn) + box hợp của cụm target.
+            batch_patch_mask = []
+            batch_union_bins = []
 
             pad_tok = self.tokenizer.pad_token or "<pad>"
             for i in range(B):
@@ -1055,43 +1127,85 @@ class ViT5VQADataCollator:
                 else:
                     valid_boxes = torch.zeros((0, 4), dtype=torch.float)
 
+                det_all = info.get("det_features")
+                rec_all = info.get("rec_features")
+
                 N_words = len(norm_tokens)
                 if N_words == 0:
                     prefix_str = ""
                     target_str = ""
                     p_boxes = torch.zeros((0, 4), dtype=torch.float)
                     t_boxes = torch.zeros((0, 4), dtype=torch.long)
+                    p_det = torch.zeros((0, d_det), dtype=torch.float)
+                    p_rec = torch.zeros((0, d_rec), dtype=torch.float)
                 else:
                     # Sắp xếp theo trật tự đọc không gian: trên xuống dưới, trái sang phải (PreSTU Sec 2.1)
-                    norm_tokens, valid_boxes = _sort_ocr_reading_order(norm_tokens, valid_boxes)
+                    norm_tokens, valid_boxes, sort_perm = _sort_ocr_reading_order(norm_tokens, valid_boxes)
 
                     # Khoanh vùng cụm không gian mục tiêu (Spatial Region Clustering)
-                    prefix_words, p_boxes, target_words, t_boxes = _split_ocr_spatial_region(norm_tokens, valid_boxes)
+                    (prefix_words, p_boxes, p_idx,
+                     target_words, t_boxes, _t_idx) = _split_ocr_spatial_region(norm_tokens, valid_boxes)
                     prefix_str = " ".join(prefix_words).strip()
                     target_str = " ".join(target_words).strip()
+
+                    # p_idx trỏ vào MẢNG ĐÃ SORT → sort_perm → valid_idx → hàng gốc trong
+                    # info["det_features"/"rec_features"]. Nhờ chuỗi ánh xạ này, det/rec luôn
+                    # thẳng hàng với p_boxes (cùng một từ), không lệch khi reading-order đổi thứ tự.
+                    p_rows = [valid_idx[sort_perm[j]] for j in p_idx]
+                    if len(p_rows) > 0 and det_all is not None and rec_all is not None:
+                        p_det = det_all[p_rows].clone().detach().float()
+                        p_rec = rec_all[p_rows].clone().detach().float()
+                    else:
+                        p_det = torch.zeros((len(p_rows), d_det), dtype=torch.float)
+                        p_rec = torch.zeros((len(p_rows), d_rec), dtype=torch.float)
 
                 prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
                 split_prompts.append(prompt_text)
                 split_targets.append(target_str)
                 batch_prefix_boxes.append(p_boxes)
                 batch_target_boxes.append(t_boxes)
+                batch_prefix_det.append(p_det)
+                batch_prefix_rec.append(p_rec)
+
+                # t_boxes là bin thang 1000 (= toạ độ chuẩn hoá × 1000) → về [0,1] rồi
+                # dựng nhãn grounding và box hợp. Dùng TỪNG box từ cho mặt nạ (bám sát
+                # chữ hơn hình chữ nhật bao), nhưng dùng BOX HỢP cho bbox head.
+                t_norm = (t_boxes.float() / 1000.0).clamp(0.0, 1.0) if t_boxes.numel() > 0                     else torch.zeros((0, 4), dtype=torch.float)
+                batch_patch_mask.append(_boxes_to_patch_mask(t_norm, grid=14))
+                _ub = _union_box(t_norm)
+                if _ub is None:
+                    batch_union_bins.append(torch.full((4,), -100, dtype=torch.long))
+                else:
+                    batch_union_bins.append(
+                        (_ub * n_bins).long().clamp(0, n_bins - 1))
 
             # Pad prefix_box_coords and target_bbox_bins across the batch
             max_p_len = max([b.size(0) for b in batch_prefix_boxes], default=0)
             max_p_len = max(max_p_len, 1)
             prefix_box_coords = torch.zeros(B, max_p_len, 4, dtype=torch.float)
             prefix_box_mask = torch.zeros(B, max_p_len, dtype=torch.long)
+            prefix_det_feats = torch.zeros(B, max_p_len, d_det, dtype=torch.float)
+            prefix_rec_feats = torch.zeros(B, max_p_len, d_rec, dtype=torch.float)
             for i, pb in enumerate(batch_prefix_boxes):
                 if pb.size(0) > 0:
                     prefix_box_coords[i, :pb.size(0)] = pb
                     prefix_box_mask[i, :pb.size(0)] = 1
+                    _pd, _pr = batch_prefix_det[i], batch_prefix_rec[i]
+                    # Chép theo bề rộng CHUNG (min) thay vì cắt cứng: spotter đổi d_det/d_rec
+                    # thì vẫn chạy, phần dư để 0 — không ném RuntimeError vì lệch shape.
+                    if _pd.size(0) > 0:
+                        _w = min(_pd.size(1), d_det)
+                        prefix_det_feats[i, :_pd.size(0), :_w] = _pd[:, :_w]
+                    if _pr.size(0) > 0:
+                        _w = min(_pr.size(1), d_rec)
+                        prefix_rec_feats[i, :_pr.size(0), :_w] = _pr[:, :_w]
 
-            max_t_len = max([b.size(0) for b in batch_target_boxes], default=0)
-            max_t_len = max(max_t_len, 1)
-            target_bbox_bins = torch.full((B, max_t_len, 4), -100, dtype=torch.long)
-            for i, tb in enumerate(batch_target_boxes):
-                if tb.size(0) > 0:
-                    target_bbox_bins[i, :tb.size(0)] = tb
+            # MỘT query / MỘT box hợp cho cả cụm target (K=1). Trước đây K = số từ target
+            # (tới 179) với K vector query GIỐNG HỆT nhau, phải gán theo chỉ số đọc — bài
+            # set-prediction rất khó, mà AVF thì chỉ cắt một hình vuông nên độ mịn per-word
+            # bị vứt đi. K=1 làm tín hiệu dạy heatmap mạnh và sạch hơn hẳn.
+            target_bbox_bins = torch.stack(batch_union_bins, dim=0).unsqueeze(1)  # [B, 1, 4]
+            target_patch_mask = torch.stack(batch_patch_mask, dim=0)              # [B, 196]
 
             # Tokenize SplitOCR Inputs (Prompt + Prefix) và Labels (Suffix Target)
             prompt_tok = self.tokenizer(
@@ -1120,6 +1234,9 @@ class ViT5VQADataCollator:
                 "target_bbox_bins": target_bbox_bins.to(pixel_values.device),
                 "prefix_box_coords": prefix_box_coords.to(pixel_values.device),
                 "prefix_box_mask": prefix_box_mask.to(pixel_values.device),
+                "prefix_det_feats": prefix_det_feats.to(pixel_values.device),
+                "prefix_rec_feats": prefix_rec_feats.to(pixel_values.device),
+                "target_patch_mask": target_patch_mask.to(pixel_values.device),
             }
 
         # =========================================================
