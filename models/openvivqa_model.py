@@ -283,6 +283,7 @@ class OpenViVQAModel(PreTrainedModel):
                 dropout=0.1
             )
         self.vs_t5_guided = bool(getattr(self.config, "vs_t5_guided", True))
+        self.lambda_ground = float(getattr(self.config, "lambda_ground", 0.5))
 
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
@@ -369,9 +370,14 @@ class OpenViVQAModel(PreTrainedModel):
         # no_grad+sanitize the vision ONLY when it is truly frozen in pretrain. If vision
         # is being UNFROZEN (_vision_trainable), let grads flow (ITC/unfreeze needs them);
         # the NaN root fix in MMCLIPAttention + the fused_seq guard keep it stable.
-        _frozen_pt = (bool(getattr(self, "_pretrain_stage", False))
-                      and bool(getattr(self.qa_clip.config, "freeze_clip", False))
-                      and not bool(getattr(self, "_vision_trainable", False)))
+        # SỬA: điều kiện cũ là `_pretrain_stage and freeze_clip and not _vision_trainable`.
+        # Nhưng `freeze_clip` KHÔNG đóng băng các adapter chỉ dẫn — `_apply_freeze` cố ý
+        # để `instruct*`/`instruction*` requires_grad=True vì CHÍNH CHÚNG là module QA-CLIP.
+        # Nên khi pretrain với vision_unfreeze_last_n=0, cả QA-CLIP chạy dưới no_grad ⇒
+        # adapter KHÔNG nhận một gradient nào ⇒ pretrain không thể làm QA-CLIP tốt lên.
+        # Điều kiện đúng: chỉ chạy no_grad khi THỰC SỰ không có tham số nào cần gradient.
+        _qa_needs_grad = any(p.requires_grad for p in self.qa_clip.parameters())
+        _frozen_pt = bool(getattr(self, "_pretrain_stage", False)) and not _qa_needs_grad
         if _frozen_pt:
             with torch.no_grad():
                 qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=want_attn, return_dict=True)
@@ -669,6 +675,9 @@ class OpenViVQAModel(PreTrainedModel):
         target_bbox_bins: Optional[torch.LongTensor] = None,
         prefix_box_coords: Optional[torch.FloatTensor] = None,
         prefix_box_mask: Optional[torch.LongTensor] = None,
+        prefix_det_feats: Optional[torch.FloatTensor] = None,
+        prefix_rec_feats: Optional[torch.FloatTensor] = None,
+        target_patch_mask: Optional[torch.FloatTensor] = None,
         return_visual_search_debug: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
@@ -680,7 +689,15 @@ class OpenViVQAModel(PreTrainedModel):
         use_qaclip = bool(getattr(self.config, "ablation_use_qaclip", True))
         use_vs = bool(getattr(self.config, "ablation_use_vs", True))
         use_ocr = bool(getattr(self.config, "ablation_use_ocr", True))
-        run_t5_guided_vs = bool(use_vs and getattr(self, "vs_t5_guided", True) and self.pretrain)
+        # KHÔNG còn gate bằng `self.pretrain`. Trước đây pretrain đi đường T5-guided còn
+        # finetune đi đường CLIP-guided, nên `avf_fusion` được HỌC trên không gian
+        # hidden-state của T5 encoder rồi lại được DÙNG trên không gian đầu ra CLIP —
+        # hai phân phối khác hẳn nhau, trọng số pretrain gần như vô nghĩa khi finetune.
+        # Dùng chung một đường cho cả hai giai đoạn thì AVF mới chuyển giao được.
+        run_t5_guided_vs = bool(use_vs and getattr(self, "vs_t5_guided", True))
+        # Cần bản đồ grounding của QA-CLIP khi: (a) chạy AVF đường early, hoặc
+        # (b) đang pretrain có nhãn grounding để giám sát chính bản đồ đó.
+        want_clip_map = bool(use_vs and not run_t5_guided_vs) or (target_patch_mask is not None)
 
         if input_ids is not None:
             q_ids_for_enc = input_ids.to(device)
@@ -726,7 +743,7 @@ class OpenViVQAModel(PreTrainedModel):
             txt_mask=txt_attn_mask_for_clip,
             fuse_with_text=use_qaclip,  # Tắt True/False ở đây
             return_attn=return_visual_search_debug,
-            need_attn_map=(use_vs and not run_t5_guided_vs), # chỉ early AVF cần patch_scores từ CLIP
+            need_attn_map=want_clip_map,
         )
 
         # ----------------------------------------------------
@@ -753,6 +770,19 @@ class OpenViVQAModel(PreTrainedModel):
         # ----------------------------------------------------
         # 3. ABLATION MODULE: OCR CONSFORMER (Only used in Finetune when OCR features provided)
         # ----------------------------------------------------
+        # Vị trí khối mask_box_tokens trong fused_seq. CHỈ nhánh PreSTU (else) mới gán;
+        # phải khởi tạo Ở ĐÂY vì khối bbox head phía dưới đọc chúng vô điều kiện — nếu
+        # không, mọi lượt FINETUNE (đi vào nhánh if) sẽ UnboundLocalError.
+        mask_box_start = None
+        mask_box_end = None
+        mask_box_mask = None
+        # Vị trí lát ảnh trong chuỗi hợp nhất. GIỐNG NHAU ở cả hai nhánh (text luôn đứng
+        # đầu, ảnh ngay sau) nên tính một lần ở đây — đường AVF dùng chung cần chúng ở
+        # cả finetune lẫn pretrain.
+        txt_len = txt_emb_for_enc.size(1)
+        img_start = txt_len
+        img_len = img_pack["img_tokens"].size(1)
+        img_end = img_start + img_len
         if not self.pretrain and twa_word_ids is not None and ocr_info is not None:
             word_ids_for_ocr = twa_word_ids.to(device)
             pad_id = self.vit5.config.pad_token_id
@@ -800,26 +830,38 @@ class OpenViVQAModel(PreTrainedModel):
             ]
         else:
             # PRESTU DUAL-TARGET PRE-TRAINING:
-            # Fuses Image Pixels (ViT + VS), Text Prompt (with OCR prefix), Prefix BBoxes, and Target BBox Queries
-            txt_len = txt_emb_for_enc.size(1)
-            img_start = txt_len
-            img_len = img_pack["img_tokens"].size(1)
-            img_end = img_start + img_len
-
+            # Chuỗi hợp nhất = [Prompt (chứa CHỮ OCR prefix) ; 196 patch ảnh ;
+            #                   Đặc trưng OCR prefix mức từ (box + det + rec) ; Target mask queries]
             _blocks = [
                 (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
                 (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
             ]
             if prefix_box_coords is not None and prefix_box_coords.size(1) > 0:
-                prefix_box_emb = self.ocr_lite_box_proj(prefix_box_coords.to(device).to(dtype=self.target_dtype))
+                # Đặc trưng OCR mức TỪ cho phần prefix, đúng công thức đường ON:
+                #   x_OCR = x_semantic + LN(det·W) + LN(rec·W) + box·W
+                # x_semantic (chuỗi chữ OCR) đã nằm trong khối prompt phía trước, nên ở đây
+                # cộng phần KHÔNG GIAN (box) và phần THỊ GIÁC (det = detection, rec =
+                # recognition của spotter). LN sau Linear là BẮT BUỘC với det/rec: đặc trưng
+                # thô 256-d có biên độ không kiểm soát, thiếu LN thì gradient tràn qua
+                # QA-CLIP → NaN (đã đo trước đây ở nhánh finetune).
+                prefix_ocr_emb = self.ocr_lite_box_proj(
+                    prefix_box_coords.to(device).to(dtype=self.target_dtype))
+                _P = prefix_ocr_emb.size(1)
+                if prefix_det_feats is not None and prefix_det_feats.size(1) == _P:
+                    _det = self.ocr_lite_det_proj(prefix_det_feats.to(device).to(dtype=self.target_dtype))
+                    prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_det_ln(_det).to(self.target_dtype)
+                if prefix_rec_feats is not None and prefix_rec_feats.size(1) == _P:
+                    _rec = self.ocr_lite_rec_proj(prefix_rec_feats.to(device).to(dtype=self.target_dtype))
+                    prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_rec_ln(_rec).to(self.target_dtype)
                 if prefix_box_mask is not None:
                     p_mask = prefix_box_mask.to(device).long()
                 else:
-                    p_mask = torch.ones(B, prefix_box_emb.size(1), device=device, dtype=torch.long)
-                _blocks.append((prefix_box_emb, p_mask))
+                    p_mask = torch.ones(B, _P, device=device, dtype=torch.long)
+                # Zero hoá vị trí PAD: LN có bias nên LN(0) != 0; tuy đã bị che ở attention
+                # mask, vẫn zero để residual/thống kê không dính giá trị rác.
+                prefix_ocr_emb = prefix_ocr_emb * p_mask.unsqueeze(-1).to(prefix_ocr_emb.dtype)
+                _blocks.append((prefix_ocr_emb, p_mask))
 
-            mask_box_start = None
-            mask_box_end = None
             if target_bbox_bins is not None and target_bbox_bins.size(1) > 0:
                 K = target_bbox_bins.size(1)
                 mask_box_tokens = self.mask_box_embed.expand(B, K, -1).to(dtype=self.target_dtype)
@@ -869,7 +911,10 @@ class OpenViVQAModel(PreTrainedModel):
 
         # Notebook gốc / TWA paper: dùng mask 1D chuẩn — original và related token
         # được encode cùng nhau với full attention (KHÔNG chặn cross-half).
-        want_enc_attn = bool(run_t5_guided_vs or return_visual_search_debug)
+        # Heatmap KHÔNG còn lấy từ attention của encoder (xem khối AVF bên dưới), nên
+        # chỉ bật output_attentions khi thật sự debug. Bật nó ép T5 bỏ SDPA/flash và giữ
+        # attention của cả 12 tầng ([B,H,L,L], L~600-700) → hàng GB VRAM vô ích.
+        want_enc_attn = bool(return_visual_search_debug)
         enc_out = self.vit5.encoder(
             inputs_embeds=fused_seq,
             attention_mask=fused_mask,
@@ -881,30 +926,32 @@ class OpenViVQAModel(PreTrainedModel):
         # ----------------------------------------------------
         # 4. T5-GUIDED VISUAL SEARCH (LATE AVF FOR PRESTU)
         # ----------------------------------------------------
+        img_relevance = None
         if run_t5_guided_vs:
-            # Sinh heatmap patch_scores từ self-attention của T5 Encoder
-            if enc_out.attentions is not None and len(enc_out.attentions) > 0:
-                last_attn = enc_out.attentions[-1]  # [B, num_heads, N_total, N_total]
-                if mask_box_start is not None and mask_box_end is not None and mask_box_end > mask_box_start:
-                    # Chú ý từ Target Mask Queries và Text Prefix tới 196 patch ảnh
-                    mask_to_img = last_attn[:, :, mask_box_start:mask_box_end, img_start:img_end].mean(dim=[1, 2])
-                    txt_to_img = last_attn[:, :, :txt_len, img_start:img_end].mean(dim=[1, 2])
-                    patch_scores = 0.7 * mask_to_img + 0.3 * txt_to_img
-                else:
-                    non_img_idx = list(range(0, img_start)) + list(range(img_end, fused_seq.size(1)))
-                    if len(non_img_idx) > 0:
-                        patch_scores = last_attn[:, :, non_img_idx, img_start:img_end].mean(dim=[1, 2])
-                    else:
-                        patch_scores = last_attn[:, :, :, img_start:img_end].mean(dim=[1, 2])
-            else:
-                img_h = enc_out.last_hidden_state[:, img_start:img_end, :]
-                if mask_box_start is not None and mask_box_end is not None and mask_box_end > mask_box_start:
-                    ref_q = enc_out.last_hidden_state[:, mask_box_start:mask_box_end, :].mean(dim=1, keepdim=True)
-                else:
-                    ref_q = enc_out.last_hidden_state[:, :txt_len, :].mean(dim=1, keepdim=True)
-                patch_scores = (ref_q @ img_h.transpose(1, 2)).squeeze(1) / math.sqrt(D)
+            # ── RELEVANCE MAP (thay cho attention của encoder) ──────────────────────
+            # Điểm liên quan của mỗi patch = tích vô hướng giữa biểu diễn ẢNH sau encoder
+            # và vector chỉ dẫn gộp từ MỌI token KHÔNG-ảnh (prompt/câu hỏi + đặc trưng OCR
+            # + target query), lấy masked-mean nên token PAD không tham gia.
+            #
+            # Vì sao không dùng attention nữa:
+            #   • giống hệt nhau ở pretrain và finetune ⇒ AVF chuyển giao được;
+            #   • khả vi và ĐƯỢC GIÁM SÁT trực tiếp bởi grounding loss bên dưới, nên chất
+            #     lượng định vị là thứ được HỌC chứ không phải hy vọng attention tự đúng;
+            #   • không cần output_attentions ⇒ không mất SDPA/flash, không giữ [B,H,L,L]×12.
+            # Ảnh đã đi qua 12 tầng self-attention CÙNG với OCR nên lát ảnh này đã mang
+            # ngữ cảnh OCR — đúng điều cần để crop trúng vùng chữ đang được hỏi tới.
+            _enc_hs = enc_out.last_hidden_state
+            _q_mask = fused_mask.clone()
+            _q_mask[:, img_start:img_end] = 0
+            _w = _q_mask.unsqueeze(-1).to(_enc_hs.dtype)
+            _ref = (_enc_hs * _w).sum(1) / _w.sum(1).clamp_min(1e-6)          # [B, D]
+            _img_h = _enc_hs[:, img_start:img_end, :]                          # [B, 196, D]
+            img_relevance = torch.matmul(_img_h, _ref.unsqueeze(-1)).squeeze(-1) / math.sqrt(D)
+            img_relevance = torch.nan_to_num(img_relevance, nan=0.0, posinf=1e4, neginf=-1e4)
 
-            patch_scores = torch.nan_to_num(patch_scores, nan=0.0, posinf=1e4, neginf=-1e4).to(self.target_dtype)
+            # detach cho bước CHỌN vùng cắt: crop là phép không khả vi (cắt PIL), giữ graph
+            # ở đây chỉ tốn bộ nhớ. Gradient vào relevance map đi bằng đường grounding loss.
+            patch_scores = img_relevance.detach().to(self.target_dtype)
 
             # ConvNeXt-V2 Visual Search zoom-in trên ảnh gốc
             vs_out = self.visual_search(
@@ -965,7 +1012,35 @@ class OpenViVQAModel(PreTrainedModel):
             else:
                 bbox_loss = torch.tensor(0.0, device=device, dtype=self.target_dtype)
 
+        # ── GROUNDING LOSS (chỉ pretrain — finetune không có nhãn) ──────────────────
+        # Đây là mắt xích còn THIẾU của cả QA-CLIP lẫn AVF: trước đây hai module này chỉ
+        # nhận gradient qua CE của câu trả lời cuối — một đường quá dài và quá yếu để học
+        # được "câu hỏi này thì phải nhìn vào đâu". Nên gate ReZero của QA-CLIP nằm im ở 0
+        # và box của AVF thì độc lập với câu hỏi. Ở đây ta dạy trực tiếp:
+        #   (a) relevance map của T5 encoder  → AVF cắt trúng vùng chữ cần đọc;
+        #   (b) bản đồ question-guided của QA-CLIP → adapter học grounding.
+        # Với (b), chú ý: cross_logits KHÔNG đi qua gate β, nên delta của QA-CLIP trở nên
+        # CÓ NGHĨA TRƯỚC KHI gate mở. Đó chính là cách thoát khỏi bẫy "gate không mở vì
+        # delta là nhiễu, delta mãi là nhiễu vì gate không mở".
+        ground_loss = None
+        if target_patch_mask is not None:
+            _q = target_patch_mask.to(device=device, dtype=torch.float32)
+            if _q.dim() == 2 and _q.size(1) == img_len:
+                _q = _q / _q.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                _terms = []
+                if img_relevance is not None:
+                    _terms.append(-(_q * torch.log_softmax(img_relevance.float(), dim=-1)).sum(-1).mean())
+                _cm = img_pack.get("patch_scores")
+                if _cm is not None and _cm.dim() == 2 and _cm.size(1) == img_len and _cm.requires_grad:
+                    _pc = _cm.float()
+                    _pc = _pc / _pc.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                    _terms.append(-(_q * _pc.clamp_min(1e-8).log()).sum(-1).mean())
+                if _terms:
+                    ground_loss = torch.stack(_terms).mean()
+
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
+        if ground_loss is not None:
+            out_dict["ground_loss"] = ground_loss
         if bbox_logits is not None:
             out_dict["bbox_logits"] = bbox_logits
         if bbox_loss is not None:
@@ -987,6 +1062,8 @@ class OpenViVQAModel(PreTrainedModel):
                 out_dict["loss"] = text_loss + self.lambda_bbox_ce * bbox_loss
             else:
                 out_dict["loss"] = text_loss
+            if ground_loss is not None and torch.isfinite(ground_loss):
+                out_dict["loss"] = out_dict["loss"] + self.lambda_ground * ground_loss
             if return_visual_search_debug:
                 out_dict["vs_debug"] = vs_out
                 out_dict["clip_input_ids"] = q_ids_for_clip.detach().cpu()

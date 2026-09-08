@@ -167,9 +167,10 @@ def simple_pretrain_aggregator(eval_pred):
     else:
         mean_vals = np.mean(preds, axis=0)
 
-        # PreSTU SplitOCR Dual-Target mode (6 metrics: total_acc, text_acc, bbox_acc, text_loss, bbox_loss, total_loss)
-        if mean_vals.shape[0] == 6:
-            return {
+        # PreSTU SplitOCR Dual-Target mode
+        # (total_acc, text_acc, bbox_acc, text_loss, bbox_loss, total_loss[, ground_loss])
+        if mean_vals.shape[0] in (6, 7):
+            out = {
                 "pretrain_acc": float(mean_vals[0]),
                 "acc_text": float(mean_vals[1]),
                 "acc_bbox": float(mean_vals[2]),
@@ -177,6 +178,9 @@ def simple_pretrain_aggregator(eval_pred):
                 "loss_bbox": float(mean_vals[4]),
                 "loss_total": float(mean_vals[5]),
             }
+            if mean_vals.shape[0] == 7:
+                out["loss_ground"] = float(mean_vals[6])
+            return out
 
         # Legacy TWA / MLM / TWC / ITC ablation modes
         result = {
@@ -483,16 +487,17 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             avg_acc = self._running_acc / self._running_cnt
             current_epoch = self.state.epoch or 0.0
 
-            if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) == 6:
+            if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) in (6, 7):
                 txt_a = batch_acc[1].item()
                 box_a = batch_acc[2].item()
                 txt_l = batch_acc[3].item()
                 box_l = batch_acc[4].item()
+                gnd = f", Ground Loss:{batch_acc[6].item():.4f}" if len(batch_acc) == 7 else ""
                 print(
                     f"[Pretrain SplitOCR] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
                     f"Text -> Loss:{txt_l:.4f}, Acc:{txt_a:.4f} | "
-                    f"BBox -> Loss:{box_l:.4f}, Acc:{box_a:.4f}"
+                    f"BBox -> Loss:{box_l:.4f}, Acc:{box_a:.4f}{gnd}"
                 )
             elif isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) > 6:
                 twc_a = batch_acc[2].item()

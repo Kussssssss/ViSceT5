@@ -501,8 +501,11 @@ class GlobalPretrainAccuracy(BaseMetric):
                 bb_mask = (bb_targets != -100)
                 if bb_mask.any():
                     bb_preds = bb_logits.argmax(dim=-1)
-                    # Tolerance: within 20 bins (~2% of coordinate span across 1000 bins)
-                    bbox_acc = ((bb_preds[bb_mask] - bb_targets[bb_mask]).abs() <= 20).float().mean().item()
+                    # Dung sai = 2% cạnh ảnh, TÍNH THEO số bin thực tế (trước đây hằng số 20
+                    # bin được canh cho 1000 bin = 2%; giữ nguyên 20 khi đổi sang 200 bin sẽ
+                    # thành 10% → acc_bbox bị thổi phồng gấp 5 lần và mất ý nghĩa so sánh).
+                    _tol = max(1, int(round(0.02 * bb_logits.size(-1))))
+                    bbox_acc = ((bb_preds[bb_mask] - bb_targets[bb_mask]).abs() <= _tol).float().mean().item()
 
             # Trọng số phản ánh cân bằng: 70% Sinh từ vựng (chính) + 30% Định vị toạ độ (bổ trợ)
             total_acc = (0.7 * token_acc + 0.3 * bbox_acc) if bbox_acc > 0 else token_acc
@@ -513,9 +516,12 @@ class GlobalPretrainAccuracy(BaseMetric):
             _b_loss = model_output.get("bbox_loss", torch.tensor(0.0))
             b_loss_val = _b_loss.mean().item() if torch.is_tensor(_b_loss) else float(_b_loss)
 
+            _g_loss = model_output.get("ground_loss", torch.tensor(0.0))
+            g_loss_val = _g_loss.mean().item() if torch.is_tensor(_g_loss) else float(_g_loss)
+
             device = logits.device
             return torch.tensor(
-                [total_acc, token_acc, bbox_acc, t_loss_val, b_loss_val, loss_val],
+                [total_acc, token_acc, bbox_acc, t_loss_val, b_loss_val, loss_val, g_loss_val],
                 device=device
             )
 

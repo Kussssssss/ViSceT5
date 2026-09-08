@@ -62,8 +62,17 @@ class ModelArguments:
         metadata={"help": "Include OCR tokens in the MLM encoder text branch. False (default) = question-only (removes OCR-as-text copy crutch, aligns with finetune; OCR learned via gen+TWC). True = old question+OCR."}
     )
     num_bbox_bins: int = field(
-        default=1000,
-        metadata={"help": "Number of discrete coordinate bins for BBox prediction."}
+        default=200,
+        metadata={"help": "Number of discrete coordinate bins for BBox prediction. 200 bins = 0.5% "
+                          "of the image side, already finer than the 1/14 = 7.1% granularity of the "
+                          "patch grid the model reasons over; 1000 bins spent capacity on precision "
+                          "the evidence cannot support."}
+    )
+    lambda_ground: float = field(
+        default=0.5,
+        metadata={"help": "Weight of the region-grounding loss (supervises BOTH the T5 relevance map "
+                          "that steers the AVF crop AND the QA-CLIP question-guided patch map). This "
+                          "is the direct 'where to look' signal that answer-CE alone never provided."}
     )
     lambda_bbox_ce: float = field(
         default=1.0,
@@ -71,7 +80,16 @@ class ModelArguments:
     )
     pretrain_use_vs: bool = field(
         default=True,
-        metadata={"help": "Whether to use Visual Search (AVF) in pretrain."}
+        metadata={"help": "Whether to use Visual Search (AVF) in pretrain. Combined with "
+                          "ablation_use_vs (AND) so pretrain can drop AVF without touching "
+                          "the shared ablation flag."}
+    )
+    vs_t5_guided: bool = field(
+        default=True,
+        metadata={"help": "Pretrain Visual Search heatmap source. True = LATE path: heatmap from "
+                          "the T5 encoder's last-layer attention (mask-box queries + prompt -> image "
+                          "patches), crop injected back into the encoder image states via AVFFusion. "
+                          "False = EARLY path: heatmap from QA-CLIP attention before the T5 encoder."}
     )
     use_ocr_aug_pretrain: bool = field(
         default=False,

@@ -78,7 +78,8 @@ class MMCLIPAttention(CLIPAttention):
         # ---- delta: cross-attention visual → question (hoàn toàn sau gate) ----
         kq = self._shape(self.k_proj(kv_states), -1, bsz).view(*ps)
         vq = self._shape(self.v_proj(kv_states), -1, bsz).view(*ps)
-        cross_w = torch.bmm(q.float(), kq.float().transpose(1, 2))   # (B*H, vis, mm)
+        cross_logits = torch.bmm(q.float(), kq.float().transpose(1, 2))   # (B*H, vis, mm)
+        cross_w = cross_logits
         if kv_masks is not None:
             m = kv_masks.to(device=hidden_states.device)
             if m.size(1) != mm_len:
@@ -96,8 +97,25 @@ class MMCLIPAttention(CLIPAttention):
         delta = self.instruction_out_proj(cross_ctx)
 
         out = base_out + torch.tanh(self.instruction_proj_gate) * delta
-        # Trả về attention question-guided (visual × question) để làm patch_scores cho AVF.
-        attn_ret = cross_w.view(bsz, H, vis_len, mm_len) if output_attentions else None
+
+        # ── BẢN ĐỒ GROUNDING trả cho AVF ────────────────────────────────────────
+        # KHÔNG trả `cross_w`. `cross_w` được softmax theo chiều QUESTION (dim=-1) nên
+        # MỌI hàng patch đều tổng bằng 1; phía dùng nó (_encode_image) lấy mean theo
+        # chiều question ⇒ patch_scores[v] = 1/mm_len HẰNG SỐ với mọi patch (đo được:
+        # std giữa các patch = 2e-10). Hệ quả: sau min-max normalize + ngưỡng
+        # percentile-99, VisualSearch giữ cả 196 ô ⇒ AVF luôn cắt TOÀN BỘ ảnh, với mọi
+        # câu hỏi. Đó là lý do "box unlearnable & question-independent".
+        #
+        # Bản đồ đúng cho grounding là softmax theo chiều PATCH: với mỗi token câu hỏi,
+        # nó trỏ vào patch nào. Cột của token PAD bị zero để phía sau lấy mean là
+        # mean-có-mask (token PAD đóng góp 0 thay vì một phân phối đều vô nghĩa).
+        attn_ret = None
+        if output_attentions:
+            gm = cross_logits.view(bsz, H, vis_len, mm_len)
+            gm = F.softmax(gm - gm.amax(dim=2, keepdim=True), dim=2)   # chuẩn hoá TRÊN PATCH
+            if kv_masks is not None:
+                gm = gm * m.to(gm.dtype)[:, None, None, :]
+            attn_ret = torch.nan_to_num(gm, nan=0.0)
         return out, attn_ret
 
 class MMCLIPEncoderLayer(nn.Module):

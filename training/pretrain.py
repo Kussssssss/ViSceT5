@@ -750,6 +750,25 @@ def main(args_list=None):
         tokenizer = safe_load_tokenizer("VietAI/vit5-base", use_fast=False)
         config = OpenViVQAConfig()
 
+    # Ablation / PreSTU flags PHẢI được ghi vào config TRƯỚC khi dựng model: __init__ dùng
+    # ablation_use_vs để quyết định giữ hay gỡ visual_search + avf_fusion, và num_bbox_bins
+    # để định hình bbox_cls_head. Trước đây pretrain.py bỏ hẳn bước này (finetune.py thì có),
+    # nên mọi cờ ablation trong pretrain.yaml bị nuốt im lặng và model luôn chạy default.
+    config.ablation_use_qaclip = bool(model_args.ablation_use_qaclip)
+    # pretrain_use_vs = công tắc AVF riêng của pretrain, AND với cờ ablation dùng chung.
+    config.ablation_use_vs = bool(model_args.ablation_use_vs) and bool(
+        getattr(model_args, "pretrain_use_vs", True))
+    config.ablation_use_ocr = bool(model_args.ablation_use_ocr)
+    config.pretrain_use_vs = bool(getattr(model_args, "pretrain_use_vs", True))
+    config.vs_t5_guided = bool(getattr(model_args, "vs_t5_guided", True))
+    config.num_bbox_bins = int(getattr(model_args, "num_bbox_bins", 1000))
+    config.lambda_bbox_ce = float(getattr(model_args, "lambda_bbox_ce", 0.3))
+    config.lambda_ground = float(getattr(model_args, "lambda_ground", 0.5))
+    print(f">>> [pretrain] ABLATION: qaclip={config.ablation_use_qaclip} | "
+          f"vs(AVF)={config.ablation_use_vs} (t5_guided={config.vs_t5_guided}) | "
+          f"ocr={config.ablation_use_ocr} | bbox_bins={config.num_bbox_bins} | "
+          f"lambda_bbox={config.lambda_bbox_ce} lambda_ground={config.lambda_ground}")
+
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
