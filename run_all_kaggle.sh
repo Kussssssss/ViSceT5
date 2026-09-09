@@ -28,7 +28,7 @@ export VISCET5_PROGRESS_ONLY=1
 echo "▶ [Kaggle] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST"
 
 # ---- Branch & Directory Setup ----
-GIT_BRANCH="${GIT_BRANCH:-exp/pretrain-gen-all}"
+GIT_BRANCH="${GIT_BRANCH:-exp/pretrain-grounding-avf}"
 _SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${REPO_DIR:-}" ]; then
     TARGET_DIR="$REPO_DIR"
