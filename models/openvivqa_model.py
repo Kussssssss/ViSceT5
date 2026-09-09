@@ -504,7 +504,11 @@ class OpenViVQAModel(PreTrainedModel):
 
         # Notebook gốc / TWA paper: original và related token được encode CÙNG NHAU
         # với full attention (z_ocr = [z_T; z_W] qua transformer). KHÔNG chặn cross-half.
-        ocr_text_tok, _ = self.ocr_encoder(ocr_token_ids, token_mask)
+        # Tinh embedding TAI DAY: duoi DataParallel thi `self` la ban sao dung thiet bi,
+        # nen tensor sinh ra chac chan cung device voi ocr_token_ids.
+        _ocr_tok_emb = self.vit5.get_input_embeddings()(ocr_token_ids)
+        ocr_text_tok, _ = self.ocr_encoder(ocr_token_ids, token_mask,
+                                           inputs_embeds=_ocr_tok_emb)
         ocr_text_tok = ocr_text_tok.to(self.target_dtype)
 
         B, L_tok2, D = ocr_text_tok.size()
