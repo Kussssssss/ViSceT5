@@ -138,8 +138,15 @@ class OCREncoder(nn.Module):
     def set_word_embed_proxy(self, proxy_callable):
         self._word_embed_proxy = proxy_callable
 
-    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor):
-        if self._word_embed_proxy is not None:
+    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor,
+                inputs_embeds: torch.Tensor = None):
+        # `inputs_embeds` la duong DUOC UU TIEN. Duong proxy cu bat giu `self` cua model
+        # GOC trong mot lambda, nen khi nn.DataParallel nhan ban module sang cuda:1 thi ban
+        # sao van goi nguoc ve bang embedding nam o cuda:0 -> "Expected all tensors to be on
+        # the same device". Nguoi goi tinh san embedding tu chinh ban sao cua minh thi het.
+        if inputs_embeds is not None:
+            x = inputs_embeds
+        elif self._word_embed_proxy is not None:
             x = self._word_embed_proxy(inputs)
         elif self._legacy_embed is not None:
             x = self._legacy_embed(inputs)

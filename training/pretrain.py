@@ -641,6 +641,34 @@ def _progress_only_mode():
         return False
 
 
+def _force_single_gpu_if_dataparallel(training_args, stage: str):
+    """Tat DataParallel: batch cua model nay KHONG an toan duoi scatter.
+
+    HF Trainer boc nn.DataParallel khi thay n_gpu > 1 va khong chay distributed (dung
+    canh Kaggle T4 x2). DataParallel dung torch scatter, va scatter chi biet CAT TENSOR
+    theo dim 0:
+
+      - `pil_images` la list anh PIL. PIL khong phai tensor/list/dict nen scatter roi vao
+        nhanh `[obj for _ in target_gpus]` => MOI GPU nhan TRON B anh, trong khi
+        pixel_values cua no chi con B/2. Anh lech hang voi pixel.
+      - `ocr_info` la list cac dict chua tensor. scatter di dan vao trong va cat cac tensor
+        do theo dim 0 - ma dim 0 o day la chieu TU cua OCR, khong phai chieu batch. Nen
+        boxes_word_all [L,4] bi cat thanh [L/2,4]. Hong AM THAM, khong bao loi.
+
+    Ca hai deu khong bao gio nem exception, chi cho ra ket qua sai - nen khong the de
+    "chay duoc" lam bang chung. Ep ve 1 GPU la lua chon dung ve mat so hoc. Muon dung ca
+    hai GPU that su thi phai la DDP (torchrun --nproc_per_node=2): DDP chia batch ngay o
+    DataLoader nen khong he goi scatter, va hai truong tren van nguyen ven.
+    """
+    import torch as _t
+    if getattr(training_args, "_n_gpu", 1) > 1 and training_args.local_rank == -1:
+        n = training_args._n_gpu
+        training_args._n_gpu = 1
+        print(f"[{stage}] Thay {n} GPU -> ep ve 1 GPU. DataParallel se lam hong am tham "
+              f"`pil_images` va `ocr_info` (scatter chi cat tensor theo dim 0). "
+              f"Dung ca 2 GPU bang DDP: torchrun --nproc_per_node={n}.")
+
+
 def main(args_list=None):
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     default_yaml = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs", "pretrain.yaml"))
@@ -950,6 +978,8 @@ def main(args_list=None):
                   f"({'question+OCR' if data_collator.mlm_ocr_in_text else 'QUESTION-ONLY (nạng giảm)'}) | (legacy encoder-MLM path)")
 
     # 6. Trainer
+    _force_single_gpu_if_dataparallel(training_args, "pretrain")
+
     trainer = TaskSpecificTrainer(
         model=model,
         args=training_args,
