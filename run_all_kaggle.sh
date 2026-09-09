@@ -25,6 +25,11 @@ for a in "$@"; do
 done
 export STAGE MOCK_TEST
 export VISCET5_PROGRESS_ONLY=1
+# Kaggle mac dinh cap "GPU T4 x2". DataParallel lam hong am tham pil_images/ocr_info
+# (scatter chi cat tensor theo dim 0), nen ghim ve GPU 0. Dat san bien nay truoc khi goi
+# thi van duoc ton trong; dung nhieu GPU that su thi chay DDP (torchrun --nproc_per_node=2).
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+echo "> [Kaggle] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 echo "▶ [Kaggle] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST"
 
 # ---- Branch & Directory Setup ----
