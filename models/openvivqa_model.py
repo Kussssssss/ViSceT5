@@ -1083,6 +1083,18 @@ class OpenViVQAModel(PreTrainedModel):
                         ground_loss = torch.stack(_terms).mean()
 
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
+        if return_visual_search_debug:
+            # Bản đồ liên quan (đã detach) để đo pointing accuracy: argmax có rơi vào vùng
+            # target không. Đây là thước đo DUY NHẤT cho biết grounding có tổng quát hoá
+            # sang ảnh CHƯA THẤY hay chỉ nhớ ảnh train — tức nó có chuyển giao được sang
+            # finetune hay không. Chỉ trả khi bật cờ debug, để Trainer không phải gom
+            # tensor [B,196] thừa ở mỗi bước eval.
+            out_dict["vs_debug"] = vs_out
+            if img_relevance is not None:
+                out_dict["img_relevance"] = img_relevance.detach()
+            _cps = img_pack.get("patch_scores")
+            if _cps is not None:
+                out_dict["clip_patch_scores"] = _cps.detach()
         if ground_loss is not None:
             out_dict["ground_loss"] = ground_loss
         if bbox_logits is not None:
