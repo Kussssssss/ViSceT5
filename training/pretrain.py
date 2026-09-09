@@ -765,11 +765,12 @@ def main(args_list=None):
     config.num_bbox_bins = int(getattr(model_args, "num_bbox_bins", 1000))
     config.lambda_bbox_ce = float(getattr(model_args, "lambda_bbox_ce", 0.3))
     config.lambda_ground = float(getattr(model_args, "lambda_ground", 0.5))
+    config.max_target_words = int(getattr(model_args, "max_target_words", 5))
     print(f">>> [pretrain] ABLATION: qaclip={config.ablation_use_qaclip} | "
           f"vs(AVF)={config.ablation_use_vs} (t5_guided={config.vs_t5_guided}) | "
           f"ocr={config.ablation_use_ocr} | bbox_bins={config.num_bbox_bins} | "
           f"lambda_bbox={config.lambda_bbox_ce} lambda_ground={config.lambda_ground} | "
-          f"crop_encoder={config.vs_crop_encoder}")
+          f"crop_encoder={config.vs_crop_encoder} | max_target_words={config.max_target_words}")
 
     model = OpenViVQAModel(config)
     if ckpt_to_load:

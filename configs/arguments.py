@@ -68,6 +68,14 @@ class ModelArguments:
                           "patch grid the model reasons over; 1000 bins spent capacity on precision "
                           "the evidence cannot support."}
     )
+    max_target_words: int = field(
+        default=5,
+        metadata={"help": "Cap on how many OCR words the PreSTU target cluster may hold. "
+                          "Uncapped, k ~ U(1, N-1) makes targets tens of words long while "
+                          "finetune emits short answers, so the decoder carries a "
+                          "long-output habit across. Capping also tightens the cluster "
+                          "spatially, which sharpens the 14x14 grounding label. 0 = no cap."}
+    )
     lambda_ground: float = field(
         default=0.5,
         metadata={"help": "Weight of the region-grounding loss (supervises BOTH the T5 relevance map "

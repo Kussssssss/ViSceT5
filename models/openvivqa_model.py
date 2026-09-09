@@ -813,7 +813,14 @@ class OpenViVQAModel(PreTrainedModel):
         img_start = txt_len
         img_len = img_pack["img_tokens"].size(1)
         img_end = img_start + img_len
-        if not self.pretrain and twa_word_ids is not None and ocr_info is not None:
+        # Khoi dac trung OCR duoc tinh cho CA HAI giai doan. Truoc day gate
+        # `not self.pretrain` khien 20.1M tham so (OCREncoder 19.5M +
+        # SemanticOCREmbedding 0.41M + char embedding 0.17M) KHONG nhan gradient nao
+        # trong suot pretrain -> finetune nap lai dung random init. O pretrain, khoi nay
+        # chi chua CAC TU PREFIX (collator da loc), nen khong ro ri tu target.
+        ocr_fused_feat = None
+        token_mask_for_ocr = None
+        if twa_word_ids is not None and ocr_info is not None:
             word_ids_for_ocr = twa_word_ids.to(device)
             pad_id = self.vit5.config.pad_token_id
             token_mask_for_ocr = (word_ids_for_ocr != pad_id).long()
@@ -853,44 +860,41 @@ class OpenViVQAModel(PreTrainedModel):
             if token_mask_for_ocr.size(1) != L_tok:
                 token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
 
-            _blocks = [
-                (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
-                (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
-                (ocr_fused_feat,           token_mask_for_ocr.long()),
-            ]
-        else:
-            # PRESTU DUAL-TARGET PRE-TRAINING:
-            # Chuỗi hợp nhất = [Prompt (chứa CHỮ OCR prefix) ; 196 patch ảnh ;
-            #                   Đặc trưng OCR prefix mức từ (box + det + rec) ; Target mask queries]
-            _blocks = [
-                (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
-                (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
-            ]
-            if prefix_box_coords is not None and prefix_box_coords.size(1) > 0:
-                # Đặc trưng OCR mức TỪ cho phần prefix, đúng công thức đường ON:
-                #   x_OCR = x_semantic + LN(det·W) + LN(rec·W) + box·W
-                # x_semantic (chuỗi chữ OCR) đã nằm trong khối prompt phía trước, nên ở đây
-                # cộng phần KHÔNG GIAN (box) và phần THỊ GIÁC (det = detection, rec =
-                # recognition của spotter). LN sau Linear là BẮT BUỘC với det/rec: đặc trưng
-                # thô 256-d có biên độ không kiểm soát, thiếu LN thì gradient tràn qua
-                # QA-CLIP → NaN (đã đo trước đây ở nhánh finetune).
-                prefix_ocr_emb = self.ocr_lite_box_proj(
-                    prefix_box_coords.to(device).to(dtype=self.target_dtype))
-                _P = prefix_ocr_emb.size(1)
-                if prefix_det_feats is not None and prefix_det_feats.size(1) == _P:
-                    _det = self.ocr_lite_det_proj(prefix_det_feats.to(device).to(dtype=self.target_dtype))
-                    prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_det_ln(_det).to(self.target_dtype)
-                if prefix_rec_feats is not None and prefix_rec_feats.size(1) == _P:
-                    _rec = self.ocr_lite_rec_proj(prefix_rec_feats.to(device).to(dtype=self.target_dtype))
-                    prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_rec_ln(_rec).to(self.target_dtype)
-                if prefix_box_mask is not None:
-                    p_mask = prefix_box_mask.to(device).long()
-                else:
-                    p_mask = torch.ones(B, _P, device=device, dtype=torch.long)
-                # Zero hoá vị trí PAD: LN có bias nên LN(0) != 0; tuy đã bị che ở attention
-                # mask, vẫn zero để residual/thống kê không dính giá trị rác.
-                prefix_ocr_emb = prefix_ocr_emb * p_mask.unsqueeze(-1).to(prefix_ocr_emb.dtype)
-                _blocks.append((prefix_ocr_emb, p_mask))
+        # Chuoi hop nhat:
+        #   finetune : [Cau hoi ; 196 patch anh ; Dac trung OCR]
+        #   pretrain : [Prompt (chua CHU OCR prefix) ; 196 patch anh ;
+        #               Dac trung OCR cua RIENG PREFIX ; 1 Target mask query]
+        _blocks = [
+            (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
+            (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
+        ]
+        if ocr_fused_feat is not None:
+            _blocks.append((ocr_fused_feat, token_mask_for_ocr.long()))
+
+        if self.pretrain:
+            # Duong du phong khi collator KHONG cap dac trung SceSpaVis (vi du chay
+            # ablation_use_ocr=false tren du lieu cu): dung khoi ocr_lite box+det+rec.
+            # Khi SceSpaVis co mat thi khoi nay THUA - SceSpaVis da bao gom box/det/rec.
+            if ocr_fused_feat is None and prefix_box_coords is not None and prefix_box_coords.size(1) > 0:
+                    # Cong thuc duong ON: x_OCR = x_semantic + LN(det.W) + LN(rec.W) + box.W.
+                    # LN sau Linear la BAT BUOC voi det/rec: dac trung tho 256-d co bien
+                    # do khong kiem soat, thieu LN thi gradient tran qua QA-CLIP -> NaN.
+                    prefix_ocr_emb = self.ocr_lite_box_proj(
+                        prefix_box_coords.to(device).to(dtype=self.target_dtype))
+                    _P = prefix_ocr_emb.size(1)
+                    if prefix_det_feats is not None and prefix_det_feats.size(1) == _P:
+                        _det = self.ocr_lite_det_proj(prefix_det_feats.to(device).to(dtype=self.target_dtype))
+                        prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_det_ln(_det).to(self.target_dtype)
+                    if prefix_rec_feats is not None and prefix_rec_feats.size(1) == _P:
+                        _rec = self.ocr_lite_rec_proj(prefix_rec_feats.to(device).to(dtype=self.target_dtype))
+                        prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_rec_ln(_rec).to(self.target_dtype)
+                    if prefix_box_mask is not None:
+                        p_mask = prefix_box_mask.to(device).long()
+                    else:
+                        p_mask = torch.ones(B, _P, device=device, dtype=torch.long)
+                    # Zero hoa vi tri PAD: LN co bias nen LN(0) != 0.
+                    prefix_ocr_emb = prefix_ocr_emb * p_mask.unsqueeze(-1).to(prefix_ocr_emb.dtype)
+                    _blocks.append((prefix_ocr_emb, p_mask))
 
             if target_bbox_bins is not None and target_bbox_bins.size(1) > 0:
                 K = target_bbox_bins.size(1)
@@ -1059,17 +1063,24 @@ class OpenViVQAModel(PreTrainedModel):
         if target_patch_mask is not None:
             _q = target_patch_mask.to(device=device, dtype=torch.float32)
             if _q.dim() == 2 and _q.size(1) == img_len:
-                _q = _q / _q.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-                _terms = []
-                if img_relevance is not None:
-                    _terms.append(-(_q * torch.log_softmax(img_relevance.float(), dim=-1)).sum(-1).mean())
-                _cm = img_pack.get("patch_scores")
-                if _cm is not None and _cm.dim() == 2 and _cm.size(1) == img_len and _cm.requires_grad:
-                    _pc = _cm.float()
-                    _pc = _pc / _pc.sum(dim=-1, keepdim=True).clamp_min(1e-8)
-                    _terms.append(-(_q * _pc.clamp_min(1e-8).log()).sum(-1).mean())
-                if _terms:
-                    ground_loss = torch.stack(_terms).mean()
+                # Hang co gia tri am = sentinel "bo qua" (che do doc-toan-bo: muc tieu trai
+                # khap anh nen khong ton tai nhan "nhin vao dau" hop le). Lay trung binh
+                # CHI tren cac hang hop le; ca batch deu sentinel thi khong tinh grounding.
+                _valid = (_q >= 0).all(dim=-1)
+                if bool(_valid.any()):
+                    _q = _q[_valid]
+                    _q = _q / _q.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                    _terms = []
+                    if img_relevance is not None:
+                        _lr = torch.log_softmax(img_relevance.float(), dim=-1)[_valid]
+                        _terms.append(-(_q * _lr).sum(-1).mean())
+                    _cm = img_pack.get("patch_scores")
+                    if _cm is not None and _cm.dim() == 2 and _cm.size(1) == img_len and _cm.requires_grad:
+                        _pc = _cm.float()[_valid]
+                        _pc = _pc / _pc.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                        _terms.append(-(_q * _pc.clamp_min(1e-8).log()).sum(-1).mean())
+                    if _terms:
+                        ground_loss = torch.stack(_terms).mean()
 
         out_dict: Dict[str, Any] = {"encoder_outputs": enc_out, "attention_mask": fused_mask}
         if ground_loss is not None:

@@ -82,6 +82,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocrseq_use_spatial: bool = True,
         ocrseq_dropout: float = 0.1,
         num_bbox_bins: int = 200,
+        max_target_words: int = 5,
         lambda_bbox_ce: float = 1.0,
         lambda_ground: float = 0.5,
         pretrain_use_vs: bool = True,
@@ -168,6 +169,7 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ocrseq_use_spatial = bool(ocrseq_use_spatial)
         self.ocrseq_dropout = float(ocrseq_dropout)
         self.num_bbox_bins = int(num_bbox_bins)
+        self.max_target_words = int(max_target_words)
         self.lambda_bbox_ce = float(lambda_bbox_ce)
         self.lambda_ground = float(lambda_ground)
         self.pretrain_use_vs = bool(pretrain_use_vs)

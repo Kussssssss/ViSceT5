@@ -251,7 +251,8 @@ def _split_ocr_spatial_region(
     tokens: List[str],
     boxes: torch.Tensor,
     full_ocr_prob: float = 0.15,
-) -> Tuple[List[str], torch.Tensor, List[int], List[str], torch.Tensor, List[int]]:
+    max_target_words: int = 0,
+) -> Tuple[List[str], torch.Tensor, List[int], List[str], torch.Tensor, List[int], bool]:
     """
     Splits OCR tokens into Prefix (Input context) and Target (Prediction) based on
     SPATIAL REGION CLUSTERING (Khoanh vùng cụm không gian).
@@ -266,8 +267,9 @@ def _split_ocr_spatial_region(
     4. Remaining boxes form the PREFIX (Input).
     5. Maintain reading-order (top-to-bottom, left-to-right) inside both sets.
 
-    Tra ve (prefix_words, prefix_boxes, prefix_idx, target_words, target_bins, target_idx);
-    hai danh sach chi so tro vao MANG DA SORT, de caller gom det/rec dung tu.
+    Tra ve (prefix_words, prefix_boxes, prefix_idx, target_words, target_bins, target_idx,
+    is_full_ocr); hai danh sach chi so tro vao MANG DA SORT, de caller gom det/rec dung tu.
+    is_full_ocr = True khi day la che do doc-toan-bo (khong co prefix).
     """
     N = len(tokens)
     if N == 0 or boxes.size(0) == 0:
@@ -278,6 +280,7 @@ def _split_ocr_spatial_region(
             [],
             torch.zeros((0, 4), dtype=torch.long),
             [],
+            False,
         )
 
     if N == 1:
@@ -288,7 +291,7 @@ def _split_ocr_spatial_region(
         p_b = torch.zeros((0, 4), dtype=torch.float)
         t_words = list(tokens)
         t_b = (boxes * 1000.0).long().clamp(0, 999)
-        return p_words, p_b, [], t_words, t_b, [0]
+        return p_words, p_b, [], t_words, t_b, [0], False
 
     # Pure OCR mode (prob = full_ocr_prob, e.g. 15%): No prefix, target is the entire image text
     if random.random() < full_ocr_prob:
@@ -296,7 +299,7 @@ def _split_ocr_spatial_region(
         p_b = torch.zeros((0, 4), dtype=torch.float)
         t_words = list(tokens)
         t_b = (boxes * 1000.0).long().clamp(0, 999)
-        return p_words, p_b, [], t_words, t_b, list(range(N))
+        return p_words, p_b, [], t_words, t_b, list(range(N)), True
 
     # SPATIAL CLUSTERING:
     # 1. Compute center coordinates of all boxes
@@ -312,7 +315,14 @@ def _split_ocr_spatial_region(
     dist = (cx - anc_x) ** 2 + 2.0 * (cy - anc_y) ** 2
 
     # 4. Determine cluster size K (number of target words)
-    k = random.randint(1, max(1, N - 1))
+    # Chan tren so tu target. Khong chan thi k ~ U(1, N-1) sinh ra chuoi dich dai hang
+    # chuc tu, trong khi finetune sinh cau tra loi ngan -> decoder hoc thoi quen "xa
+    # chuoi dai" va mang sang finetune (da do truoc day: ty le sinh thua ~1.13). Chan
+    # con lam cum target CHAT hon ve khong gian, tuc nhan grounding 14x14 sac net hon.
+    k_max = max(1, N - 1)
+    if max_target_words and int(max_target_words) > 0:
+        k_max = min(k_max, int(max_target_words))
+    k = random.randint(1, k_max)
 
     # 5. Top-k nearest indices to anchor form the Target Cluster
     nearest_indices = torch.argsort(dist)[:k].tolist()
@@ -330,7 +340,7 @@ def _split_ocr_spatial_region(
     prefix_words = [tokens[i] for i in sorted_prefix_idx]
     p_boxes = boxes[sorted_prefix_idx]
 
-    return prefix_words, p_boxes, sorted_prefix_idx, target_words, t_boxes, sorted_target_idx
+    return prefix_words, p_boxes, sorted_prefix_idx, target_words, t_boxes, sorted_target_idx, False
 
 
 def _boxes_to_patch_mask(boxes_norm: torch.Tensor, grid: int = 14) -> torch.Tensor:
@@ -1109,6 +1119,12 @@ class ViT5VQADataCollator:
             d_det = int(getattr(self.cfg, "ocr_d_det", 256))
             d_rec = int(getattr(self.cfg, "ocr_d_rec", 256))
             n_bins = int(getattr(self.cfg, "num_bbox_bins", 200))
+            max_tgt_words = int(getattr(self.cfg, "max_target_words", 5))
+            # Dac trung OCR day du (SceSpaVis) cho RIENG cac tu PREFIX. Nho vay 20.1M tham
+            # so OCREncoder/SemanticOCREmbedding/char-embedding duoc huan luyen ngay trong
+            # pretrain va chuyen thang sang finetune. Chi prefix -> khong ro ri tu target.
+            pre_info_list, pre_char, pre_char_mask, pre_word_ids, pre_map, pre_box_mask = \
+                [], [], [], [], [], []
             # Nhãn grounding 14x14 (vùng cần nhìn) + box hợp của cụm target.
             batch_patch_mask = []
             batch_union_bins = []
@@ -1138,13 +1154,15 @@ class ViT5VQADataCollator:
                     t_boxes = torch.zeros((0, 4), dtype=torch.long)
                     p_det = torch.zeros((0, d_det), dtype=torch.float)
                     p_rec = torch.zeros((0, d_rec), dtype=torch.float)
+                    is_full = False
                 else:
                     # Sắp xếp theo trật tự đọc không gian: trên xuống dưới, trái sang phải (PreSTU Sec 2.1)
                     norm_tokens, valid_boxes, sort_perm = _sort_ocr_reading_order(norm_tokens, valid_boxes)
 
                     # Khoanh vùng cụm không gian mục tiêu (Spatial Region Clustering)
                     (prefix_words, p_boxes, p_idx,
-                     target_words, t_boxes, _t_idx) = _split_ocr_spatial_region(norm_tokens, valid_boxes)
+                     target_words, t_boxes, _t_idx, is_full) = _split_ocr_spatial_region(
+                        norm_tokens, valid_boxes, max_target_words=max_tgt_words)
                     prefix_str = " ".join(prefix_words).strip()
                     target_str = " ".join(target_words).strip()
 
@@ -1171,13 +1189,51 @@ class ViT5VQADataCollator:
                 # dựng nhãn grounding và box hợp. Dùng TỪNG box từ cho mặt nạ (bám sát
                 # chữ hơn hình chữ nhật bao), nhưng dùng BOX HỢP cho bbox head.
                 t_norm = (t_boxes.float() / 1000.0).clamp(0.0, 1.0) if t_boxes.numel() > 0                     else torch.zeros((0, 4), dtype=torch.float)
-                batch_patch_mask.append(_boxes_to_patch_mask(t_norm, grid=14))
-                _ub = _union_box(t_norm)
-                if _ub is None:
+                # --- dac trung SceSpaVis cua PREFIX (cung thu tu voi p_boxes) ---
+                pad_ocr = list(prefix_words)[:current_max_len] if N_words > 0 else []
+                n_pre = len(pad_ocr)
+                while len(pad_ocr) < current_max_len:
+                    pad_ocr.append(pad_tok)
+                _ca, _ma, _fid, _lens = self._add_cons_ocr_info(pad_ocr, current_max_len)
+                _map = []
+                for j, l in enumerate(_lens):
+                    _map.extend([j] * int(l.item()))
+                pre_char.append(_ca)
+                pre_char_mask.append(_ma)
+                pre_word_ids.append(_fid)
+                pre_map.append(torch.tensor(_map, dtype=torch.long))
+
+                _wm = torch.zeros(current_max_len, dtype=torch.long)
+                _wm[:n_pre] = 1
+                _bx = torch.zeros(current_max_len, 4, dtype=torch.float)
+                _dt = torch.zeros(current_max_len, d_det, dtype=torch.float)
+                _rc = torch.zeros(current_max_len, d_rec, dtype=torch.float)
+                if n_pre > 0:
+                    _bx[:n_pre] = p_boxes[:n_pre]
+                    _dt[:n_pre, :min(p_det.size(1), d_det)] = p_det[:n_pre, :d_det]
+                    _rc[:n_pre, :min(p_rec.size(1), d_rec)] = p_rec[:n_pre, :d_rec]
+                info["boxes_word_all"] = _bx
+                info["word_mask_all"] = _wm
+                info["det_features"] = _dt
+                info["rec_features"] = _rc
+                pre_info_list.append(info)
+                pre_box_mask.append(_wm)
+
+                # Che do doc-toan-bo: target trai khap anh, nen "nhin vao dau" la
+                # nhin khap noi. Day KHONG phai nhan dinh vi hop le - hoc theo no se keo
+                # heatmap ve deu va box hop ve gan het khung. Nen o che do nay ta TAT han
+                # ca grounding lan bbox (sentinel -1 / -100) va chi giu muc tieu sinh chu.
+                if is_full:
+                    batch_patch_mask.append(torch.full((196,), -1.0, dtype=torch.float))
                     batch_union_bins.append(torch.full((4,), -100, dtype=torch.long))
                 else:
-                    batch_union_bins.append(
-                        (_ub * n_bins).long().clamp(0, n_bins - 1))
+                    batch_patch_mask.append(_boxes_to_patch_mask(t_norm, grid=14))
+                    _ub = _union_box(t_norm)
+                    if _ub is None:
+                        batch_union_bins.append(torch.full((4,), -100, dtype=torch.long))
+                    else:
+                        batch_union_bins.append(
+                            (_ub * n_bins).long().clamp(0, n_bins - 1))
 
             # Pad prefix_box_coords and target_bbox_bins across the batch
             max_p_len = max([b.size(0) for b in batch_prefix_boxes], default=0)
@@ -1237,6 +1293,16 @@ class ViT5VQADataCollator:
                 "prefix_det_feats": prefix_det_feats.to(pixel_values.device),
                 "prefix_rec_feats": prefix_rec_feats.to(pixel_values.device),
                 "target_patch_mask": target_patch_mask.to(pixel_values.device),
+                # Dac trung OCR day du cua PREFIX -> chay qua chinh SceSpaVis ma
+                # finetune dung, nen trong so hoc duoc o day chuyen giao 1-1.
+                "ocr_info": pre_info_list,
+                "ocr_mask_box": torch.stack(pre_box_mask).to(pixel_values.device),
+                "twa_ocr_char": torch.stack(pre_char).to(pixel_values.device),
+                "twa_ocr_char_mask": torch.stack(pre_char_mask).to(pixel_values.device),
+                "twa_word_ids": torch.nn.utils.rnn.pad_sequence(
+                    pre_word_ids, batch_first=True, padding_value=self.pad_id).to(pixel_values.device),
+                "ocr_to_word_map": torch.nn.utils.rnn.pad_sequence(
+                    pre_map, batch_first=True, padding_value=-1).to(pixel_values.device),
             }
 
         # =========================================================
