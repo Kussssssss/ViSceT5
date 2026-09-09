@@ -4,6 +4,27 @@ import argparse
 import subprocess
 import importlib
 
+# ── GHIM 1 GPU, TRƯỚC KHI BẤT KỲ THỨ GÌ IMPORT TORCH ──────────────────────────
+# Kaggle mặc định cấp "GPU T4 x2", nên nếu không ghim thì HF Trainer sẽ bọc
+# nn.DataParallel — thứ làm HỎNG ÂM THẦM batch của model này: `scatter` chỉ biết cắt
+# TENSOR theo dim 0, nên `pil_images` (list ảnh PIL) bị nhân bản trọn vẹn cho mỗi GPU
+# trong khi pixel_values chỉ còn một nửa, còn `ocr_info` (list dict chứa tensor) bị cắt
+# theo dim 0 — vốn là chiều TỪ của OCR chứ không phải chiều batch. Không cái nào ném lỗi.
+#
+# Đặt biến môi trường (thay vì chỉ chặn ở Trainer) là cách chắc chắn nhất: torch chỉ
+# nhìn thấy đúng một thiết bị, nên không đường nào có thể vô tình chạm GPU thứ hai.
+# Phải làm ở đây, trước mọi `import torch`, vì CUDA đọc biến này đúng một lần lúc khởi tạo.
+#
+# Tôn trọng lựa chọn của người dùng: đã tự đặt CUDA_VISIBLE_DEVICES thì giữ nguyên, và
+# đang chạy DDP (torchrun đặt LOCAL_RANK/WORLD_SIZE) thì KHÔNG ghim — DDP chia batch ngay
+# ở DataLoader nên không hề gọi scatter, dùng nhiều GPU an toàn.
+_ddp = any(k in os.environ for k in ("LOCAL_RANK", "RANK", "WORLD_SIZE"))
+if "CUDA_VISIBLE_DEVICES" not in os.environ and not _ddp:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    print("[run_pipeline] CUDA_VISIBLE_DEVICES=0 — dùng 1 GPU. DataParallel làm hỏng âm "
+          "thầm pil_images/ocr_info; muốn dùng nhiều GPU hãy chạy DDP "
+          "(torchrun --nproc_per_node=2).")
+
 # Đảm bảo dự án nằm trong PYTHONPATH
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
