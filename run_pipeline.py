@@ -86,6 +86,22 @@ def run():
                     sys.argv.extend(["--mlm_ocr_in_text", _moit])
                     print(f">>> [pretrain] mlm_ocr_in_text = {_moit}")
 
+                # Ablation module + siêu tham số PreSTU. Mặc định lấy từ configs/pretrain.yaml;
+                # env chỉ để ghi đè khi chạy bảng ablation mà không phải sửa yaml.
+                for _pk, _pflag in [("ABLATION_USE_QACLIP", "--ablation_use_qaclip"),
+                                    ("ABLATION_USE_VS", "--ablation_use_vs"),
+                                    ("ABLATION_USE_OCR", "--ablation_use_ocr"),
+                                    ("VS_CROP_ENCODER", "--vs_crop_encoder"),
+                                    ("VS_T5_GUIDED", "--vs_t5_guided"),
+                                    ("NUM_BBOX_BINS", "--num_bbox_bins"),
+                                    ("MAX_TARGET_WORDS", "--max_target_words"),
+                                    ("LAMBDA_BBOX_CE", "--lambda_bbox_ce"),
+                                    ("LAMBDA_GROUND", "--lambda_ground")]:
+                    _pv = os.environ.get(_pk, "").strip()
+                    if _pv:
+                        sys.argv.extend([_pflag, _pv])
+                        print(f">>> [pretrain] {_pflag} = {_pv}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
