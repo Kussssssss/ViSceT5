@@ -6,7 +6,11 @@ viet_vocab_path: "configs/data/viet_vocab.txt"
 loss_ablation_mode: "prestu"
 ablation_use_qaclip: true
 ablation_use_vs: true
-ablation_use_ocr: false
+# BAT: khoi dac trung OCR day du (SceSpaVis) chay ca o pretrain -> 20.1M tham so
+# OCREncoder/SemanticOCREmbedding/char-embedding duoc huan luyen va chuyen thang sang
+# finetune. De false thi pretrain chi nhan OCR dang VAN BAN THUAN (bo ca box/det/rec)
+# va 20.1M tham so do van dung im nhu truoc.
+ablation_use_ocr: true
 use_ocr_aug_pretrain: false
 num_bbox_bins: 200
 max_target_words: 5

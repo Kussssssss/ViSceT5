@@ -188,37 +188,54 @@ def visualize_pretrain_samples(
         p_mask = batch["prefix_box_mask"][0].bool()
         p_boxes = batch["prefix_box_coords"][0][p_mask].cpu().numpy()
 
-        # Target Suffix BBoxes
+        # Target Suffix BBoxes. Số bin lấy từ config chứ KHÔNG hard-code: nó là tham số
+        # (num_bbox_bins, mặc định 200) — hard-code 1000 làm hàm này chết ngay khi đổi.
+        n_bins = int(getattr(model.config, "num_bbox_bins", 200))
         gt_bins = batch["target_bbox_bins"][0]
         valid_bbox_mask = (gt_bins[:, 0] != -100)
-        gt_boxes = (gt_bins[valid_bbox_mask].float() / 1000.0).cpu().numpy()
+        gt_boxes = (gt_bins[valid_bbox_mask].float() / float(n_bins)).cpu().numpy()
 
         # Predicted Suffix BBoxes (Soft-argmax)
         bbox_logits = outputs.get("bbox_logits")
         if bbox_logits is not None:
             probs = torch.softmax(bbox_logits[0], dim=-1)
-            bins = torch.linspace(0.0, 1.0, 1000, device=probs.device, dtype=probs.dtype)
+            # Lấy thẳng từ shape của logits: khớp cả khi checkpoint cũ dùng số bin khác config.
+            bins = torch.linspace(0.0, 1.0, probs.size(-1),
+                                  device=probs.device, dtype=probs.dtype)
             pred_coords = torch.sum(probs * bins, dim=-1)
             pred_boxes = pred_coords[valid_bbox_mask.to(pred_coords.device)].cpu().numpy()
         else:
             pred_boxes = np.zeros((0, 4))
 
+        def _rect(draw, box, W, H, **kw):
+            """Vẽ một box, tự sắp lại toạ độ trước.
+
+            bbox head dự đoán 4 toạ độ ĐỘC LẬP, không gì ép x1<=x2 hay y1<=y2, nên
+            checkpoint chưa hội tụ hay sinh ra box lộn ngược và PIL ném
+            "y1 must be greater than or equal to y0" — chết đúng ở bước trực quan hoá
+            ngay sau khi train xong. Sắp lại rồi kẹp vào trong khung ảnh.
+            """
+            x1, x2 = sorted((float(box[0]) * W, float(box[2]) * W))
+            y1, y2 = sorted((float(box[1]) * H, float(box[3]) * H))
+            x1, x2 = max(0.0, x1), min(float(W), x2)
+            y1, y2 = max(0.0, y1), min(float(H), y2)
+            if x2 - x1 < 1 or y2 - y1 < 1:      # box suy biến: bỏ qua thay vì nổ
+                return
+            draw.rectangle([x1, y1, x2, y2], **kw)
+
         # Panel 1: Ground-Truth
         img_gt = pil_img.copy()
         draw_gt = ImageDraw.Draw(img_gt)
         for box in p_boxes:
-            x1, y1, x2, y2 = box[0] * W0, box[1] * H0, box[2] * W0, box[3] * H0
-            draw_gt.rectangle([x1, y1, x2, y2], outline="blue", width=2)
+            _rect(draw_gt, box, W0, H0, outline="blue", width=2)
         for box in gt_boxes:
-            x1, y1, x2, y2 = box[0] * W0, box[1] * H0, box[2] * W0, box[3] * H0
-            draw_gt.rectangle([x1, y1, x2, y2], outline="green", width=3)
+            _rect(draw_gt, box, W0, H0, outline="green", width=3)
 
         # Panel 2: Prediction
         img_pred = pil_img.copy()
         draw_pred = ImageDraw.Draw(img_pred)
         for box in pred_boxes:
-            x1, y1, x2, y2 = box[0] * W0, box[1] * H0, box[2] * W0, box[3] * H0
-            draw_pred.rectangle([x1, y1, x2, y2], outline="red", width=3)
+            _rect(draw_pred, box, W0, H0, outline="red", width=3)
 
         # Panel 3: Attention Heatmap
         overlay = pil_img.copy()

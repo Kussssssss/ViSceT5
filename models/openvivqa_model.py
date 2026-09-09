@@ -18,6 +18,7 @@ import math
 import torch
 import torch.nn as nn
 import numpy as np
+from inspect import signature as _inspect_sig
 from typing import Optional, List, Dict, Any, Tuple
 
 from transformers import (
@@ -1389,7 +1390,19 @@ class OpenViVQAModel(PreTrainedModel):
 
         twa_keys = ["twa_ocr_char", "twa_ocr_char_mask", "twa_word_ids", "ocr_to_word_map", "twc_split_word_idx"]
         twa_kwargs = {k: kwargs.pop(k) for k in twa_keys if k in kwargs}
-        forward_kwargs = {k: v for k, v in kwargs.items() if k not in ["max_new_tokens", "num_beams", "generation_config"]}
+
+        # POP chứ không COPY. Trước đây forward_kwargs được copy ra mà `kwargs` giữ nguyên,
+        # nên các khoá chỉ dành cho forward vẫn bị splat xuống `vit5.generate` và HF ném
+        # ValueError("model_kwargs are not used by the model"). Lộ ra ngay khi generate với
+        # batch pretrain (target_bbox_bins, prefix_*, target_patch_mask). Lấy đúng theo chữ
+        # ký của forward để về sau thêm tham số mới cũng tự được xử lý, trừ các tham số đã
+        # truyền tường minh bên dưới (nếu không sẽ trùng đối số).
+        _explicit = {"input_ids", "attention_mask", "pixel_values", "labels", "pil_images",
+                     "ocr_info", "ocr_mask_token", "ocr_mask_box"}
+        _fwd_params = set(_inspect_sig(self.forward).parameters) - _explicit
+        forward_kwargs = {k: kwargs.pop(k) for k in list(kwargs) if k in _fwd_params}
+        for _k in ("max_new_tokens", "num_beams", "generation_config"):
+            kwargs.pop(_k, None)
 
         orig_pretrain = self.pretrain
         self.pretrain = False
