@@ -142,10 +142,13 @@ def main():
     model = OpenViVQAModel.from_pretrained(a.checkpoint).to(device).eval()
     model.pretrain = True
     model.config.pretrain = True
-    tokenizer = model.tokenizer if hasattr(model, "tokenizer") else None
-    if tokenizer is None:
-        from transformers import AutoTokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model.config.vit5_model_name)
+    # Ưu tiên tokenizer LƯU KÈM checkpoint (pretrain.py có save nó) — vốn từ khớp đúng
+    # với embedding của checkpoint. Chỉ khi thiếu mới rơi về ViT5 gốc.
+    from utils.model_utils import safe_load_tokenizer
+    try:
+        tokenizer = safe_load_tokenizer(a.checkpoint)
+    except Exception:
+        tokenizer = safe_load_tokenizer("VietAI/vit5-base")
 
     train_df = pd.read_csv(os.path.join(a.data_dir, "merged_train.csv"))
     val_df = pd.read_csv(os.path.join(a.data_dir, "merged_val.csv"))
@@ -195,19 +198,27 @@ def main():
     print(f"  khoảng cách train − val          : {gap:+.2f} điểm")
     print(f"  train tụt bao nhiêu khi làm mờ   : {tr - trb:+.2f}")
     print(f"  val   tụt bao nhiêu khi làm mờ   : {va - vab:+.2f}")
-    if gap > 15:
-        print("  ⚠️  Khoảng cách lớn → có memorization. Dừng sớm theo F1 trên val, "
-              "đừng theo loss train.")
-    if (tr - trb) < 5:
-        print("  ⚠️  Xoá nét chữ mà điểm gần như không giảm → model đang NHỚ chứ không ĐỌC. "
-              "Tăng augmentation ảnh, giảm số epoch.")
-    if (va - vab) > 15:
+    if tr < 10:
+        # Không đủ tín hiệu để kết luận: model gần như chưa làm được việc, nên "làm mờ mà
+        # điểm không giảm" chỉ là 0 − 0 = 0 chứ không phải bằng chứng của việc nhớ.
+        print("  (F1 trên train chỉ %.2f%% — model gần như chưa làm được task, "
+              "chưa đủ tín hiệu để kết luận về memorization)" % tr)
+    else:
+        if gap > 15:
+            print("  ⚠️  Khoảng cách lớn → có memorization. Dừng sớm theo F1 trên val, "
+                  "đừng theo loss train.")
+        if (tr - trb) < 5:
+            print("  ⚠️  Xoá nét chữ mà điểm gần như không giảm → model đang NHỚ chứ không ĐỌC. "
+                  "Tăng augmentation ảnh, giảm số epoch.")
+    if tr >= 10 and (va - vab) > 15:
         print("  ✅ Trên ảnh CHƯA THẤY, mất nét chữ thì điểm sập → model thật sự đang đọc.")
 
     print(f"\n--- Grounding (pointing accuracy) — thước đo quyết định cho nhánh này ---")
     print(f"  train {ptr:.2f}%   |   val (chưa thấy) {pva:.2f}%   |   chênh {ptr - pva:+.2f}")
     print(f"  ngẫu nhiên ≈ {100 * 8 / 196:.1f}% (vùng target trung bình ~8/196 ô)")
-    if pva < 25:
+    if max(ptr, pva) < 8:
+        print("  (cả hai đều ~ mức ngẫu nhiên — checkpoint chưa train đủ để kết luận)")
+    elif pva < 25:
         print("  ⚠️  Trên ảnh CHƯA THẤY, bản đồ liên quan gần như chỉ bừa → grounding KHÔNG "
               "tổng quát hoá, QA-CLIP/AVF sẽ không khá lên ở finetune. Giảm epoch, "
               "tăng augmentation ảnh, hoặc tăng lambda_ground.")

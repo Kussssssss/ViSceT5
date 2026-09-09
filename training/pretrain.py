@@ -270,6 +270,11 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
                 f"spread={_spread:.2e}; nếu fail xem cos_txt/cos_img và raw_scale ở trên")
 
     # ── GEN checks (only when a generative decoder objective is active) ────
+    # `gen_on` truoc day khong duoc dinh nghia o dau ca -> NameError lam chet
+    # _verify_pretrain_batch NGAY LUC KHOI DONG moi lan chay. O che do PreSTU khong he co
+    # gen_loss (do la duong GEN_TARGET_STYLE cu), nen suy co tu chinh output: co gen_loss
+    # thi kiem, khong co thi bo qua.
+    gen_on = out.get("gen_loss") is not None
     if gen_on:
         gl = out.get("gen_loss")
         chk("[GEN] gen_loss produced", gl is not None)
@@ -277,6 +282,22 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
             gl is not None and bool(torch.isfinite(gl).all()) and gl.item() > 0,
             f"gen_loss={gl.item():.4f}" if gl is not None else "MISSING")
         chk("[GEN] gen_loss requires grad", gl is not None and bool(gl.requires_grad))
+
+    # ── PreSTU: grounding + bbox ───────────────────────────────────────────
+    _gr, _bb = out.get("ground_loss"), out.get("bbox_loss")
+    if _gr is not None:
+        # ln(196) = 5.28 la gia tri cua ban do DEU. Bat dau o day thi dung; neu no dung
+        # yen o day suot qua trinh train thi grounding khong hoc duoc gi.
+        chk("[GROUND] ground_loss huu han", bool(torch.isfinite(_gr).all()),
+            f"ground_loss={float(_gr):.4f} (ban do deu = ln196 = 5.28)")
+        chk("[GROUND] ground_loss co gradient", bool(_gr.requires_grad))
+    if _bb is not None:
+        chk("[BBOX] bbox_loss huu han", bool(torch.isfinite(_bb).all()),
+            f"bbox_loss={float(_bb):.4f}")
+    _bl = out.get("bbox_logits")
+    if _bl is not None:
+        chk("[BBOX] mot query / mot box hop (K=1)", _bl.dim() == 4 and _bl.size(1) == 1,
+            f"bbox_logits={tuple(_bl.shape)}")
 
     # ── total + backward + per-submodule gradient localization ─────────────
     chk("[TOTAL] loss finite", bool(torch.isfinite(total).all()))
