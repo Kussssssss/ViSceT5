@@ -1,11 +1,26 @@
 """probe_memorization.py — pretrain PreSTU có đang ĐỌC ảnh, hay chỉ NHỚ ảnh?
 
 Vì sao cần: pretext "sinh các từ OCR không nằm trong prefix" giải được TRỌN VẸN bằng trí
-nhớ. Đo trên EVJVQA (3.503 ảnh dùng được): 99,2% ảnh có chữ ký OCR duy nhất, và riêng
-chuỗi prefix đã đủ định danh duy nhất một ảnh trong 79,2% lượt bốc (94,6% khi prefix có
-≥3 từ, 99,3% khi ≥6 từ). Toàn bộ văn bản cần nhớ chỉ ~237 KB, trong khi model có 291M
-tham số ≈ 554 MB ở bf16 — dư khoảng 2.400 lần. Nên `loss_text` giảm KHÔNG chứng minh
-model biết đọc; nó có thể chỉ đang tra bảng "ảnh này → chuỗi OCR này".
+nhớ. Đo trên CHÍNH corpus pretrain (VinText 1.985 + EVJVQA 3.503 = 5.488 ảnh dùng được,
+score ≥ 0.3):
+
+  - 99,1% ảnh có "chữ ký OCR" DUY NHẤT (chữ ký = tập từ OCR của ảnh đó). Nên đường
+    "ảnh → chuỗi OCR đã nhớ → trừ prefix → target" luôn đi được, không cần đọc pixel nào.
+  - Riêng CHUỖI PREFIX đã đủ định danh duy nhất một ảnh trong 81,5% lượt bốc
+    (VinText 88,7% | EVJVQA 77,2%). Theo độ dài prefix: 34,7% ở 1-2 từ, 91,4% ở 3-5 từ,
+    97,5% ở 6-10 từ, 99,7% khi dài hơn. Ảnh trung bình có 20,1 từ OCR.
+  - Nhớ toàn bộ tốn ~401 KB văn bản, trong khi model có 291M tham số ≈ 554 MB ở bf16 —
+    dư khoảng 1.400 lần.
+
+Nên `loss_text` giảm KHÔNG chứng minh model biết đọc; nó có thể chỉ đang tra bảng
+"ảnh này → chuỗi OCR này". (Tính bằng ngữ nghĩa tập hợp, bỏ qua số lần lặp của từ, nên
+các tỉ lệ trên là CHẶN DƯỚI.)
+
+Với nhánh grounding, câu hỏi sống còn không phải "có đọc được không" mà là **grounding
+có tổng quát hoá sang ảnh CHƯA THẤY không** — vì đó mới là thứ chuyển giao sang finetune.
+Nên ngoài EM/F1 của chuỗi sinh ra, probe còn đo `point` = pointing accuracy: argmax của
+bản đồ liên quan có rơi vào đúng vùng target không. `point` cao trên train mà thấp trên
+val nghĩa là bản đồ chỉ được nhớ theo ảnh, và QA-CLIP/AVF sẽ KHÔNG khá lên ở finetune.
 
 Kịch bản đo, 4 điều kiện:
 
@@ -66,6 +81,7 @@ def _scores(pred, gold):
 @torch.no_grad()
 def run_condition(model, collator, dataset, idxs, tokenizer, device, blur=0.0, bs=4):
     em_sum = f1_sum = n = 0
+    pt_sum = pt_n = 0
     for s in range(0, len(idxs), bs):
         rows = [dataset[i] for i in idxs[s:s + bs]]
         batch = collator(rows)
@@ -80,10 +96,23 @@ def run_condition(model, collator, dataset, idxs, tokenizer, device, blur=0.0, b
         gold_ids[gold_ids == -100] = tokenizer.pad_token_id
         gold = tokenizer.batch_decode(gold_ids, skip_special_tokens=True)
 
-        gen_kwargs = {k: v for k, v in batch.items()
-                      if k not in ("labels",) and v is not None}
-        gen_kwargs = {k: (v.to(device) if torch.is_tensor(v) else v)
-                      for k, v in gen_kwargs.items()}
+        dev_batch = {k: (v.to(device) if torch.is_tensor(v) else v)
+                     for k, v in batch.items() if v is not None}
+
+        # (a) pointing accuracy — argmax bản đồ liên quan có nằm trong vùng target không
+        tpm = dev_batch.get("target_patch_mask")
+        if tpm is not None:
+            fo = model(**dev_batch, return_visual_search_debug=True)
+            rel = fo.get("img_relevance")
+            if rel is not None and rel.shape == tpm.shape:
+                valid = (tpm >= 0).all(dim=-1)          # bỏ hàng sentinel (chế độ full-OCR)
+                if bool(valid.any()):
+                    am = rel[valid].argmax(dim=-1)
+                    hit = tpm[valid].gather(1, am.unsqueeze(1)).squeeze(1) > 0
+                    pt_sum += int(hit.sum()); pt_n += int(valid.sum())
+
+        # (b) EM/F1 của chuỗi target sinh ra
+        gen_kwargs = {k: v for k, v in dev_batch.items() if k not in ("labels",)}
         out = model.generate(max_new_tokens=24, num_beams=1, **gen_kwargs)
         pred = tokenizer.batch_decode(out, skip_special_tokens=True)
 
@@ -94,7 +123,8 @@ def run_condition(model, collator, dataset, idxs, tokenizer, device, blur=0.0, b
             em_sum += em
             f1_sum += f1
             n += 1
-    return (100 * em_sum / max(n, 1)), (100 * f1_sum / max(n, 1)), n
+    return (100 * em_sum / max(n, 1)), (100 * f1_sum / max(n, 1)), \
+           (100 * pt_sum / max(pt_n, 1)), n
 
 
 def main():
@@ -152,13 +182,14 @@ def main():
         torch.manual_seed(a.seed)
         import random as _r
         _r.seed(a.seed)
-        em, f1, n = run_condition(model, collator, ds, idxs, tokenizer, device,
-                                  blur=blur, bs=a.batch_size)
-        res[name.strip()] = (em, f1)
-        print(f"  {name}  EM {em:6.2f}%   F1 {f1:6.2f}%   (n={n})")
+        em, f1, pt, n = run_condition(model, collator, ds, idxs, tokenizer, device,
+                                      blur=blur, bs=a.batch_size)
+        res[name.strip()] = (em, f1, pt)
+        print(f"  {name}  EM {em:6.2f}%   F1 {f1:6.2f}%   point {pt:6.2f}%   (n={n})")
 
     tr, va = res["train"][1], res["val (chưa thấy)"][1]
     trb, vab = res["train + mờ"][1], res["val + mờ"][1]
+    ptr, pva = res["train"][2], res["val (chưa thấy)"][2]
     gap = tr - va
     print("\n--- Kết luận (theo F1) ---")
     print(f"  khoảng cách train − val          : {gap:+.2f} điểm")
@@ -172,6 +203,20 @@ def main():
               "Tăng augmentation ảnh, giảm số epoch.")
     if (va - vab) > 15:
         print("  ✅ Trên ảnh CHƯA THẤY, mất nét chữ thì điểm sập → model thật sự đang đọc.")
+
+    print(f"\n--- Grounding (pointing accuracy) — thước đo quyết định cho nhánh này ---")
+    print(f"  train {ptr:.2f}%   |   val (chưa thấy) {pva:.2f}%   |   chênh {ptr - pva:+.2f}")
+    print(f"  ngẫu nhiên ≈ {100 * 8 / 196:.1f}% (vùng target trung bình ~8/196 ô)")
+    if pva < 25:
+        print("  ⚠️  Trên ảnh CHƯA THẤY, bản đồ liên quan gần như chỉ bừa → grounding KHÔNG "
+              "tổng quát hoá, QA-CLIP/AVF sẽ không khá lên ở finetune. Giảm epoch, "
+              "tăng augmentation ảnh, hoặc tăng lambda_ground.")
+    elif ptr - pva > 25:
+        print("  ⚠️  Grounding chỉ đúng trên ảnh đã thấy → bản đồ bị NHỚ theo ảnh. "
+              "Dừng sớm theo chính chỉ số point trên val.")
+    else:
+        print("  ✅ Grounding tổng quát hoá sang ảnh chưa thấy → đây mới là cái chuyển giao "
+              "được sang finetune.")
 
 
 if __name__ == "__main__":
