@@ -1,4 +1,19 @@
+# VinText cho PRETRAIN (PreSTU). Dung DUNG split co san cua bo du lieu (2.000 anh):
+#
+#   vietnamese/train_images/        1.200  -> TRAIN
+#   vietnamese/test_image/            300  -> VAL
+#   vietnamese/unseen_test_images/    500  -> TEST, LOAI HAN khoi pretrain
+#   vietnamese/labels/              2.000 file .txt (nhan GT, khong dung - ta dung OCR .npy)
+#
+# CANH BAO TEN THU MUC: "test_image" LA CHUOI CON cua "unseen_test_images". Vi vay
+# val_dir_hint/exclude_dir_hints khop theo TEN THU MUC DUNG TUNG PHAN DOAN
+# (_path_has_dir), khong dung `in` - neu khong 500 anh unseen_test se bi gan nham vao val.
+#
+# Da doi chieu (Sep 2026): 2.000 anh <-> 2.000 file OCR, id 1..2000, 0 thieu 0 thua.
 dataset_name: VinText
+val_dir_hint: 'test_image'
+exclude_dir_hints:
+  - 'unseen_test_images'
 dataset:
   train:
     dir: ''

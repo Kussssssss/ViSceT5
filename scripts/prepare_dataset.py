@@ -99,6 +99,7 @@ def main(args):
             image_extra=config.get('image', {}).get('extra') or [],
             ocr_extra=config.get('ocr', {}).get('extra') or [],
             val_dir_hint=config.get('val_dir_hint', ''),
+            exclude_dir_hints=config.get('exclude_dir_hints') or [],
         )
 
         print(f"\n⬇️  Downloading & Extracting Dataset {NAME_SET}...")

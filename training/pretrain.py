@@ -726,6 +726,7 @@ def main(args_list=None):
                     image_extra=ds_cfg.get('image', {}).get('extra') or [],
                     ocr_extra=ds_cfg.get('ocr', {}).get('extra') or [],
                     val_dir_hint=ds_cfg.get('val_dir_hint', ''),
+                    exclude_dir_hints=ds_cfg.get('exclude_dir_hints') or [],
                 )
                 print(f"⬇️  Preparing {ds_name} via Hub...")
                 hub.prepare(ds_name)
