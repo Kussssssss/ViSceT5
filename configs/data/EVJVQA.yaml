@@ -1,19 +1,35 @@
-# EVJVQA cho PRETRAIN (PreSTU) - CHI train+val, KHONG lay test.
+# EVJVQA cho PRETRAIN (PreSTU). Cau truc THAT, da tai ve va doi chieu tung id (Sep 2026):
 #
-# Vi sao KHONG dien drive_id cho dataset.train/validation/test:
-#   Co file JSON split thi build_df() chuyen sang nhanh `if ann:` va sinh MOT DONG CHO
-#   MOI CAU HOI (train 18.811 + val 4.974 = 23.785 dong) thay vi mot dong moi anh. PreSTU
-#   la 1 anh = 1 mau, nen de trong de build_df dung nhanh quet anh+OCR.
+#   ZIP anh                          | thu muc               | so anh | ung voi JSON
+#   ---------------------------------+-----------------------+--------+------------------------
+#   19lLeNbc3oUJ-u5ZywnAJoVCAZ3IHIibS| train-images/         |  3.769 | train 3.010 + val 753
+#                                    |                       |        | + 6 anh lac (*)
+#   1zyIu5AoKno26HQ_H1jVX3edBsBBKsYq_| public-test-images/   |    558 | KHONG co JSON
+#   1rVoMHb_xVReCuc_zYq0egGFArpX3v6ms| private-test-images/  |    588 | test 588 (khop 100%)
 #
-# Vi sao KHONG lay test (588 anh, id rieng biet, khong chong lan train/val):
-#   Pretrain khong duoc nhin tap test cua bat ky benchmark nao. Dat zip test vao cung thu
-#   muc thi build_df quet de quy se nuot luon 588 anh do.
+#   (*) 6 anh co ca anh lan OCR nhung khong nam trong split nao:
+#       5609, 5630, 5634, 5647, 5676, 7473
 #
-# Da doi chieu (Sep 2026): anh train+val = 3.769, OCR train+val = 3.769, khop 100% theo id;
-# JSON train+val = 3.763 -> thua dung 6 anh khong thuoc split nao
-# (5609, 5630, 5634, 5647, 5676, 7473). Ban OCR cu ma config tro toi truoc day
-# (1HtTD1VbZoW66an31HPQ57oBbAujfSt7w) co 4.327 file: THIEU toan bo 588 file test va
-# THUA 558 file khong thuoc split nao.
+# LUU Y QUAN TRONG: "train-images/" chua CA JSON train LAN JSON val. Ten thu muc gay hieu
+# nham, nhung da kiem: 3.010/3.010 anh train va 753/753 anh val deu nam trong do.
+# Con thu muc ten "public-test-images" (558 anh) la mot split THU TU, khong co trong bat ky
+# file JSON nao trong ba file train/val/test.
+#
+# ZIP OCR:
+#   1aTwyHD50oHI4trKLFdRNoqty81dkGOs- : 3.769 file -> phu dung train-images/, khop 100% id
+#   1rn5Ly_aKC6zcB10jEi9db1-1CnALTvCV :   588 file -> phu dung private-test-images/
+#   1ohRw2_Zo9_LbUZRXJl2K1qihurRAeREG : 588 file, GIONG TUNG BYTE voi file test o tren
+#       (588/588 file trung md5). Day KHONG phai OCR cua 558 anh public-test - giao voi
+#       chung bang 0. OCR cua 558 anh do chi ton tai trong ban cu 4.327 file
+#       (= 3.769 train + dung 558 anh public-test).
+#
+# CHON CHO PRETRAIN: chi train-images/ (3.769 anh) + OCR tuong ung.
+#   - Khong lay private-test (588): khong bao gio pretrain tren tap test.
+#   - Khong lay public-test (558): cung la split danh gia, va OCR cua no khong co trong
+#     bo link hien tai.
+#   - KHONG dien drive_id cho dataset.train/validation/test: co JSON thi build_df() chuyen
+#     sang nhanh `if ann:` va sinh MOT DONG MOI CAU HOI (18.811 + 4.974 = 23.785 dong) thay
+#     vi mot dong moi anh. PreSTU la 1 anh = 1 mau, nen de trong de dung nhanh quet anh+OCR.
 dataset_name: EVJVQA
 dataset:
   train:
@@ -27,7 +43,7 @@ dataset:
     drive_id: ''
 image:
   dir: ''
-  drive_id: '19lLeNbc3oUJ-u5ZywnAJoVCAZ3IHIibS'   # anh train+val (3.769)
+  drive_id: '19lLeNbc3oUJ-u5ZywnAJoVCAZ3IHIibS'   # train-images/ (3.769 = JSON train + val)
 ocr:
   dir: ''
-  drive_id: '1aTwyHD50oHI4trKLFdRNoqty81dkGOs-'   # OCR train+val (3.769)
+  drive_id: '1aTwyHD50oHI4trKLFdRNoqty81dkGOs-'   # OCR cho train-images/ (3.769, khop 100%)
