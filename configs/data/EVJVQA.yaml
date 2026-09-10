@@ -1,3 +1,19 @@
+# EVJVQA cho PRETRAIN (PreSTU) - CHI train+val, KHONG lay test.
+#
+# Vi sao KHONG dien drive_id cho dataset.train/validation/test:
+#   Co file JSON split thi build_df() chuyen sang nhanh `if ann:` va sinh MOT DONG CHO
+#   MOI CAU HOI (train 18.811 + val 4.974 = 23.785 dong) thay vi mot dong moi anh. PreSTU
+#   la 1 anh = 1 mau, nen de trong de build_df dung nhanh quet anh+OCR.
+#
+# Vi sao KHONG lay test (588 anh, id rieng biet, khong chong lan train/val):
+#   Pretrain khong duoc nhin tap test cua bat ky benchmark nao. Dat zip test vao cung thu
+#   muc thi build_df quet de quy se nuot luon 588 anh do.
+#
+# Da doi chieu (Sep 2026): anh train+val = 3.769, OCR train+val = 3.769, khop 100% theo id;
+# JSON train+val = 3.763 -> thua dung 6 anh khong thuoc split nao
+# (5609, 5630, 5634, 5647, 5676, 7473). Ban OCR cu ma config tro toi truoc day
+# (1HtTD1VbZoW66an31HPQ57oBbAujfSt7w) co 4.327 file: THIEU toan bo 588 file test va
+# THUA 558 file khong thuoc split nao.
 dataset_name: EVJVQA
 dataset:
   train:
@@ -11,7 +27,7 @@ dataset:
     drive_id: ''
 image:
   dir: ''
-  drive_id: '1TSRasu5BiHfVxAZxWzwOljkQhtSzOBgz'
+  drive_id: '19lLeNbc3oUJ-u5ZywnAJoVCAZ3IHIibS'   # anh train+val (3.769)
 ocr:
   dir: ''
-  drive_id: '1HtTD1VbZoW66an31HPQ57oBbAujfSt7w'
+  drive_id: '1aTwyHD50oHI4trKLFdRNoqty81dkGOs-'   # OCR train+val (3.769)
