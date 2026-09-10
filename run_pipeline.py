@@ -25,6 +25,29 @@ if "CUDA_VISIBLE_DEVICES" not in os.environ and not _ddp:
           "thầm pil_images/ocr_info; muốn dùng nhiều GPU hãy chạy DDP "
           "(torchrun --nproc_per_node=2).")
 
+# ── DATASET + OUTPUT_PATH THEO STAGE ─────────────────────────────────────────
+# Step 1 truoc day hard-code configs/data/ViTextVQA.yaml BAT KE STAGE, va ghi
+# merged_*.csv vao OUTPUT_PATH mac dinh "./output". training/pretrain.py thi nap
+# thang CSV o OUTPUT_PATH va KHONG he doi chieu voi --dataset_name. Hau qua: chay
+# STAGE=pretrain van huan luyen tren ViTextVQA - tap DOWNSTREAM - voi 35.159 dong
+# hoi-dap (11.733 anh x ~3 cau hoi) thay vi ~7.5k anh cua VinText+EVJVQA.
+# Dau hieu nhan ra: 35.159 / (batch 4 x grad_accum 4) = 2.197 step/epoch
+# x 10 epoch = 21.970 step, dung con so quan sat duoc.
+#
+# Hai stage dung hai OUTPUT_PATH khac nhau, neu khong CSV cua stage nay se de len
+# stage kia. OUTPUT_PATH phai duoc dat O DAY vi configs/base_config.py doc bien nay
+# MOT LAN luc import.
+_STAGE = os.environ.get("STAGE", "finetune").strip().lower()
+_DS_BY_STAGE = {
+    "pretrain": ("configs/data/VinText.yaml,configs/data/EVJVQA.yaml", "./output/pretrain"),
+}
+_ds_cfg, _out = _DS_BY_STAGE.get(_STAGE, ("configs/data/ViTextVQA.yaml", "./output"))
+DATASET_CONFIG = os.environ.get("DATASET_CONFIG", "").strip() or _ds_cfg
+if "OUTPUT_PATH" not in os.environ:
+    os.environ["OUTPUT_PATH"] = _out
+print(f"[run_pipeline] STAGE={_STAGE} | dataset={DATASET_CONFIG} | "
+      f"OUTPUT_PATH={os.environ['OUTPUT_PATH']}")
+
 # Đảm bảo dự án nằm trong PYTHONPATH
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
@@ -34,7 +57,7 @@ def run():
         try:
             from scripts import prepare_dataset
             args = argparse.Namespace(
-                config="configs/data/ViTextVQA.yaml",
+                config=DATASET_CONFIG,
                 data_dir="./datasets"
             )
             prepare_dataset.main(args)
