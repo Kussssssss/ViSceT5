@@ -95,6 +95,10 @@ def main(args):
                 "validation": {"id": val_id, "url": None},
                 "test":       {"id": test_id, "url": None},
             },
+            # Archive PHU + goi y thu muc val (vd EVJVQA: public-test-images/ lam val).
+            image_extra=config.get('image', {}).get('extra') or [],
+            ocr_extra=config.get('ocr', {}).get('extra') or [],
+            val_dir_hint=config.get('val_dir_hint', ''),
         )
 
         print(f"\n⬇️  Downloading & Extracting Dataset {NAME_SET}...")

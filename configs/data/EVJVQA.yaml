@@ -27,10 +27,18 @@
 # Link 1KZfr8q-OXir4tOtzZMe1GH3l4piuvF5V: TRUNG HOAN TOAN voi 1zyIu5... (558/558 file giong
 #       tung byte) - van la ANH public-test, khong phai OCR con thieu.
 #
-# CHON CHO PRETRAIN: chi train-images/ (3.769 anh) + OCR tuong ung.
-#   - Khong lay private-test (588): khong bao gio pretrain tren tap test.
-#   - Khong lay public-test (558): cung la split danh gia, va OCR cua no khong co trong
-#     bo link hien tai.
+# CHON CHO PRETRAIN:
+#   TRAIN = train-images/       (3.769 anh)
+#   VAL   = public-test-images/ (558 anh)  <- gan bang `val_dir_hint`, KHONG chia 95/5 nua
+#   TEST  = private-test-images/ (588 anh) -> KHONG nap, khong bao gio pretrain tren tap test
+#
+#   Da kiem: train ^ val = 0 anh chung, nen val la tap tach han - dung de do memorization
+#   (xem scripts/probe_memorization.py) va de dung stop som.
+#
+#   OCR cho 558 anh val lay tu file LOCAL trong repo, vi link Drive '1ohRw2...' bi trung
+#   byte voi file test. File do trich tu ban cu 4.327: 558/558 khop id, 558/558 trung md5
+#   voi ban goc, 438 anh (78,5%) dung duoc sau loc, 13,1 tu OCR/anh.
+#
 #   - KHONG dien drive_id cho dataset.train/validation/test: co JSON thi build_df() chuyen
 #     sang nhanh `if ann:` va sinh MOT DONG MOI CAU HOI (18.811 + 4.974 = 23.785 dong) thay
 #     vi mot dong moi anh. PreSTU la 1 anh = 1 mau, nen de trong de dung nhanh quet anh+OCR.
@@ -45,9 +53,14 @@ dataset:
   test:
     dir: ''
     drive_id: ''
+val_dir_hint: 'public-test-images'
 image:
   dir: ''
-  drive_id: '19lLeNbc3oUJ-u5ZywnAJoVCAZ3IHIibS'   # train-images/ (3.769 = JSON train + val)
+  drive_id: '19lLeNbc3oUJ-u5ZywnAJoVCAZ3IHIibS'   # train-images/ (3.769) -> TRAIN
+  extra:
+    - drive_id: '1zyIu5AoKno26HQ_H1jVX3edBsBBKsYq_'   # public-test-images/ (558) -> VAL
 ocr:
   dir: ''
-  drive_id: '1aTwyHD50oHI4trKLFdRNoqty81dkGOs-'   # OCR cho train-images/ (3.769, khop 100%)
+  drive_id: '1aTwyHD50oHI4trKLFdRNoqty81dkGOs-'   # OCR train-images/ (3.769, khop 100%)
+  extra:
+    - path: 'datasets/raw/EVJVQA_ocr_publictest/ocr.zip'   # OCR cho 558 anh val (trong repo)

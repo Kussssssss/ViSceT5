@@ -345,6 +345,9 @@ class DatasetHubLoader:
         mapper_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
         image_zip_path: Optional[str] = None,
         ocr_zip_path: Optional[str] = None,
+        image_extra: Optional[List[Dict[str, str]]] = None,
+        ocr_extra: Optional[List[Dict[str, str]]] = None,
+        val_dir_hint: Optional[str] = None,
     ):
         if dataset_name in self.registry:
             raise ValueError("Dataset already registered")
@@ -362,6 +365,14 @@ class DatasetHubLoader:
             "mapper_fn": mapper_fn or _default_vqa_mapper,
             "image_zip_path": image_zip_path,
             "ocr_zip_path": ocr_zip_path,
+            # Archive PHU: giai nen vao CUNG image_root/ocr_root voi archive chinh, de mot
+            # dataset gom nhieu zip roi rac (vd EVJVQA: train-images/ va public-test-images/
+            # nam o hai file khac nhau). Moi phan tu la {"drive_id": ...} hoac {"path": ...}.
+            "image_extra": list(image_extra or []),
+            "ocr_extra": list(ocr_extra or []),
+            # Anh nao co duong dan chua chuoi nay -> split "validation" (thay cho phep chia
+            # 95/5 tuy tien theo ten file). De None thi giu hanh vi cu.
+            "val_dir_hint": (val_dir_hint or "").strip() or None,
         }
 
     def prepare(self, dataset_name: str) -> Dict[str, Any]:
@@ -435,6 +446,12 @@ class DatasetHubLoader:
                         _safe_remove(zip_path_ocr)
                         _safe_rmtree(raw_dir_ocr)
 
+        # Archive phu -> giai nen vao CUNG root. Ghi mot file danh dau de lan chay sau
+        # khong tai/giai nen lai (khong the dua vao "root da co file" nhu archive chinh, vi
+        # archive chinh da lam root khong rong roi).
+        self._extract_extras(dataset_name, "img", image_root, spec.get("image_extra"))
+        self._extract_extras(dataset_name, "ocr", ocr_root, spec.get("ocr_extra"))
+
         self.paths[dataset_name] = {
             "out_dir": out_dir,
             "annotations": ann_out,
@@ -444,6 +461,46 @@ class DatasetHubLoader:
             "ocr_root": ocr_root,
         }
         return self.paths[dataset_name]
+
+    def _extract_extras(self, dataset_name: str, kind: str, root: Optional[str],
+                        extras: Optional[List[Dict[str, str]]]):
+        """Giai nen cac archive phu vao `root` (dung cho ca anh lan OCR)."""
+        if not extras or not root:
+            return
+        for i, ex in enumerate(extras):
+            if not isinstance(ex, dict):
+                continue
+            did = str(ex.get("drive_id") or "").strip()
+            path = str(ex.get("path") or "").strip()
+            if not did and not path:
+                continue
+            tag = did or os.path.basename(path)
+            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", tag)[:60]
+            marker = os.path.join(root, f".extra_{kind}_{safe}.done")
+            if os.path.exists(marker):
+                print(f"ℹ️ [Hub] '{dataset_name}' archive phu {kind} '{tag}' da giai nen truoc do.")
+                continue
+            if path:
+                zp = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+                if not os.path.exists(zp):
+                    print(f"⚠️ [Hub] Khong thay archive phu {kind}: {zp} — bo qua.")
+                    continue
+                print(f"📦 [Hub] Giai nen archive phu {kind} tu file local: {zp}")
+                _extract_zip(zp, root)
+            else:
+                raw_dir = _ensure_dir(os.path.join(self.raw_root, f"{dataset_name}_{kind}_extra"))
+                zp = os.path.join(raw_dir, f"{kind}_extra_{i}.zip")
+                print(f"⬇️ [Hub] Tai archive phu {kind} (ID: {did})...")
+                _maybe_download(did, None, zp)
+                print(f"📦 [Hub] Giai nen archive phu {kind}...")
+                _extract_zip(zp, root)
+                if self.cleanup:
+                    _safe_remove(zp)
+            with open(marker, "w", encoding="utf-8") as f:
+                f.write(tag)
+            # Chi muc file duoc cache theo root -> phai xoa sau khi them file moi vao root,
+            # neu khong build_df se khong nhin thay cac anh/OCR vua giai nen.
+            _FILE_INDEX_CACHE.pop(root, None)
 
     def build_df(self, dataset_name: str) -> pd.DataFrame:
         if dataset_name not in self.paths:
@@ -490,10 +547,25 @@ class DatasetHubLoader:
                 print(f"       -> Thư mục OCR: {ocr_root} (tìm thấy {len(ocr_index)} file OCR)")
             
             items.sort(key=lambda x: x["image_filename"])
-            n_val = max(1, int(len(items) * 0.05)) if len(items) > 20 else max(1, len(items) // 5)
-            
+            hint = spec.get("val_dir_hint")
+            if hint:
+                # Split THAT theo thu muc: anh nam trong thu muc chua `hint` la validation.
+                # Tot hon phep cat 95/5 theo ten file da sap xep, vi val luc do la mot tap
+                # duoc dinh nghia san, tach hoan toan khoi train.
+                n_val = sum(1 for it in items if hint in it["image_path"].replace("\\", "/"))
+                print(f"ℹ️ [Hub] '{dataset_name}': chia split theo thu muc '{hint}' -> "
+                      f"{n_val} val / {len(items) - n_val} train.")
+                if n_val == 0:
+                    print(f"⚠️ [Hub] Khong anh nao khop '{hint}' — quay ve chia 95/5.")
+                    hint = None
+            if not hint:
+                n_val = max(1, int(len(items) * 0.05)) if len(items) > 20 else max(1, len(items) // 5)
+
             for idx, it in enumerate(items):
-                split = "validation" if idx >= len(items) - n_val else "train"
+                if hint:
+                    split = "validation" if hint in it["image_path"].replace("\\", "/") else "train"
+                else:
+                    split = "validation" if idx >= len(items) - n_val else "train"
                 rows.append({
                     "dataset": dataset_name,
                     "split": split,
