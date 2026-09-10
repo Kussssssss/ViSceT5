@@ -721,7 +721,11 @@ def main(args_list=None):
                         "train":      {"id": ds_sec.get('train', {}).get('drive_id') or ds_sec.get('train', {}).get('dir'), "url": None},
                         "validation": {"id": ds_sec.get('validation', {}).get('drive_id') or ds_sec.get('validation', {}).get('dir'), "url": None},
                         "test":       {"id": ds_sec.get('test', {}).get('drive_id') or ds_sec.get('test', {}).get('dir'), "url": None},
-                    }
+                    },
+                    # Archive PHU + goi y thu muc val (vd EVJVQA: public-test-images/ lam val).
+                    image_extra=ds_cfg.get('image', {}).get('extra') or [],
+                    ocr_extra=ds_cfg.get('ocr', {}).get('extra') or [],
+                    val_dir_hint=ds_cfg.get('val_dir_hint', ''),
                 )
                 print(f"⬇️  Preparing {ds_name} via Hub...")
                 hub.prepare(ds_name)
