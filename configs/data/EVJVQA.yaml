@@ -21,7 +21,11 @@
 #   1ohRw2_Zo9_LbUZRXJl2K1qihurRAeREG : 588 file, GIONG TUNG BYTE voi file test o tren
 #       (588/588 file trung md5). Day KHONG phai OCR cua 558 anh public-test - giao voi
 #       chung bang 0. OCR cua 558 anh do chi ton tai trong ban cu 4.327 file
-#       (= 3.769 train + dung 558 anh public-test).
+#       (= 3.769 train + dung 558 anh public-test). Da kiem: 558/558 file doc duoc, so hang
+#       texts/boxes/det/rec khop nhau, 438 anh (78,5%) dung duoc sau loc, 13,1 tu OCR/anh.
+#
+# Link 1KZfr8q-OXir4tOtzZMe1GH3l4piuvF5V: TRUNG HOAN TOAN voi 1zyIu5... (558/558 file giong
+#       tung byte) - van la ANH public-test, khong phai OCR con thieu.
 #
 # CHON CHO PRETRAIN: chi train-images/ (3.769 anh) + OCR tuong ung.
 #   - Khong lay private-test (588): khong bao gio pretrain tren tap test.
