@@ -160,6 +160,19 @@ def _resolve_in_tree(image_dir, filename, pred):
     return _file_index(root, pred).get(filename)
 
 
+def _path_has_dir(path: str, name: str) -> bool:
+    """True neu MOT THU MUC tren duong dan co ten dung bang `name`.
+
+    Phai khop dung tung phan doan, khong duoc dung `in`: VinText co ca `test_image` lan
+    `unseen_test_images`, ma chuoi "test_image" LA chuoi con cua "unseen_test_images" -
+    dung `in` thi 500 anh unseen_test se bi gan nham vao val.
+    """
+    if not name:
+        return False
+    parts = [x for x in path.replace("\\", "/").split("/") if x]
+    return name in parts
+
+
 def _find_ocr_match(fname: str, ocr_index: Dict[str, str]) -> Optional[str]:
     """Tìm đường dẫn OCR tương ứng với ảnh theo đa dạng định dạng tên file."""
     stem = os.path.splitext(fname)[0]
@@ -348,6 +361,7 @@ class DatasetHubLoader:
         image_extra: Optional[List[Dict[str, str]]] = None,
         ocr_extra: Optional[List[Dict[str, str]]] = None,
         val_dir_hint: Optional[str] = None,
+        exclude_dir_hints: Optional[List[str]] = None,
     ):
         if dataset_name in self.registry:
             raise ValueError("Dataset already registered")
@@ -370,9 +384,11 @@ class DatasetHubLoader:
             # nam o hai file khac nhau). Moi phan tu la {"drive_id": ...} hoac {"path": ...}.
             "image_extra": list(image_extra or []),
             "ocr_extra": list(ocr_extra or []),
-            # Anh nao co duong dan chua chuoi nay -> split "validation" (thay cho phep chia
-            # 95/5 tuy tien theo ten file). De None thi giu hanh vi cu.
+            # TEN THU MUC (khop dung, khong phai chuoi con) chua anh validation. De None
+            # thi giu phep chia 95/5 cu.
             "val_dir_hint": (val_dir_hint or "").strip() or None,
+            # Cac TEN THU MUC bi LOAI HAN khoi corpus pretrain (vd tap test cua benchmark).
+            "exclude_dir_hints": [str(x).strip() for x in (exclude_dir_hints or []) if str(x).strip()],
         }
 
     def prepare(self, dataset_name: str) -> Dict[str, Any]:
@@ -530,8 +546,14 @@ class DatasetHubLoader:
             img_index = _file_index(img_root, _is_img)
             ocr_index = _file_index(ocr_root, _is_ocr) if (ocr_root and os.path.isdir(ocr_root)) else {}
             
-            items = []
+            excl = spec.get("exclude_dir_hints") or []
+            items, n_excl = [], 0
             for fname, fpath in img_index.items():
+                # LOAI TRUOC: tap test cua benchmark khong duoc vao pretrain duoi bat ky
+                # vai tro nao (ke ca val).
+                if excl and any(_path_has_dir(fpath, e) for e in excl):
+                    n_excl += 1
+                    continue
                 ocr_path = _find_ocr_match(fname, ocr_index)
                 if ocr_path is not None and os.path.exists(ocr_path):
                     items.append({
@@ -539,6 +561,8 @@ class DatasetHubLoader:
                         "image_path": fpath,
                         "ocr_path": ocr_path,
                     })
+            if n_excl:
+                print(f"ℹ️ [Hub] '{dataset_name}': loai {n_excl} anh thuoc thu muc {excl}.")
             
             print(f"ℹ️ [Hub] Dataset '{dataset_name}': Quét thấy {len(img_index)} ảnh và {len(ocr_index)} file OCR. Khớp thành công: {len(items)} cặp.")
             if len(items) == 0:
@@ -549,10 +573,10 @@ class DatasetHubLoader:
             items.sort(key=lambda x: x["image_filename"])
             hint = spec.get("val_dir_hint")
             if hint:
-                # Split THAT theo thu muc: anh nam trong thu muc chua `hint` la validation.
-                # Tot hon phep cat 95/5 theo ten file da sap xep, vi val luc do la mot tap
-                # duoc dinh nghia san, tach hoan toan khoi train.
-                n_val = sum(1 for it in items if hint in it["image_path"].replace("\\", "/"))
+                # Split THAT theo thu muc: anh nam trong thu muc TEN DUNG BANG `hint` la
+                # validation. Tot hon phep cat 95/5 theo ten file da sap xep, vi val luc do
+                # la mot tap duoc dinh nghia san, tach hoan toan khoi train.
+                n_val = sum(1 for it in items if _path_has_dir(it["image_path"], hint))
                 print(f"ℹ️ [Hub] '{dataset_name}': chia split theo thu muc '{hint}' -> "
                       f"{n_val} val / {len(items) - n_val} train.")
                 if n_val == 0:
@@ -563,7 +587,7 @@ class DatasetHubLoader:
 
             for idx, it in enumerate(items):
                 if hint:
-                    split = "validation" if hint in it["image_path"].replace("\\", "/") else "train"
+                    split = "validation" if _path_has_dir(it["image_path"], hint) else "train"
                 else:
                     split = "validation" if idx >= len(items) - n_val else "train"
                 rows.append({
