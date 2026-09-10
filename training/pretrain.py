@@ -740,6 +740,45 @@ def main(args_list=None):
             print("❌ No datasets loaded. Please run scripts/prepare_dataset.py first.")
             return
 
+    # ── CHỐT CHẶN: CSV có đúng dataset mình yêu cầu không? ────────────────────
+    # pretrain.py nạp thẳng merged_*.csv ở OUTPUT_PATH mà trước đây không hề đối chiếu
+    # với --dataset_name. Kết hợp với run_pipeline hard-code ViTextVQA, pretrain đã âm
+    # thầm chạy trên tập DOWNSTREAM suốt. Nổ ngay tại đây còn hơn train 10 tiếng rồi mới
+    # phát hiện — nhất là vì nó còn kéo theo nhiễm chéo train/test với finetune.
+    _want = {d.strip().lower() for d in str(data_args.dataset_name).split(",") if d.strip()}
+    _have = set()
+    if "dataset" in train_df.columns:
+        _have = {str(x).strip().lower() for x in train_df["dataset"].dropna().unique()}
+    if _want and _have and not (_have & _want):
+        raise RuntimeError(
+            f"CSV ở {OUTPUT_PATH} chứa dataset {sorted(_have)} nhưng bạn yêu cầu "
+            f"{sorted(_want)}.\n"
+            f"  Nhiều khả năng merged_*.csv của stage khác đang nằm đè ở đó.\n"
+            f"  Cách sửa: đặt OUTPUT_PATH riêng cho pretrain (vd ./output/pretrain) rồi "
+            f"chạy lại scripts/prepare_dataset.py --config "
+            f"configs/data/VinText.yaml,configs/data/EVJVQA.yaml"
+        )
+
+    # ── PreSTU: MỘT ẢNH = MỘT MẪU ─────────────────────────────────────────────
+    # Mục tiêu pretrain là đọc chữ trên ảnh, không liên quan gì tới câu hỏi. Nếu CSV là
+    # dạng hỏi-đáp (ViTextVQA: 3.00 dòng/ảnh) thì cùng một ảnh bị lặp lại nhiều lần trong
+    # một epoch — vừa thổi phồng số step, vừa lệch phân phối về phía ảnh có nhiều câu hỏi,
+    # vừa nhân số lần model nhìn thấy cùng một ảnh (memorization).
+    for _nm, _df in (("train", train_df), ("val", val_df)):
+        if len(_df) and "image_path" in _df.columns:
+            _n0 = len(_df)
+            _dd = _df.drop_duplicates(subset="image_path").reset_index(drop=True)
+            if len(_dd) != _n0:
+                print(f"ℹ️ [pretrain] {_nm}: {_n0:,} dòng → {len(_dd):,} ảnh duy nhất "
+                      f"({_n0/max(len(_dd),1):.2f} dòng/ảnh). PreSTU tính 1 ảnh = 1 mẫu.")
+            if _nm == "train":
+                train_df = _dd
+            else:
+                val_df = _dd
+
+    print(f">>> [pretrain] Dataset: {sorted(_have) or data_args.dataset_name} | "
+          f"train={len(train_df):,} ảnh | val={len(val_df):,} ảnh | OUTPUT_PATH={OUTPUT_PATH}")
+
     if training_args.smoke_test:
         n_tr = int(getattr(training_args, "smoke_train_samples", 256))
         n_ev = int(getattr(training_args, "smoke_eval_samples", 64))
