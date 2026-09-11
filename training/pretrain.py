@@ -160,7 +160,8 @@ def _tensor_health(t):
             f"min={f.min().item():.3g} max={f.max().item():.3g} mean={f.mean().item():.3g}")
 
 
-def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, device, use_twc):
+def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, device, use_twc,
+                           max_bs: int = 8):
     """
     Run ONE batch forward + backward and (a) DUMP detailed diagnostics for every
     pretrain component and (b) ASSERT they are computed and numerically sound.
@@ -173,10 +174,16 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     print("🔬 [VERIFY] Single-batch pretrain method check (with diagnostics)")
     print("=" * 70)
 
-    k = min(8, len(dataset))
+    # Bam theo per_device_train_batch_size thay vi co dinh 8: buoc verify nay chay
+    # forward+backward DAY DU o do dai chuoi that, va tu khi heatmap lay tu attention thi
+    # con giu them [B,H,L,L]. Co dinh 8 trong khi train o batch 4 nghia la buoc kiem tra
+    # ton VRAM GAP DOI luc train -> OOM ngay truoc khi kip train. Van giu toi thieu 2 vi
+    # phan ITM pollute can batch > 1.
+    k = min(max(2, int(max_bs)), 8, len(dataset))
     if k < 2:
         print("⚠️ [VERIFY] Need >= 2 samples (ITM pollute needs batch>1); skipping.")
         return
+    print(f"   (verify batch = {k}, bam theo per_device_train_batch_size)")
 
     raw = [dataset[i] for i in range(k)]
     batch = data_collator(raw)
@@ -1071,6 +1078,7 @@ def main(args_list=None):
         _verify_pretrain_batch(
             model, data_collator, train_dataset,
             pretrain_loss_fn, pretrain_acc_fn, DEVICE, use_twc,
+            max_bs=int(getattr(training_args, "per_device_train_batch_size", 4) or 4),
         )
 
     # ── Upload TỪNG checkpoint NGAY khi lưu ──
