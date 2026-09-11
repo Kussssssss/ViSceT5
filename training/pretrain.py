@@ -897,9 +897,16 @@ def main(args_list=None):
 
     # Apply config overrides
     mode = model_args.loss_ablation_mode
-    # PRESTU DUAL-TARGET PRETRAINING:
-    # Character embeddings and OCR-augmentation (noise/correction) are completely omitted from pretrain
-    # to focus purely on Pixel-to-Text and Spatial BBox learning. They are reserved for finetune.
+    # PRESTU DUAL-TARGET PRETRAINING — trang thai THUC TE cua 4 module ablation:
+    #   QA-CLIP           : BAT  (ablation_use_qaclip)
+    #   AVF / VisualSearch: BAT  (ablation_use_vs + pretrain_use_vs)
+    #   OCR Consformer    : BAT  (ablation_use_ocr) -> chay _encode_ocr_features, tuc dung
+    #                       ca 5 luong dac trung OCR: text + char + box + det + rec.
+    #                       Char embedding CO chay (comment cu ghi la khong — da sai tu khi
+    #                       bo gate `not self.pretrain` cho nhanh OCR).
+    #   OCR Augmentation  : TAT  — day la augmentation DU LIEU (_findRelatedOCR_plain), no
+    #                       khong so huu tham so rieng nao, chi lam chuoi OCR dai gap doi.
+    #                       Tat o pretrain KHONG de lai tham so nao chua duoc huan luyen.
     use_twc = False
     use_ocr_aug = False
     
