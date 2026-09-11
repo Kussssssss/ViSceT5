@@ -20,6 +20,7 @@ vision_unfreeze_last_n: 4
 pretrain_use_vs: true
 vs_t5_guided: true
 vs_crop_encoder: "clip"
+vs_relevance_source: "attention"
 
 output_dir: "./output/pretrain"
 logging_dir: "./output/pretrain/logs"

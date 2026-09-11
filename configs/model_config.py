@@ -88,6 +88,7 @@ class OpenViVQAConfig(PretrainedConfig):
         pretrain_use_vs: bool = True,
         vs_t5_guided: bool = True,
         vs_crop_encoder: str = "clip",
+        vs_relevance_source: str = "attention",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -175,3 +176,4 @@ class OpenViVQAConfig(PretrainedConfig):
         self.pretrain_use_vs = bool(pretrain_use_vs)
         self.vs_t5_guided = bool(vs_t5_guided)
         self.vs_crop_encoder = str(vs_crop_encoder)
+        self.vs_relevance_source = str(vs_relevance_source)
