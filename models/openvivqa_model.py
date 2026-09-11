@@ -423,6 +423,31 @@ class OpenViVQAModel(PreTrainedModel):
         if return_attn: out["image_features_full"] = img_hs
         return out
 
+    def _encoder_last_attention(self, hs_prev: torch.Tensor,
+                                attn_mask: torch.Tensor) -> torch.Tensor:
+        """Ma tran attention CUA TANG ENCODER CUOI -> [B, H, L, L], tinh lai chinh xac.
+
+        Vi sao khong dung `output_attentions=True`: HF tra ve attention cua CA 12 tang, tuc
+        giu 12 x [B,H,L,L] (~1.1GB o B=4, L=700) va ep T5 bo SDPA/flash. Ta chi can tang
+        CUOI, nen tinh lai tu hidden_states[-2] bang chinh q/k cua tang do -> it hon ~12
+        lan. Da doi chieu voi output_attentions=True: sai lech 0.000e+00.
+
+        Ba chi tiet rieng cua T5 phai giu dung: pre-norm (layer_norm TRUOC q/k), KHONG
+        chia sqrt(d), va relative position bias tinh o block 0 roi dung chung moi tang.
+        """
+        enc = self.vit5.encoder
+        lay = enc.block[-1].layer[0]
+        sa = lay.SelfAttention
+        B, L, _ = hs_prev.shape
+        H, dk = sa.n_heads, sa.key_value_proj_dim
+        x = lay.layer_norm(hs_prev)
+        q = sa.q(x).view(B, L, H, dk).transpose(1, 2)
+        k = sa.k(x).view(B, L, H, dk).transpose(1, 2)
+        scores = torch.matmul(q.float(), k.float().transpose(-1, -2))
+        pb = enc.block[0].layer[0].SelfAttention.compute_bias(L, L, device=scores.device)
+        ext = (1.0 - attn_mask[:, None, None, :].float()) * -1e9
+        return torch.softmax(scores + pb.float() + ext, dim=-1)
+
     def _avf_crop_tokens(self, vs_out, device, B, D,
                          txt_emb=None, txt_mask=None, fuse_with_text=True):
         """Token đặc trưng của vùng crop cho AVFFusion.
@@ -954,10 +979,16 @@ class OpenViVQAModel(PreTrainedModel):
         # chỉ bật output_attentions khi thật sự debug. Bật nó ép T5 bỏ SDPA/flash và giữ
         # attention của cả 12 tầng ([B,H,L,L], L~600-700) → hàng GB VRAM vô ích.
         want_enc_attn = bool(return_visual_search_debug)
+        # Nguon heatmap cho AVF: "attention" (mac dinh, dung mo ta) hoac "hidden".
+        _rel_src = str(getattr(self.config, "vs_relevance_source", "attention")).lower().strip()
+        # Duong "attention" can hidden_states[-2] lam dau vao tinh lai tang cuoi. Chi la
+        # [B,L,D] x 13 (~110MB o B=4,L=700), re hon nhieu so voi giu attention 12 tang.
+        _need_hs = bool(run_t5_guided_vs and _rel_src == "attention")
         enc_out = self.vit5.encoder(
             inputs_embeds=fused_seq,
             attention_mask=fused_mask,
             output_attentions=want_enc_attn,
+            output_hidden_states=_need_hs,
             return_dict=True
         )
         if torch.isnan(enc_out.last_hidden_state).any(): print("🚨 [FORWARD CHECK] enc_out.last_hidden_state has NaN")
@@ -967,25 +998,38 @@ class OpenViVQAModel(PreTrainedModel):
         # ----------------------------------------------------
         img_relevance = None
         if run_t5_guided_vs:
-            # ── RELEVANCE MAP (thay cho attention của encoder) ──────────────────────
-            # Điểm liên quan của mỗi patch = tích vô hướng giữa biểu diễn ẢNH sau encoder
-            # và vector chỉ dẫn gộp từ MỌI token KHÔNG-ảnh (prompt/câu hỏi + đặc trưng OCR
-            # + target query), lấy masked-mean nên token PAD không tham gia.
-            #
-            # Vì sao không dùng attention nữa:
-            #   • giống hệt nhau ở pretrain và finetune ⇒ AVF chuyển giao được;
-            #   • khả vi và ĐƯỢC GIÁM SÁT trực tiếp bởi grounding loss bên dưới, nên chất
-            #     lượng định vị là thứ được HỌC chứ không phải hy vọng attention tự đúng;
-            #   • không cần output_attentions ⇒ không mất SDPA/flash, không giữ [B,H,L,L]×12.
-            # Ảnh đã đi qua 12 tầng self-attention CÙNG với OCR nên lát ảnh này đã mang
-            # ngữ cảnh OCR — đúng điều cần để crop trúng vùng chữ đang được hỏi tới.
-            _enc_hs = enc_out.last_hidden_state
+            # ── HEATMAP CHO AVF ─────────────────────────────────────────────────────
+            # Hang query = MOI token KHONG-phai-anh (prompt/cau hoi + dac trung OCR +
+            # target query); PAD bi loai khoi phep trung binh.
             _q_mask = fused_mask.clone()
             _q_mask[:, img_start:img_end] = 0
-            _w = _q_mask.unsqueeze(-1).to(_enc_hs.dtype)
-            _ref = (_enc_hs * _w).sum(1) / _w.sum(1).clamp_min(1e-6)          # [B, D]
-            _img_h = _enc_hs[:, img_start:img_end, :]                          # [B, 196, D]
-            img_relevance = torch.matmul(_img_h, _ref.unsqueeze(-1)).squeeze(-1) / math.sqrt(D)
+
+            if _rel_src == "attention":
+                # ĐÚNG THIẾT KẾ: lấy thẳng MA TRẬN ATTENTION của ViT5 encoder. Sau khi
+                # [text ; 196 patch ảnh ; đặc trưng OCR ; target query] cùng đi qua
+                # self-attention, ma trận này đã tính độ liên quan giữa MỌI cặp token —
+                # kể cả (token OCR → patch ảnh). Ta lấy đúng lát cắt đó:
+                #
+                #   relevance[b, j] = mean_{h, i ∈ token không-ảnh} attn[b, h, i, j]
+                #
+                # Mỗi HÀNG attention tổng bằng 1 trên TOÀN BỘ key. Ta lấy trung bình theo
+                # chiều HÀNG (query) và GIỮ chiều CỘT (patch) nên giá trị BIẾN THIÊN theo
+                # patch — khác hẳn lỗi cũ ở QA-CLIP, nơi phép mean lấy đúng theo chiều vừa
+                # được softmax chuẩn hoá nên ra hằng số.
+                _attn = self._encoder_last_attention(enc_out.hidden_states[-2], fused_mask)
+                _qw = _q_mask.float().unsqueeze(1).unsqueeze(-1)              # [B,1,L,1]
+                _a_img = _attn[:, :, :, img_start:img_end]                    # [B,H,L,196]
+                img_relevance = ((_a_img * _qw).sum(dim=(1, 2))
+                                 / _qw.sum(dim=(1, 2)).clamp_min(1e-6))       # [B,196]
+                del _attn, _a_img
+            else:
+                # Dự phòng: tích vô hướng giữa biểu diễn ảnh sau encoder và vector chỉ dẫn
+                # gộp. Rẻ hơn (không cần hidden_states) nhưng KHÔNG phải attention thật.
+                _enc_hs = enc_out.last_hidden_state
+                _w = _q_mask.unsqueeze(-1).to(_enc_hs.dtype)
+                _ref = (_enc_hs * _w).sum(1) / _w.sum(1).clamp_min(1e-6)      # [B, D]
+                _img_h = _enc_hs[:, img_start:img_end, :]                      # [B, 196, D]
+                img_relevance = torch.matmul(_img_h, _ref.unsqueeze(-1)).squeeze(-1) / math.sqrt(D)
             img_relevance = torch.nan_to_num(img_relevance, nan=0.0, posinf=1e4, neginf=-1e4)
 
             # detach cho bước CHỌN vùng cắt: crop là phép không khả vi (cắt PIL), giữ graph

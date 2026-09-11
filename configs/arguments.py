@@ -68,6 +68,15 @@ class ModelArguments:
                           "patch grid the model reasons over; 1000 bins spent capacity on precision "
                           "the evidence cannot support."}
     )
+    vs_relevance_source: str = field(
+        default="attention",
+        metadata={"help": "Where the AVF heatmap comes from. 'attention' (default) takes the "
+                          "ViT5 encoder's last-layer self-attention, rows = non-image tokens "
+                          "(prompt + OCR features + target query), columns = the 196 image "
+                          "patches - so OCR context has demonstrably mixed into the map. "
+                          "'hidden' uses a dot product between the fused image states and a "
+                          "pooled instruction vector: cheaper, but not a real attention map."}
+    )
     max_target_words: int = field(
         default=5,
         metadata={"help": "Cap on how many OCR words the PreSTU target cluster may hold. "

@@ -855,6 +855,7 @@ def main(args_list=None):
     config.pretrain_use_vs = bool(getattr(model_args, "pretrain_use_vs", True))
     config.vs_t5_guided = bool(getattr(model_args, "vs_t5_guided", True))
     config.vs_crop_encoder = str(getattr(model_args, "vs_crop_encoder", "clip"))
+    config.vs_relevance_source = str(getattr(model_args, "vs_relevance_source", "attention"))
     config.num_bbox_bins = int(getattr(model_args, "num_bbox_bins", 1000))
     config.lambda_bbox_ce = float(getattr(model_args, "lambda_bbox_ce", 0.3))
     config.lambda_ground = float(getattr(model_args, "lambda_ground", 0.5))
@@ -863,7 +864,8 @@ def main(args_list=None):
           f"vs(AVF)={config.ablation_use_vs} (t5_guided={config.vs_t5_guided}) | "
           f"ocr={config.ablation_use_ocr} | bbox_bins={config.num_bbox_bins} | "
           f"lambda_bbox={config.lambda_bbox_ce} lambda_ground={config.lambda_ground} | "
-          f"crop_encoder={config.vs_crop_encoder} | max_target_words={config.max_target_words}")
+          f"crop_encoder={config.vs_crop_encoder} | max_target_words={config.max_target_words} | "
+          f"relevance_source={config.vs_relevance_source}")
 
     model = OpenViVQAModel(config)
     if ckpt_to_load:
