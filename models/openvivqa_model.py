@@ -1121,8 +1121,23 @@ class OpenViVQAModel(PreTrainedModel):
                     _q = _q / _q.sum(dim=-1, keepdim=True).clamp_min(1e-8)
                     _terms = []
                     if img_relevance is not None:
-                        _lr = torch.log_softmax(img_relevance.float(), dim=-1)[_valid]
-                        _terms.append(-(_q * _lr).sum(-1).mean())
+                        _r = img_relevance.float()[_valid]
+                        if _rel_src == "attention":
+                            # KHONG dung log_softmax o day. Ban do attention DA LA dai luong
+                            # dang xac suat, nam gon trong [0,1] (trung binh cua cac xac suat
+                            # attention). Dua no qua softmax tuc coi no la LOGIT: ty le lon
+                            # nhat con lai chi e^1 = 2.72, trong khi ban do tho co ty le
+                            # max/min = 180. Phep nen do dat mot TRAN CUNG len loss: do duoc
+                            # CE = 4.3208 ngay ca voi ban do HOAN HAO, so voi toi uu that
+                            # 1.0465 -> chi con 0.96 nat kha dung thay vi 4.23 (hep gap 4,4
+                            # lan). Chuan hoa truc tiep giu nguyen dai dong.
+                            _p = _r.clamp_min(0)
+                            _p = _p / _p.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+                            _terms.append(-(_q * _p.clamp_min(1e-8).log()).sum(-1).mean())
+                        else:
+                            # Duong "hidden" la tich vo huong, KHONG bi chan -> dung la logit,
+                            # log_softmax moi la phep dung.
+                            _terms.append(-(_q * torch.log_softmax(_r, dim=-1)).sum(-1).mean())
                     _cm = img_pack.get("patch_scores")
                     if _cm is not None and _cm.dim() == 2 and _cm.size(1) == img_len and _cm.requires_grad:
                         _pc = _cm.float()[_valid]
