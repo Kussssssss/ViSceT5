@@ -26,6 +26,16 @@ class ModelArguments:
         default=True,
         metadata={"help": "Whether to use OCR Consformer"}
     )
+    ablation_use_mra: bool = field(
+        default=False,
+        metadata={"help": "Whether to use MRA (Mixture-of-Resolution Adaptation): a high-res "
+                          "ConvNeXt pathway (default 448px) whose stage features are injected "
+                          "into the last ViT layers via MR-Adapters, keeping 14x14 tokens."}
+    )
+    mra_high_res: int = field(
+        default=448,
+        metadata={"help": "Input resolution of the MRA high-resolution ConvNeXt pathway."}
+    )
     loss_ablation_mode: str = field(
         default="all",
         metadata={"help": "Pretrain loss ablation mode: 'all', 'only_itm_mlm', or 'only_twc_ocr_aug'"}
