@@ -166,6 +166,58 @@ class MMCLIPEncoderLayer(nn.Module):
             outputs += (attn_weights,)
         return outputs
 
+class MRAdapter(nn.Module):
+    """Mixture-of-Resolution Adapter (Luo et al., 2024, Eq. 3-4).
+
+    Bom dac trung ConvNeXt do-phan-giai-cao vao token ViT do-phan-giai-thap tai MOT
+    diem stage, giu nguyen luoi khong gian 14x14:
+
+        F' = F_vl + f_l(F_vl) + g . f_h(F_vh)
+        g  = tanh(W2 . GELU(W1 . pool([f_l(F_vl); f_h(F_vh)])))
+
+    - f_l: conv block tren luoi ViT (nhanh residual).
+    - f_h: MLP dua kenh ConvNeXt (d_cnn) ve d_vit.
+    - g  : cong dong theo kenh, khoi tao 0 (W2=0) -> luc dau nhanh high-res TAT,
+           model bat dau tu dung CLIP thuan roi mo dan (an toan nhu ReZero).
+    """
+
+    def __init__(self, d_vit: int, d_cnn: int, grid: int = 14):
+        super().__init__()
+        self.grid = int(grid)
+        # f_l: depthwise 3x3 + pointwise MLP tren luoi ViT
+        self.dwconv = nn.Conv2d(d_vit, d_vit, kernel_size=3, padding=1, groups=d_vit)
+        self.ln_l = nn.LayerNorm(d_vit)
+        self.pw1 = nn.Linear(d_vit, d_vit)
+        self.pw2 = nn.Linear(d_vit, d_vit)
+        # f_h: MLP kenh ConvNeXt -> d_vit
+        self.ln_h = nn.LayerNorm(d_cnn)
+        self.fh = nn.Linear(d_cnn, d_vit)
+        # cong g
+        self.w1 = nn.Linear(2 * d_vit, d_vit // 2)
+        self.w2 = nn.Linear(d_vit // 2, d_vit)
+        # Init W2 NHO nhung KHAC 0: cong g bat dau ~0 (khoi dong nhe nhang, gan CLIP thuan)
+        # nhung gradient VAN chay vao nhanh high-res tu buoc dau. Neu zero-init hoan toan thi
+        # g=0 lam ca nhanh f_h lan duong gate->f_h deu 0 -> ConvNeXt bi dong bang 1 buoc.
+        nn.init.normal_(self.w2.weight, std=1e-3)
+        nn.init.zeros_(self.w2.bias)
+
+    def _f_l(self, x):                    # x: [B, N, d_vit], N = grid*grid
+        B, N, C = x.shape
+        g = self.grid
+        h = x.transpose(1, 2).reshape(B, C, g, g)
+        h = self.dwconv(h).reshape(B, C, N).transpose(1, 2)   # [B,N,C]
+        h = self.ln_l(h)
+        h = self.pw2(F.gelu(self.pw1(h)))
+        return h
+
+    def forward(self, f_vl, f_vh):        # f_vl:[B,N,d_vit]  f_vh:[B,N,d_cnn]
+        fl = self._f_l(f_vl)                              # [B,N,d_vit]
+        fh = self.fh(self.ln_h(f_vh))                     # [B,N,d_vit]
+        pooled = torch.cat([fl.mean(1), fh.mean(1)], dim=-1)   # [B, 2*d_vit]
+        g = torch.tanh(self.w2(F.gelu(self.w1(pooled))))       # [B, d_vit]
+        return f_vl + fl + g.unsqueeze(1) * fh
+
+
 class InstructCLIPEncoder(nn.Module):
     def __init__(self, config: CLIPConfig):
         super().__init__()
@@ -179,6 +231,10 @@ class InstructCLIPEncoder(nn.Module):
             modules_list.append(layer(config))
         self.layers = nn.ModuleList(modules_list)
         self.gradient_checkpointing = False
+        # MRA (Mixture-of-Resolution). Mac dinh tat; OpenViVQAModel gan vao khi bat.
+        self.mra_adapters = None          # nn.ModuleList cac MRAdapter
+        self.mra_layer_ids = []           # index tang ViT sau do se bom (vd [5,8,11])
+        self._mra_hi = None               # list dac trung ConvNeXt [B,N,d_cnn], dat moi forward
 
     def forward(
         self,
@@ -197,7 +253,7 @@ class InstructCLIPEncoder(nn.Module):
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
         hidden_states = inputs_embeds
-        for encoder_layer in self.layers:
+        for _li, encoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 encoder_states = encoder_states + (hidden_states,)
             if self.gradient_checkpointing and self.training:
@@ -239,6 +295,15 @@ class InstructCLIPEncoder(nn.Module):
                         instruct_masks=instruct_masks,
                     )
             hidden_states = layer_outputs[0]
+            # --- MRA: bom high-res sau tang nay neu duoc cau hinh ---
+            if (self.mra_adapters is not None and self._mra_hi is not None
+                    and _li in self.mra_layer_ids):
+                _k = self.mra_layer_ids.index(_li)
+                _hi = self._mra_hi[_k]                       # [B, N, d_cnn]
+                _cls = hidden_states[:, :1, :]               # token CLS giu nguyen
+                _pat = hidden_states[:, 1:, :]               # [B, N, d_vit] = 14x14
+                _pat = self.mra_adapters[_k](_pat, _hi.to(_pat.dtype))
+                hidden_states = torch.cat([_cls, _pat], dim=1)
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
         if output_hidden_states:

@@ -187,6 +187,9 @@ def main(args_list=None):
         tokenizer = AutoTokenizer.from_pretrained("VietAI/vit5-base")
         config = OpenViVQAConfig()
 
+    # MRA phai duoc build o init -> gan flag len config TRUOC khi tao model.
+    config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
+    config.mra_high_res = int(getattr(model_args, "mra_high_res", 448))
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
@@ -223,6 +226,7 @@ def main(args_list=None):
     model.config.ablation_use_qaclip = model_args.ablation_use_qaclip
     model.config.ablation_use_vs = model_args.ablation_use_vs
     model.config.ablation_use_ocr = model_args.ablation_use_ocr
+    model.config.ablation_use_mra = bool(getattr(model_args, 'ablation_use_mra', False))
     model.config.use_twc = False  # TWC is disabled during finetuning
     model.config.use_ocr_aug_finetune = use_ocr_aug
     model.to(DEVICE)
