@@ -109,7 +109,8 @@ def run():
                                     ("ABLATION_USE_OCR", "--ablation_use_ocr"),
                                     ("ABLATION_USE_MRA", "--ablation_use_mra"),
                                     ("MRA_HIGH_RES", "--mra_high_res")]:
-                    _av = os.environ.get(_ak, "").strip()
+                    # split('#'): bỏ comment lỡ dính vào value (vd %env ... # ghi chú).
+                    _av = os.environ.get(_ak, "").split("#")[0].strip()
                     if _av:
                         sys.argv.extend([_aflag, _av])
                         print(f">>> [finetune] {_aflag} = {_av}")
@@ -124,7 +125,7 @@ def run():
                                     ("DATALOADER_NUM_WORKERS", "--dataloader_num_workers"),
                                     ("BF16", "--bf16"),
                                     ("TF32", "--tf32")]:
-                    _tv = os.environ.get(_tk, "").strip()
+                    _tv = os.environ.get(_tk, "").split("#")[0].strip()
                     if _tv:
                         sys.argv.extend([_tflag, _tv])
                         print(f">>> [finetune] {_tflag} = {_tv}")
