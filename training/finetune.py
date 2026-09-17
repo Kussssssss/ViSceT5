@@ -189,7 +189,7 @@ def main(args_list=None):
 
     # MRA phai duoc build o init -> gan flag len config TRUOC khi tao model.
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
-    config.mra_high_res = int(getattr(model_args, "mra_high_res", 448))
+    config.mra_high_res = int(getattr(model_args, "mra_high_res", 512))
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
