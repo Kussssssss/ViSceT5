@@ -220,10 +220,10 @@ class OpenViVQAModel(PreTrainedModel):
         )
 
         # ── MRA: Mixture-of-Resolution Adaptation ──────────────────────────────
-        # Nhanh CAO: ConvNeXt @ mra_high_res (mac dinh 512) tren ANH GOC -> 3 stage cuoi.
+        # Nhanh CAO: ConvNeXt @ mra_high_res (mac dinh 768) tren ANH GOC -> 3 stage cuoi.
         # Bom vao 3 tang ViT cuoi qua MRAdapter, giu 14x14 = 196 token (khong phinh chuoi).
         self.use_mra = bool(getattr(self.config, "ablation_use_mra", False))
-        self.mra_high_res = int(getattr(self.config, "mra_high_res", 512))
+        self.mra_high_res = int(getattr(self.config, "mra_high_res", 768))
         if self.use_mra:
             # ConvNeXt do-phan-giai-cao: tai dung backbone cua visual_search neu co,
             # neu khong thi nap rieng mot ConvNeXtV2-tiny.
@@ -232,7 +232,7 @@ class OpenViVQAModel(PreTrainedModel):
                 from transformers import ConvNextV2Model
                 self.mra_cnn = ConvNextV2Model.from_pretrained(
                     str(getattr(self.config, "vs_backbone", "facebook/convnextv2-tiny-22k-224")))
-            # 3 stage cuoi cua ConvNeXtV2-tiny @512: (192, 64x64), (384, 32x32), (768, 16x16)
+            # 3 stage cuoi cua ConvNeXtV2-tiny @768: (192, 96x96), (384, 48x48), (768, 24x24)
             # -> lop align adaptive_avg_pool2d ha ve 14x14 cho khop luoi patch cua ViT.
             _cnn_dims = list(getattr(self.mra_cnn.config, "hidden_sizes", [96, 192, 384, 768]))[-3:]
             _layer_ids = list(getattr(self.config, "mra_layer_ids", [5, 8, 11]))
