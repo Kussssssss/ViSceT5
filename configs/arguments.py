@@ -29,11 +29,11 @@ class ModelArguments:
     ablation_use_mra: bool = field(
         default=False,
         metadata={"help": "Whether to use MRA (Mixture-of-Resolution Adaptation): a high-res "
-                          "ConvNeXt pathway (default 512px) whose stage features are injected "
+                          "ConvNeXt pathway (default 768px) whose stage features are injected "
                           "into the last ViT layers via MR-Adapters, keeping 14x14 tokens."}
     )
     mra_high_res: int = field(
-        default=512,
+        default=768,
         metadata={"help": "Input resolution of the MRA high-resolution ConvNeXt pathway."}
     )
     loss_ablation_mode: str = field(
