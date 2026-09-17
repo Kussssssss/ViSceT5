@@ -176,8 +176,9 @@ class MRAdapter(nn.Module):
         g  = tanh(W2 . GELU(W1 . pool([f_l(F_vl); f_h(F_vh)])))
 
     - f_l: conv block tren luoi ViT (nhanh residual).
-    - f_h: MLP dua kenh ConvNeXt (d_cnn) ve d_vit.
-    - g  : cong dong theo kenh, khoi tao 0 (W2=0) -> luc dau nhanh high-res TAT,
+    - f_h: MLP 2 lop dua kenh ConvNeXt (d_cnn) ve d_vit (dung paper).
+    - g  : cong dong theo kenh, W1 in R^{d x 2d}, W2 in R^{d x d} (dung paper Eq.4);
+           khoi tao ~0 (W2 std=1e-3) -> luc dau nhanh high-res gan TAT,
            model bat dau tu dung CLIP thuan roi mo dan (an toan nhu ReZero).
     """
 
@@ -189,12 +190,17 @@ class MRAdapter(nn.Module):
         self.ln_l = nn.LayerNorm(d_vit)
         self.pw1 = nn.Linear(d_vit, d_vit)
         self.pw2 = nn.Linear(d_vit, d_vit)
-        # f_h: MLP kenh ConvNeXt -> d_vit
+        # f_h: MLP 2 lop kenh ConvNeXt -> d_vit (dung paper: "f_h is an MLP").
+        self.d_cnn = int(d_cnn)
         self.ln_h = nn.LayerNorm(d_cnn)
-        self.fh = nn.Linear(d_cnn, d_vit)
-        # cong g
-        self.w1 = nn.Linear(2 * d_vit, d_vit // 2)
-        self.w2 = nn.Linear(d_vit // 2, d_vit)
+        self.fh = nn.Sequential(
+            nn.Linear(d_cnn, d_vit),
+            nn.GELU(),
+            nn.Linear(d_vit, d_vit),
+        )
+        # cong g: W1 in R^{d x 2d}, W2 in R^{d x d} (dung paper Eq.4).
+        self.w1 = nn.Linear(2 * d_vit, d_vit)
+        self.w2 = nn.Linear(d_vit, d_vit)
         # Init W2 NHO nhung KHAC 0: cong g bat dau ~0 (khoi dong nhe nhang, gan CLIP thuan)
         # nhung gradient VAN chay vao nhanh high-res tu buoc dau. Neu zero-init hoan toan thi
         # g=0 lam ca nhanh f_h lan duong gate->f_h deu 0 -> ConvNeXt bi dong bang 1 buoc.
