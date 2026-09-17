@@ -86,6 +86,30 @@ def run():
                     sys.argv.extend(["--mlm_ocr_in_text", _moit])
                     print(f">>> [pretrain] mlm_ocr_in_text = {_moit}")
 
+                # Ablation module + MRA cho pretrain (đặt qua env, không sửa yaml).
+                # split('#'): bỏ comment lỡ dính vào value (vd %env ... # ghi chú).
+                for _ak, _aflag in [("ABLATION_USE_QACLIP", "--ablation_use_qaclip"),
+                                    ("ABLATION_USE_VS", "--ablation_use_vs"),
+                                    ("ABLATION_USE_OCR", "--ablation_use_ocr"),
+                                    ("ABLATION_USE_MRA", "--ablation_use_mra"),
+                                    ("MRA_HIGH_RES", "--mra_high_res")]:
+                    _av = os.environ.get(_ak, "").split("#")[0].strip()
+                    if _av:
+                        sys.argv.extend([_aflag, _av])
+                        print(f">>> [pretrain] {_aflag} = {_av}")
+
+                # Siêu tham số train chỉnh qua env cho GPU mạnh (vd A100) — không sửa yaml.
+                for _tk, _tflag in [("PER_DEVICE_TRAIN_BATCH_SIZE", "--per_device_train_batch_size"),
+                                    ("PER_DEVICE_EVAL_BATCH_SIZE", "--per_device_eval_batch_size"),
+                                    ("GRADIENT_ACCUMULATION_STEPS", "--gradient_accumulation_steps"),
+                                    ("DATALOADER_NUM_WORKERS", "--dataloader_num_workers"),
+                                    ("BF16", "--bf16"),
+                                    ("TF32", "--tf32")]:
+                    _tv = os.environ.get(_tk, "").split("#")[0].strip()
+                    if _tv:
+                        sys.argv.extend([_tflag, _tv])
+                        print(f">>> [pretrain] {_tflag} = {_tv}")
+
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":
                     print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
@@ -285,6 +309,33 @@ def run():
                     if _fv:
                         sys.argv.extend([_fflag, _fv])
                         print(f">>> [finetune] {_fflag} = {_fv}")
+
+                # Ablation module + MRA (đặt qua env, không cần sửa yaml).
+                for _ak, _aflag in [("ABLATION_USE_QACLIP", "--ablation_use_qaclip"),
+                                    ("ABLATION_USE_VS", "--ablation_use_vs"),
+                                    ("ABLATION_USE_OCR", "--ablation_use_ocr"),
+                                    ("ABLATION_USE_MRA", "--ablation_use_mra"),
+                                    ("MRA_HIGH_RES", "--mra_high_res")]:
+                    # split('#'): bỏ comment lỡ dính vào value (vd %env ... # ghi chú).
+                    _av = os.environ.get(_ak, "").split("#")[0].strip()
+                    if _av:
+                        sys.argv.extend([_aflag, _av])
+                        print(f">>> [finetune] {_aflag} = {_av}")
+
+                # Siêu tham số train chỉnh qua env cho GPU mạnh (vd A100) — không sửa yaml.
+                #  TF32=true  : bật TensorFloat-32 (A100), tăng tốc fp32 gần như không đổi số học.
+                #  BF16=true  : mixed bf16 (nhanh hơn nhưng ĐỔI precision so với baseline fp32).
+                #  *_BATCH_SIZE / *_ACCUMULATION: giữ effective-batch = train_bs × accum để công bằng.
+                for _tk, _tflag in [("PER_DEVICE_TRAIN_BATCH_SIZE", "--per_device_train_batch_size"),
+                                    ("PER_DEVICE_EVAL_BATCH_SIZE", "--per_device_eval_batch_size"),
+                                    ("GRADIENT_ACCUMULATION_STEPS", "--gradient_accumulation_steps"),
+                                    ("DATALOADER_NUM_WORKERS", "--dataloader_num_workers"),
+                                    ("BF16", "--bf16"),
+                                    ("TF32", "--tf32")]:
+                    _tv = os.environ.get(_tk, "").split("#")[0].strip()
+                    if _tv:
+                        sys.argv.extend([_tflag, _tv])
+                        print(f">>> [finetune] {_tflag} = {_tv}")
 
                 # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
                 if os.environ.get("MOCK_TEST", "").lower() == "true":

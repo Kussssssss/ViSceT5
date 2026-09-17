@@ -8,7 +8,7 @@ scope in the notebook source; it is restored here as a proper class method.
 """
 
 from configs.model_config import OpenViVQAConfig
-from models.modules.qa_clip import QACLIPEncoder
+from models.modules.qa_clip import QACLIPEncoder, MRAdapter
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding, SpatialCirclePosition
 from models.modules.visual_search import VisualSearch, AVFFusion
@@ -17,7 +17,9 @@ import os
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
+from PIL import Image
 from typing import Optional, List, Dict, Any, Tuple
 
 from transformers import (
@@ -283,6 +285,35 @@ class OpenViVQAModel(PreTrainedModel):
                 dropout=0.1
             )
         self.vs_t5_guided = bool(getattr(self.config, "vs_t5_guided", True))
+
+        # ── MRA: Mixture-of-Resolution Adaptation ──────────────────────────────
+        # Nhanh CAO: ConvNeXt @ mra_high_res (mac dinh 768) tren ANH GOC -> 3 stage cuoi.
+        # Bom vao 3 tang ViT cuoi qua MRAdapter, giu 14x14 = 196 token (khong phinh chuoi).
+        self.use_mra = bool(getattr(self.config, "ablation_use_mra", False))
+        self.mra_high_res = int(getattr(self.config, "mra_high_res", 768))
+        if self.use_mra:
+            # ConvNeXt do-phan-giai-cao: tai dung backbone cua visual_search neu co,
+            # neu khong thi nap rieng mot ConvNeXtV2-tiny.
+            # visual_search chỉ được dựng khi ablation_use_vs=True; MRA thường chạy với VS=False
+            # nên self.visual_search có thể KHÔNG tồn tại → phải getattr trên self trước.
+            _vs = getattr(self, "visual_search", None)
+            self.mra_cnn = getattr(_vs, "cnn", None) if _vs is not None else None
+            if self.mra_cnn is None:
+                from transformers import ConvNextV2Model
+                self.mra_cnn = ConvNextV2Model.from_pretrained(
+                    str(getattr(self.config, "vs_backbone", "facebook/convnextv2-tiny-22k-224")))
+            # 3 stage cuoi cua ConvNeXtV2-tiny @768: (192, 96x96), (384, 48x48), (768, 24x24)
+            # -> lop align adaptive_avg_pool2d ha ve 14x14 cho khop luoi patch cua ViT.
+            _cnn_dims = list(getattr(self.mra_cnn.config, "hidden_sizes", [96, 192, 384, 768]))[-3:]
+            _layer_ids = list(getattr(self.config, "mra_layer_ids", [5, 8, 11]))
+            enc = self.qa_clip.vision_model.encoder
+            enc.mra_layer_ids = _layer_ids
+            enc.mra_adapters = nn.ModuleList([
+                MRAdapter(d_vit=self.d_model, d_cnn=int(dc), grid=14) for dc in _cnn_dims
+            ])
+            # Chuan hoa ImageNet cho ConvNeXt (dang buffer de theo device/dtype).
+            self.register_buffer("mra_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
+            self.register_buffer("mra_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
 
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
@@ -646,6 +677,30 @@ class OpenViVQAModel(PreTrainedModel):
     # =====================================================================
     # LUỒNG XỬ LÝ CHÍNH: HÀM FORWARD
     # =====================================================================
+    def _encode_mra_highres(self, pil_images, device):
+        """Nhanh CAO cua MRA: ConvNeXt tren ANH GOC @ mra_high_res -> 3 stage cuoi,
+        moi stage pool ve 14x14 va flatten [B,196,C]. Tra None neu tat MRA / thieu anh.
+
+        BAT BUOC dung anh GOC (pil_images), KHONG phai pixel_values 224 (da mat chi tiet).
+        """
+        if not getattr(self, "use_mra", False) or pil_images is None:
+            return None
+        hr = int(self.mra_high_res)
+        arrs = []
+        for im in pil_images:
+            im2 = im.convert("RGB").resize((hr, hr), Image.BICUBIC)
+            arrs.append(torch.from_numpy(np.asarray(im2, dtype=np.float32) / 255.0).permute(2, 0, 1))
+        x = torch.stack(arrs).to(device)                                   # [B,3,hr,hr] in [0,1]
+        x = (x - self.mra_mean.to(device)) / self.mra_std.to(device)
+        feats = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype),
+                             output_hidden_states=True).hidden_states
+        out = []
+        for st in feats[-3:]:                                              # 192,384,768
+            st = F.adaptive_avg_pool2d(st, (14, 14))                       # lop align -> [B,C,14,14]
+            B_, C_, _, _ = st.shape
+            out.append(st.reshape(B_, C_, 196).transpose(1, 2).to(self.target_dtype))  # [B,196,C]
+        return out
+
     def forward(
         self,
         pixel_values: Optional[torch.FloatTensor] = None,
@@ -717,8 +772,14 @@ class OpenViVQAModel(PreTrainedModel):
         D = self.d_model
 
         # ----------------------------------------------------
-        # 1. ABLATION MODULE: QACLIP
+        # 1. ABLATION MODULE: QACLIP (+ MRA high-res injection)
         # ----------------------------------------------------
+        # MRA: tính đặc trưng ConvNeXt @high-res từ ẢNH GỐC rồi gắn vào encoder ViT để
+        # MRAdapter bơm vào 3 tầng cuối. Phải gắn TRƯỚC khi gọi qa_clip, xoá ngay sau.
+        _mra_enc = self.qa_clip.vision_model.encoder if getattr(self, "use_mra", False) else None
+        if _mra_enc is not None:
+            _mra_enc._mra_hi = self._encode_mra_highres(pil_images, device)
+
         img_pack = self._encode_image(
             pixel_values=pixel_values_dev,
             device=device,
@@ -728,11 +789,17 @@ class OpenViVQAModel(PreTrainedModel):
             return_attn=return_visual_search_debug,
             need_attn_map=(use_vs and not run_t5_guided_vs), # chỉ early AVF cần patch_scores từ CLIP
         )
+        if _mra_enc is not None:
+            _mra_enc._mra_hi = None
 
         # ----------------------------------------------------
-        # 2. ABLATION MODULE: VISUAL SEARCH (AVF - EARLY PATH)
+        # 2. ABLATION MODULE: VISUAL SEARCH (AVF - EARLY PATH) — loại trừ với MRA
         # ----------------------------------------------------
-        if use_vs and not run_t5_guided_vs:
+        if getattr(self, "use_mra", False):
+            # MRA đã bơm high-res vào img_tokens ngay trong ViT (giữ 196 token) → KHÔNG chạy
+            # Visual Search nữa (tránh dùng ConvNeXt hai lần); img_tokens giữ nguyên.
+            vs_out = {}
+        elif use_vs and not run_t5_guided_vs:
             vs_out = self.visual_search(
                 img_tokens=img_pack["img_tokens"],
                 patch_scores=img_pack["patch_scores"],

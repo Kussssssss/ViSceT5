@@ -750,6 +750,8 @@ def main(args_list=None):
         tokenizer = safe_load_tokenizer("VietAI/vit5-base", use_fast=False)
         config = OpenViVQAConfig()
 
+    config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
+    config.mra_high_res = int(getattr(model_args, "mra_high_res", 768))
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
