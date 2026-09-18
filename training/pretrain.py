@@ -270,6 +270,9 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
                 f"spread={_spread:.2e}; nếu fail xem cos_txt/cos_img và raw_scale ở trên")
 
     # ── GEN checks (only when a generative decoder objective is active) ────
+    # gen_on: chỉ chạy khối check GEN khi có nhánh sinh hợp lệ (legacy gen path đặt
+    # out["gen_loss"]). PreSTU direct-loss đã được kiểm ở "[SplitOCR] loss" phía trên.
+    gen_on = out.get("gen_loss") is not None
     if gen_on:
         gl = out.get("gen_loss")
         chk("[GEN] gen_loss produced", gl is not None)
@@ -750,6 +753,13 @@ def main(args_list=None):
         tokenizer = safe_load_tokenizer("VietAI/vit5-base", use_fast=False)
         config = OpenViVQAConfig()
 
+    # Cờ ablation phải nằm trong config TRƯỚC khi dựng model: __init__ đọc ablation_use_vs
+    # để quyết định có dựng visual_search (ConvNeXt) hay không. Trước đây pretrain KHÔNG
+    # truyền cờ này nên --ablation_use_vs False bị bỏ qua → visual_search vẫn được dựng
+    # (và khi bật MRA thì mra_cnn/visual_search.cnn đụng nhau lúc save).
+    config.ablation_use_qaclip = bool(getattr(model_args, "ablation_use_qaclip", True))
+    config.ablation_use_vs = bool(getattr(model_args, "ablation_use_vs", True))
+    config.ablation_use_ocr = bool(getattr(model_args, "ablation_use_ocr", True))
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
     config.mra_high_res = int(getattr(model_args, "mra_high_res", 768))
     model = OpenViVQAModel(config)
