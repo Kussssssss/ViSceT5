@@ -1111,6 +1111,14 @@ class ViT5VQADataCollator:
             labels = target_tok.input_ids
             labels[labels == self.pad_id] = -100
 
+            # GEN-ONLY: chỉ giữ task sinh OCR text. Bỏ bbox (target_bbox_bins) và
+            # 'ground' (prefix_box_coords) -> forward chỉ tính text_loss. Vẫn giữ prefix
+            # TEXT trong prompt (ngữ cảnh), chỉ bỏ toạ độ hộp.
+            if bool(getattr(self, "pretrain_gen_only", True)):
+                target_bbox_bins = torch.full((B, 0, 4), -100, dtype=torch.long)
+                prefix_box_coords = torch.zeros(B, 0, 4, dtype=torch.float)
+                prefix_box_mask = torch.zeros(B, 0, dtype=torch.long)
+
             return {
                 "input_ids": prompt_tok.input_ids.to(pixel_values.device),
                 "attention_mask": prompt_tok.attention_mask.to(pixel_values.device),

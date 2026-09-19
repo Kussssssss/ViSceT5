@@ -762,6 +762,7 @@ def main(args_list=None):
     config.ablation_use_ocr = bool(getattr(model_args, "ablation_use_ocr", True))
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
     config.mra_high_res = int(getattr(model_args, "mra_high_res", 768))
+    config.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
@@ -852,6 +853,7 @@ def main(args_list=None):
     if hasattr(data_collator, "set_mode"):
         data_collator.set_mode(pretrain=True, mask_prob=0.15)
     data_collator.pretrain_ablation_mode = mode
+    data_collator.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
