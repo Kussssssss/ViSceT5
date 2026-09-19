@@ -89,6 +89,12 @@ class ModelArguments:
                           "bbox-prediction head and the prefix-box 'grounding' input). "
                           "True = pure pixel->text reading; False = legacy gen+bbox+ground."}
     )
+    pretrain_full_ocr_prob: float = field(
+        default=1.0,
+        metadata={"help": "Prob. that a PreSTU sample generates the ENTIRE image's OCR text with "
+                          "NO prefix (pure pixel->text). 1.0 = always full-read (no prefix crutch, "
+                          "max reading signal); <1.0 mixes in prefix->target spatial split."}
+    )
     use_ocr_aug_pretrain: bool = field(
         default=False,
         metadata={"help": "Whether to apply OCR augmentation in pretrain (default False)."}

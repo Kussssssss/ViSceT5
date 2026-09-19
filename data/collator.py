@@ -269,6 +269,15 @@ def _split_ocr_spatial_region(
             torch.zeros((0, 4), dtype=torch.long),
         )
 
+    # Pure OCR mode (prob = full_ocr_prob): No prefix, target is the ENTIRE image text.
+    # Đặt TRƯỚC nhánh N==1 để full_ocr_prob=1.0 luôn cho full-read (kể cả 1 từ).
+    if random.random() < full_ocr_prob:
+        p_words = []
+        p_b = torch.zeros((0, 4), dtype=torch.float)
+        t_words = list(tokens)
+        t_b = (boxes * 1000.0).long().clamp(0, 999)
+        return p_words, p_b, t_words, t_b
+
     if N == 1:
         if random.random() < 0.5:
             p_words, p_b = [], torch.zeros((0, 4), dtype=torch.float)
@@ -276,14 +285,6 @@ def _split_ocr_spatial_region(
         else:
             p_words, p_b = tokens, boxes.clone()
             t_words, t_b = tokens, (boxes * 1000.0).long().clamp(0, 999)
-        return p_words, p_b, t_words, t_b
-
-    # Pure OCR mode (prob = full_ocr_prob, e.g. 15%): No prefix, target is the entire image text
-    if random.random() < full_ocr_prob:
-        p_words = []
-        p_b = torch.zeros((0, 4), dtype=torch.float)
-        t_words = list(tokens)
-        t_b = (boxes * 1000.0).long().clamp(0, 999)
         return p_words, p_b, t_words, t_b
 
     # SPATIAL CLUSTERING:
@@ -1065,8 +1066,11 @@ class ViT5VQADataCollator:
                     # Sắp xếp theo trật tự đọc không gian: trên xuống dưới, trái sang phải (PreSTU Sec 2.1)
                     norm_tokens, valid_boxes = _sort_ocr_reading_order(norm_tokens, valid_boxes)
 
-                    # Khoanh vùng cụm không gian mục tiêu (Spatial Region Clustering)
-                    prefix_words, p_boxes, target_words, t_boxes = _split_ocr_spatial_region(norm_tokens, valid_boxes)
+                    # Khoanh vùng cụm không gian mục tiêu (Spatial Region Clustering).
+                    # full_ocr_prob=1.0 (mặc định gen-only) -> luôn sinh TOÀN BỘ text, không prefix.
+                    prefix_words, p_boxes, target_words, t_boxes = _split_ocr_spatial_region(
+                        norm_tokens, valid_boxes,
+                        full_ocr_prob=float(getattr(self, "pretrain_full_ocr_prob", 1.0)))
                     prefix_str = " ".join(prefix_words).strip()
                     target_str = " ".join(target_words).strip()
 
