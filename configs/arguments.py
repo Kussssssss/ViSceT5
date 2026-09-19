@@ -83,6 +83,12 @@ class ModelArguments:
         default=True,
         metadata={"help": "Whether to use Visual Search (AVF) in pretrain."}
     )
+    pretrain_gen_only: bool = field(
+        default=True,
+        metadata={"help": "PreSTU pretrain: keep ONLY the OCR-text generation task (drop the "
+                          "bbox-prediction head and the prefix-box 'grounding' input). "
+                          "True = pure pixel->text reading; False = legacy gen+bbox+ground."}
+    )
     use_ocr_aug_pretrain: bool = field(
         default=False,
         metadata={"help": "Whether to apply OCR augmentation in pretrain (default False)."}
