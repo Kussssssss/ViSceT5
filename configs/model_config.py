@@ -31,7 +31,7 @@ class OpenViVQAConfig(PretrainedConfig):
     def __init__(
         self,
         vit5_name: str = "VietAI/vit5-base",
-        clip_vision_name: str = "openai/clip-vit-base-patch16",
+        clip_vision_name: str = "openai/clip-vit-large-patch14-336",
         vs_backbone: str = "facebook/convnextv2-tiny-22k-224",
         bootstrap_from_pretrained: bool = True,
         local_submodule_dir: Optional[str] = None,

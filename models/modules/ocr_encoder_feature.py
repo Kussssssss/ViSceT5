@@ -78,6 +78,10 @@ class Vision_Encode_Ocr_Feature(nn.Module):
         if s is None: return False
         s = str(s).strip()
         if len(s) == 0: return False
+        # Loại nhãn "không đọc được" của scene-text GT (VinText/ICDAR dùng ### cho vùng
+        # illegible/do-not-care). Không được để chúng thành TARGET đọc trong SplitOCR.
+        if s in ("###", "*", "None", "<unk>") or set(s) == {"#"}:
+            return False
         return True
 
     def load_ocr_features(self, image_path: str, ocr_path: Optional[str]) -> Dict[str, Any]:
