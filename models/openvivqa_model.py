@@ -298,14 +298,17 @@ class OpenViVQAModel(PreTrainedModel):
             from transformers import ConvNextV2Model
             self.mra_cnn = ConvNextV2Model.from_pretrained(
                 str(getattr(self.config, "vs_backbone", "facebook/convnextv2-tiny-22k-224")))
-            # 3 stage cuoi cua ConvNeXtV2-tiny @768: (192, 96x96), (384, 48x48), (768, 24x24)
-            # -> lop align adaptive_avg_pool2d ha ve 14x14 cho khop luoi patch cua ViT.
-            _cnn_dims = list(getattr(self.mra_cnn.config, "hidden_sizes", [96, 192, 384, 768]))[-3:]
+            # ĐÚNG paper Feast-Your-Eyes (Eq.2): dùng ĐẶC TRƯNG CUỐI CÙNG của CNN (một F_vh,
+            # stage cuối = 768ch @768px -> 24x24) rồi align về 14x14 khớp lưới ViT, và bơm
+            # CÙNG feature đó vào 3 STAGE CUỐI của ViT (last-3-stages) qua MR-Adapter.
+            _final_dim = int(list(getattr(self.mra_cnn.config, "hidden_sizes", [96, 192, 384, 768]))[-1])
+            self.mra_cnn_dim = _final_dim
             _layer_ids = list(getattr(self.config, "mra_layer_ids", [5, 8, 11]))
             enc = self.qa_clip.vision_model.encoder
             enc.mra_layer_ids = _layer_ids
+            # Tất cả adapter nhận cùng d_cnn = feature cuối của CNN (F_vh dùng chung mọi stage).
             enc.mra_adapters = nn.ModuleList([
-                MRAdapter(d_vit=self.d_model, d_cnn=int(dc), grid=14) for dc in _cnn_dims
+                MRAdapter(d_vit=self.d_model, d_cnn=_final_dim, grid=14) for _ in _layer_ids
             ])
             # Chuan hoa ImageNet cho ConvNeXt (dang buffer de theo device/dtype).
             self.register_buffer("mra_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
@@ -674,8 +677,10 @@ class OpenViVQAModel(PreTrainedModel):
     # LUỒNG XỬ LÝ CHÍNH: HÀM FORWARD
     # =====================================================================
     def _encode_mra_highres(self, pil_images, device):
-        """Nhanh CAO cua MRA: ConvNeXt tren ANH GOC @ mra_high_res -> 3 stage cuoi,
-        moi stage pool ve 14x14 va flatten [B,196,C]. Tra None neu tat MRA / thieu anh.
+        """Nhanh CAO cua MRA (Feast-Your-Eyes, Eq.2): ConvNeXt tren ANH GOC @ mra_high_res
+        -> lay ĐẶC TRƯNG CUỐI CÙNG (last_hidden_state, stage cuoi 768ch @768px = 24x24),
+        align (adaptive_avg_pool2d) ve 14x14 -> MOT tensor [B,196,d_final] dung chung cho
+        moi diem bom. Tra None neu tat MRA / thieu anh.
 
         BAT BUOC dung anh GOC (pil_images), KHONG phai pixel_values 224 (da mat chi tiet).
         """
@@ -688,14 +693,10 @@ class OpenViVQAModel(PreTrainedModel):
             arrs.append(torch.from_numpy(np.asarray(im2, dtype=np.float32) / 255.0).permute(2, 0, 1))
         x = torch.stack(arrs).to(device)                                   # [B,3,hr,hr] in [0,1]
         x = (x - self.mra_mean.to(device)) / self.mra_std.to(device)
-        feats = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype),
-                             output_hidden_states=True).hidden_states
-        out = []
-        for st in feats[-3:]:                                              # 192,384,768
-            st = F.adaptive_avg_pool2d(st, (14, 14))                       # lop align -> [B,C,14,14]
-            B_, C_, _, _ = st.shape
-            out.append(st.reshape(B_, C_, 196).transpose(1, 2).to(self.target_dtype))  # [B,196,C]
-        return out
+        st = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype)).last_hidden_state  # [B,d_final,24,24]
+        st = F.adaptive_avg_pool2d(st, (14, 14))                           # lop align -> [B,d_final,14,14]
+        B_, C_, _, _ = st.shape
+        return st.reshape(B_, C_, 196).transpose(1, 2).to(self.target_dtype)  # [B,196,d_final]
 
     def forward(
         self,
