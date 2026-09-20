@@ -142,17 +142,19 @@ class MMCLIPEncoderLayer(nn.Module):
 class MRAdapter(nn.Module):
     """Mixture-of-Resolution Adapter (Luo et al., 2024, Eq. 3-4).
 
-    Bom dac trung ConvNeXt do-phan-giai-cao vao token ViT do-phan-giai-thap tai MOT
-    diem stage, giu nguyen luoi khong gian 14x14:
+    Bom dac trung CUOI cua ConvNeXt do-phan-giai-cao (F_vh) vao token ViT do-phan-giai-thap,
+    CUNG vi tri o (token i CNN <-> patch i ViT, deu row-major tren luoi grid x grid):
 
         F' = F_vl + f_l(F_vl) + g . f_h(F_vh)
         g  = tanh(W2 . GELU(W1 . pool([f_l(F_vl); f_h(F_vh)])))
 
-    - f_l: conv block tren luoi ViT (nhanh residual).
-    - f_h: MLP 2 lop dua kenh ConvNeXt (d_cnn) ve d_vit (dung paper).
-    - g  : cong dong theo kenh, W1 in R^{d x 2d}, W2 in R^{d x d} (dung paper Eq.4);
-           khoi tao ~0 (W2 std=1e-3) -> luc dau nhanh high-res gan TAT,
-           model bat dau tu dung CLIP thuan roi mo dan (an toan nhu ReZero).
+    - f_l: conv block (dwconv 3x3 + LN + pointwise MLP) tren luoi ViT; residual F_vl+f_l
+           nam O NGOAI theo Eq.3 (KHONG residual noi bo -> tranh cong F_vl hai lan).
+    - f_h: MLP dua kenh ConvNeXt (d_cnn) ve d_vit (dung paper: "f_h is an MLP layer").
+    - g  : cong dong theo kenh. DUNG paper Eq.4: W1 in R^{2d x d/2}, W2 in R^{d/2 x d},
+           fv = pool([f_l; f_h]) (2d), sigma=GELU, delta=Tanh, g in R^d.
+           Khoi tao ~0 (W2 std=1e-3) -> luc dau nhanh high-res gan TAT, model bat dau
+           tu dung CLIP thuan roi mo dan (an toan nhu ReZero), gradient van chay tu buoc 1.
     """
 
     def __init__(self, d_vit: int, d_cnn: int, grid: int = 14):
@@ -171,9 +173,9 @@ class MRAdapter(nn.Module):
             nn.GELU(),
             nn.Linear(d_vit, d_vit),
         )
-        # cong g: W1 in R^{d x 2d}, W2 in R^{d x d} (dung paper Eq.4).
-        self.w1 = nn.Linear(2 * d_vit, d_vit)
-        self.w2 = nn.Linear(d_vit, d_vit)
+        # cong g DUNG paper Eq.4: W1 in R^{2d x d/2}, W2 in R^{d/2 x d}.
+        self.w1 = nn.Linear(2 * d_vit, d_vit // 2)
+        self.w2 = nn.Linear(d_vit // 2, d_vit)
         # Init W2 NHO nhung KHAC 0: cong g bat dau ~0 (khoi dong nhe nhang, gan CLIP thuan)
         # nhung gradient VAN chay vao nhanh high-res tu buoc dau. Neu zero-init hoan toan thi
         # g=0 lam ca nhanh f_h lan duong gate->f_h deu 0 -> ConvNeXt bi dong bang 1 buoc.
