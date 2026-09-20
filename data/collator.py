@@ -241,6 +241,30 @@ def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[Lis
     return sorted_tokens, sorted_boxes
 
 
+def _split_ocr_sequential(
+    tokens: List[str],
+    boxes: torch.Tensor,
+    full_ocr_prob: float = 0.2,
+) -> Tuple[List[str], torch.Tensor, List[str], torch.Tensor]:
+    """SplitOCR ĐÚNG paper PreSTU (Kil et al., 2022, §2.2.1): tokens đã sắp theo thứ tự đọc
+    (trên-trái → dưới-phải); chọn NGẪU NHIÊN một điểm cắt s trong chuỗi. prefix = tokens[:s]
+    (đưa vào prompt làm ngữ cảnh), target = tokens[s:] (mô hình PHẢI ĐỌC từ ảnh để sinh ra).
+    prefix và target là các TỪ RỜI NHAU → không thể copy, buộc đọc pixel. s=0 = OCR thuần
+    (sinh toàn bộ). full_ocr_prob = xác suất cắt ở đầu (s=0)."""
+    N = len(tokens)
+    if N == 0 or boxes.size(0) == 0:
+        return [], torch.zeros((0, 4), dtype=torch.float), [], torch.zeros((0, 4), dtype=torch.long)
+    if N == 1 or random.random() < full_ocr_prob:
+        s = 0
+    else:
+        s = random.randint(1, N - 1)   # prefix có s từ, target có N-s ≥ 1 từ
+    prefix_words = tokens[:s]
+    p_boxes = boxes[:s].clone() if s > 0 else torch.zeros((0, 4), dtype=torch.float)
+    target_words = tokens[s:]
+    t_boxes = (boxes[s:] * 1000.0).long().clamp(0, 999)
+    return prefix_words, p_boxes, target_words, t_boxes
+
+
 def _split_ocr_spatial_region(
     tokens: List[str],
     boxes: torch.Tensor,
@@ -1066,11 +1090,16 @@ class ViT5VQADataCollator:
                     # Sắp xếp theo trật tự đọc không gian: trên xuống dưới, trái sang phải (PreSTU Sec 2.1)
                     norm_tokens, valid_boxes = _sort_ocr_reading_order(norm_tokens, valid_boxes)
 
-                    # Khoanh vùng cụm không gian mục tiêu (Spatial Region Clustering).
-                    # full_ocr_prob=1.0 (mặc định gen-only) -> luôn sinh TOÀN BỘ text, không prefix.
-                    prefix_words, p_boxes, target_words, t_boxes = _split_ocr_spatial_region(
-                        norm_tokens, valid_boxes,
-                        full_ocr_prob=float(getattr(self, "pretrain_full_ocr_prob", 1.0)))
+                    # Chọn cách tách prefix/target theo pretrain_split_mode:
+                    #   "sequential" (mặc định, ĐÚNG PreSTU): cắt ngẫu nhiên theo thứ tự đọc.
+                    #   "spatial": biến thể khoanh cụm không gian (giữ để ablation).
+                    _fop = float(getattr(self, "pretrain_full_ocr_prob", 0.2))
+                    if str(getattr(self, "pretrain_split_mode", "sequential")).lower() == "spatial":
+                        prefix_words, p_boxes, target_words, t_boxes = _split_ocr_spatial_region(
+                            norm_tokens, valid_boxes, full_ocr_prob=_fop)
+                    else:
+                        prefix_words, p_boxes, target_words, t_boxes = _split_ocr_sequential(
+                            norm_tokens, valid_boxes, full_ocr_prob=_fop)
                     prefix_str = " ".join(prefix_words).strip()
                     target_str = " ".join(target_words).strip()
 

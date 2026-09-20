@@ -278,7 +278,8 @@ class InstructCLIPEncoder(nn.Module):
             if (self.mra_adapters is not None and self._mra_hi is not None
                     and _li in self.mra_layer_ids):
                 _k = self.mra_layer_ids.index(_li)
-                _hi = self._mra_hi[_k]                       # [B, N, d_cnn]
+                # ĐÚNG paper: MỘT F_vh (đặc trưng CUỐI của CNN) dùng chung cho mọi stage bơm.
+                _hi = self._mra_hi                           # [B, N, d_final]
                 _cls = hidden_states[:, :1, :]               # token CLS giu nguyen
                 _pat = hidden_states[:, 1:, :]               # [B, N, d_vit] = 14x14
                 _pat = self.mra_adapters[_k](_pat, _hi.to(_pat.dtype))

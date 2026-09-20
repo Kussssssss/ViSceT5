@@ -89,11 +89,17 @@ class ModelArguments:
                           "bbox-prediction head and the prefix-box 'grounding' input). "
                           "True = pure pixel->text reading; False = legacy gen+bbox+ground."}
     )
+    pretrain_split_mode: str = field(
+        default="sequential",
+        metadata={"help": "PreSTU SplitOCR split: 'sequential' (paper-faithful — random split "
+                          "point over reading-ordered OCR; prefix->target are disjoint words) or "
+                          "'spatial' (anisotropic spatial-region clustering variant)."}
+    )
     pretrain_full_ocr_prob: float = field(
-        default=1.0,
-        metadata={"help": "Prob. that a PreSTU sample generates the ENTIRE image's OCR text with "
-                          "NO prefix (pure pixel->text). 1.0 = always full-read (no prefix crutch, "
-                          "max reading signal); <1.0 mixes in prefix->target spatial split."}
+        default=0.2,
+        metadata={"help": "Prob. a PreSTU sample splits at the start -> generate the ENTIRE OCR "
+                          "text (OCR mode). Rest of the time a random split gives prefix->target. "
+                          "0.2 keeps a curriculum of target lengths (good for small data)."}
     )
     use_ocr_aug_pretrain: bool = field(
         default=False,

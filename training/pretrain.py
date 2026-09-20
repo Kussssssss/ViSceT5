@@ -854,7 +854,8 @@ def main(args_list=None):
         data_collator.set_mode(pretrain=True, mask_prob=0.15)
     data_collator.pretrain_ablation_mode = mode
     data_collator.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
-    data_collator.pretrain_full_ocr_prob = float(getattr(model_args, "pretrain_full_ocr_prob", 1.0))
+    data_collator.pretrain_split_mode = str(getattr(model_args, "pretrain_split_mode", "sequential"))
+    data_collator.pretrain_full_ocr_prob = float(getattr(model_args, "pretrain_full_ocr_prob", 0.2))
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
