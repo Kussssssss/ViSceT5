@@ -761,7 +761,7 @@ def main(args_list=None):
     config.ablation_use_vs = bool(getattr(model_args, "ablation_use_vs", True))
     config.ablation_use_ocr = bool(getattr(model_args, "ablation_use_ocr", True))
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
-    config.mra_high_res = int(getattr(model_args, "mra_high_res", 768))
+    config.mra_high_res = int(getattr(model_args, "mra_high_res", 1024))
     config.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
     model = OpenViVQAModel(config)
     if ckpt_to_load:

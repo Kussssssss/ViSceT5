@@ -135,8 +135,10 @@ class OpenViVQAModel(PreTrainedModel):
             freeze_clip=True,
         )
 
-        # Khởi tạo Bộ tiền xử lý ảnh
-        img_sz = int(getattr(config, "vs_target_size", getattr(self.qa_clip.config, "image_size", 224)))
+        # Khởi tạo Bộ tiền xử lý ảnh — PHẢI khớp image_size của CLIP (pixel_values đưa vào CLIP):
+        # base16=224, L14-336=336. (Không dùng vs_target_size ở đây vì nó có thể lệch resolution
+        # của CLIP → position-embedding mismatch.)
+        img_sz = int(getattr(self.qa_clip.config, "image_size", 224))
         self.image_processor = CLIPImageProcessor(
             do_resize=bool(getattr(config, "do_resize", True)),
             do_center_crop=bool(getattr(config, "do_center_crop", False)),
@@ -286,29 +288,38 @@ class OpenViVQAModel(PreTrainedModel):
             )
         self.vs_t5_guided = bool(getattr(self.config, "vs_t5_guided", True))
 
+        # Chiếu img_tokens (clip_hidden) -> d_model của ViT5 để fuse. CLIP-base: 768==768 -> Identity
+        # (không thêm tham số, giữ nguyên hành vi cũ). CLIP-L/14-336: 1024 -> 768 qua Linear.
+        self.img_proj = (nn.Linear(self.clip_hidden, self.d_model)
+                         if self.clip_hidden != self.d_model else nn.Identity())
+
         # ── MRA: Mixture-of-Resolution Adaptation ──────────────────────────────
-        # Nhanh CAO: ConvNeXt @ mra_high_res (mac dinh 768) tren ANH GOC -> 3 stage cuoi.
-        # Bom vao 3 tang ViT cuoi qua MRAdapter, giu 14x14 = 196 token (khong phinh chuoi).
+        # Nhanh CAO: ConvNeXt @ mra_high_res (mac dinh 1024) tren ANH GOC -> ĐẶC TRƯNG CUỐI.
+        # Bom vao 3 STAGE CUỐI cua ViT qua MRAdapter, giu luoi patch cua ViT (khong phinh chuoi).
         self.use_mra = bool(getattr(self.config, "ablation_use_mra", False))
-        self.mra_high_res = int(getattr(self.config, "mra_high_res", 768))
+        self.mra_high_res = int(getattr(self.config, "mra_high_res", 1024))
         if self.use_mra:
             # ConvNeXt do-phan-giai-cao RIENG cho MRA. KHONG tai dung visual_search.cnn:
-            # neu chia se cung object thi save_pretrained (safetensors) bao loi "shared tensors"
-            # (mra_cnn.* == visual_search.cnn.*). MRA von chay VS off nen khong ton them CNN.
+            # neu chia se cung object thi save_pretrained (safetensors) bao loi "shared tensors".
             from transformers import ConvNextV2Model
             self.mra_cnn = ConvNextV2Model.from_pretrained(
                 str(getattr(self.config, "vs_backbone", "facebook/convnextv2-tiny-22k-224")))
-            # ĐÚNG paper Feast-Your-Eyes (Eq.2): dùng ĐẶC TRƯNG CUỐI CÙNG của CNN (một F_vh,
-            # stage cuối = 768ch @768px -> 24x24) rồi align về 14x14 khớp lưới ViT, và bơm
-            # CÙNG feature đó vào 3 STAGE CUỐI của ViT (last-3-stages) qua MR-Adapter.
             _final_dim = int(list(getattr(self.mra_cnn.config, "hidden_sizes", [96, 192, 384, 768]))[-1])
             self.mra_cnn_dim = _final_dim
-            _layer_ids = list(getattr(self.config, "mra_layer_ids", [5, 8, 11]))
+            # Lưới patch ViT và số kênh suy từ CLIP config (base16@224=14x14/768; L14@336=24x24/1024).
+            _vcfg = self.qa_clip.vision_model.config
+            _grid = int(_vcfg.image_size) // int(_vcfg.patch_size)
+            _nl = int(_vcfg.num_hidden_layers)
+            self.mra_grid = _grid
+            # Bơm ĐÚNG paper: ĐẶC TRƯNG CUỐI của CNN (một F_vh, align về _grid) vào 3 STAGE CUỐI
+            # của ViT. Ranh giới 3 stage cuối của ViT L-lớp: [L/2, 3L/4, L] (0-index -1).
+            _layer_ids = list(getattr(self.config, "mra_layer_ids", None) or
+                              [_nl // 2 - 1, 3 * _nl // 4 - 1, _nl - 1])
             enc = self.qa_clip.vision_model.encoder
             enc.mra_layer_ids = _layer_ids
-            # Tất cả adapter nhận cùng d_cnn = feature cuối của CNN (F_vh dùng chung mọi stage).
+            # Tất cả adapter cùng d_vit=clip_hidden, d_cnn=feature cuối CNN, grid=lưới ViT.
             enc.mra_adapters = nn.ModuleList([
-                MRAdapter(d_vit=self.d_model, d_cnn=_final_dim, grid=14) for _ in _layer_ids
+                MRAdapter(d_vit=self.clip_hidden, d_cnn=_final_dim, grid=_grid) for _ in _layer_ids
             ])
             # Chuan hoa ImageNet cho ConvNeXt (dang buffer de theo device/dtype).
             self.register_buffer("mra_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
@@ -417,6 +428,8 @@ class OpenViVQAModel(PreTrainedModel):
                 img_hs = torch.nan_to_num(img_hs, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
 
         img_tokens = img_hs[:, 1:, :].to(self.target_dtype)
+        # Chiếu clip_hidden -> d_model (Identity nếu bằng nhau, vd CLIP-base).
+        img_tokens = self.img_proj(img_tokens)
         img_attn_mask = torch.ones(B, img_tokens.size(1), dtype=torch.long, device=device)
         out = {"img_tokens": img_tokens, "img_attn_mask": img_attn_mask}
 
@@ -693,10 +706,11 @@ class OpenViVQAModel(PreTrainedModel):
             arrs.append(torch.from_numpy(np.asarray(im2, dtype=np.float32) / 255.0).permute(2, 0, 1))
         x = torch.stack(arrs).to(device)                                   # [B,3,hr,hr] in [0,1]
         x = (x - self.mra_mean.to(device)) / self.mra_std.to(device)
-        st = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype)).last_hidden_state  # [B,d_final,24,24]
-        st = F.adaptive_avg_pool2d(st, (14, 14))                           # lop align -> [B,d_final,14,14]
+        st = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype)).last_hidden_state  # [B,d_final,32,32]@1024
+        g = int(self.mra_grid)
+        st = F.adaptive_avg_pool2d(st, (g, g))                             # lop align -> [B,d_final,g,g]
         B_, C_, _, _ = st.shape
-        return st.reshape(B_, C_, 196).transpose(1, 2).to(self.target_dtype)  # [B,196,d_final]
+        return st.reshape(B_, C_, g * g).transpose(1, 2).to(self.target_dtype)  # [B,g*g,d_final]
 
     def forward(
         self,

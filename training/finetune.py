@@ -328,7 +328,7 @@ def main(args_list=None):
     config.use_ocr_aug_finetune = bool(model_args.ablation_use_ocr_aug)
     # MRA (Mixture-of-Resolution) phải build ở __init__ → gán cờ lên config TRƯỚC khi dựng model.
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
-    config.mra_high_res = int(getattr(model_args, "mra_high_res", 768))
+    config.mra_high_res = int(getattr(model_args, "mra_high_res", 1024))
 
     model = OpenViVQAModel(config)
     if ckpt_to_load:
