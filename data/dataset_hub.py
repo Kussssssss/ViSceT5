@@ -160,6 +160,28 @@ def _resolve_in_tree(image_dir, filename, pred):
     return _file_index(root, pred).get(filename)
 
 
+def _digits_id(name: str):
+    """Rút id số nguyên từ tên file, vd 'im0481.jpg'/'gt_481.txt' -> 481. None nếu không có."""
+    import re as _re
+    m = _re.search(r"(\d+)", os.path.splitext(os.path.basename(str(name)))[0])
+    return int(m.group(1)) if m else None
+
+
+def _label_index_by_id(root):
+    """Quét cây thư mục tìm GT VinText 'gt_*.txt' -> {int_id: path}. Rỗng nếu không có."""
+    idx = {}
+    try:
+        for cur, _dirs, files in os.walk(root):
+            for f in files:
+                if f.lower().startswith("gt_") and f.lower().endswith(".txt"):
+                    i = _digits_id(f)
+                    if i is not None:
+                        idx.setdefault(i, os.path.join(cur, f))
+    except Exception:
+        pass
+    return idx
+
+
 def _find_ocr_match(fname: str, ocr_index: Dict[str, str]) -> Optional[str]:
     """Tìm đường dẫn OCR tương ứng với ảnh theo đa dạng định dạng tên file."""
     stem = os.path.splitext(fname)[0]
@@ -473,14 +495,21 @@ class DatasetHubLoader:
             img_index = _file_index(img_root, _is_img)
             ocr_index = _file_index(ocr_root, _is_ocr) if (ocr_root and os.path.isdir(ocr_root)) else {}
             
+            # GT labels (VinText): gt_{id}.txt trong folder labels. EVJVQA không có -> rỗng.
+            label_index = _label_index_by_id(p.get("image_root") or img_root)
+            if label_index:
+                print(f"ℹ️ [Hub] '{dataset_name}': thấy {len(label_index)} file GT labels (gt_*.txt).")
+
             items = []
             for fname, fpath in img_index.items():
                 ocr_path = _find_ocr_match(fname, ocr_index)
                 if ocr_path is not None and os.path.exists(ocr_path):
+                    _iid = _digits_id(fname)
                     items.append({
                         "image_filename": fname,
                         "image_path": fpath,
                         "ocr_path": ocr_path,
+                        "label_path": label_index.get(_iid) if _iid is not None else None,
                     })
             
             print(f"ℹ️ [Hub] Dataset '{dataset_name}': Quét thấy {len(img_index)} ảnh và {len(ocr_index)} file OCR. Khớp thành công: {len(items)} cặp.")
@@ -505,8 +534,9 @@ class DatasetHubLoader:
                     "all_answers": [],
                     "image_path": it["image_path"],
                     "ocr_path": it["ocr_path"],
+                    "label_path": it.get("label_path"),
                 })
-        cols = ["dataset", "split", "id", "image_id", "image_filename", "question", "answer", "all_answers", "image_path", "ocr_path"]
+        cols = ["dataset", "split", "id", "image_id", "image_filename", "question", "answer", "all_answers", "image_path", "ocr_path", "label_path"]
         df = pd.DataFrame(rows, columns=cols if not rows else None)
         df["dataset"] = dataset_name
         return df
