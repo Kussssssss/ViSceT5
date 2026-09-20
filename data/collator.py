@@ -241,6 +241,30 @@ def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[Lis
     return sorted_tokens, sorted_boxes
 
 
+def _splitocr_b1_gt(gt_texts, gt_boxes_sorted, sp_boxes, sp_texts,
+                    full_ocr_prob: float = 0.2, iou_thr: float = 0.5):
+    """SplitOCR B1 cho VinText: TARGET = GT text (labels, sạch); PREFIX = text SILVER của
+    SwinTextSpotter cho vùng prefix (khớp IoU với box GT). prefix (spotter, nhiễu) và target
+    (GT, sạch) là các TỪ RỜI NHAU (tránh trùng) → model học ĐỌC + SỬA lỗi OCR từ ảnh.
+    Trả (prefix_str, target_str)."""
+    from data.gt_ocr import match_gt_to_spotter
+    import random as _random
+    N = len(gt_texts)
+    if N == 0:
+        return "", ""
+    s = 0 if (N == 1 or _random.random() < full_ocr_prob) else _random.randint(1, N - 1)
+    match = match_gt_to_spotter(gt_boxes_sorted, sp_boxes, iou_thr)
+    prefix_words = []
+    for i in range(s):
+        j = match[i]
+        if 0 <= j < len(sp_texts):
+            t = str(sp_texts[j]).strip()
+            if t and t.lower() != "none":
+                prefix_words.append(t)          # dùng bản SILVER của spotter làm ngữ cảnh input
+    target_words = [gt_texts[i] for i in range(s, N)]   # sinh GT sạch cho vùng target
+    return " ".join(prefix_words).strip(), " ".join(target_words).strip()
+
+
 def _split_ocr_sequential(
     tokens: List[str],
     boxes: torch.Tensor,
@@ -1079,6 +1103,34 @@ class ViT5VQADataCollator:
                     valid_boxes = raw_boxes[valid_idx].clone().detach().float()
                 else:
                     valid_boxes = torch.zeros((0, 4), dtype=torch.float)
+
+                # ── B1 (VinText): TARGET từ GT labels (sạch), PREFIX từ spotter (silver) ──
+                _lbl = batch[i].get("label_path") if isinstance(batch[i], dict) else None
+                _gt_texts, _gt_boxes = ([], torch.zeros((0, 4)))
+                if _lbl:
+                    try:
+                        _Wi, _Hi = pil_images[i].size
+                    except Exception:
+                        _Wi, _Hi = 0, 0
+                    from data.gt_ocr import load_vintext_gt
+                    _gt_texts, _gt_boxes = load_vintext_gt(_lbl, float(_Wi), float(_Hi))
+
+                if len(_gt_texts) > 0:
+                    # spotter GỐC (aligned texts↔boxes) để khớp IoU với GT
+                    _sp_boxes = ocr_raw_list[i].get("boxes", torch.zeros((0, 4)))
+                    _sp_texts = list(ocr_raw_list[i].get("texts", []))
+                    _gt_texts, _gt_boxes = _sort_ocr_reading_order(_gt_texts, _gt_boxes)
+                    _fop = float(getattr(self, "pretrain_full_ocr_prob", 0.2))
+                    prefix_str, target_str = _splitocr_b1_gt(
+                        _gt_texts, _gt_boxes, _sp_boxes, _sp_texts, full_ocr_prob=_fop)
+                    p_boxes = torch.zeros((0, 4), dtype=torch.float)
+                    t_boxes = torch.zeros((0, 4), dtype=torch.long)
+                    prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
+                    split_prompts.append(prompt_text)
+                    split_targets.append(target_str)
+                    batch_prefix_boxes.append(p_boxes)
+                    batch_target_boxes.append(t_boxes)
+                    continue
 
                 N_words = len(norm_tokens)
                 if N_words == 0:
