@@ -57,7 +57,7 @@ class VisualSearch(nn.Module):
         self.vit_processor = vit_processor
         self.dim = int(vit_dim)
 
-        backbone = str(getattr(self.cfg, "vs_backbone", "facebook/convnextv2-base-22k-224"))
+        backbone = str(getattr(self.cfg, "vs_backbone", "facebook/convnextv2-base-22k-384"))
         need_local = bool(local_files_only)
 
         cnn_ok = proc_ok = False

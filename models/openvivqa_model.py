@@ -300,7 +300,7 @@ class OpenViVQAModel(PreTrainedModel):
             # neu chia se cung object thi save_pretrained (safetensors) bao loi "shared tensors".
             from transformers import ConvNextV2Model
             self.mra_cnn = ConvNextV2Model.from_pretrained(
-                str(getattr(self.config, "vs_backbone", "facebook/convnextv2-base-22k-224")))
+                str(getattr(self.config, "vs_backbone", "facebook/convnextv2-base-22k-384")))
             _final_dim = int(list(getattr(self.mra_cnn.config, "hidden_sizes", [128, 256, 512, 1024]))[-1])
             self.mra_cnn_dim = _final_dim
             # Lưới patch ViT và số kênh suy từ CLIP config (base16@224=14x14/768; L14@336=24x24/1024).
