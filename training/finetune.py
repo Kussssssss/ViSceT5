@@ -1,5 +1,7 @@
 import os
 import sys
+# Optimize CUDA memory allocation to prevent fragmentation OOM
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import gc
@@ -422,6 +424,15 @@ def main(args_list=None):
         decoder_start_token_id=model.config.decoder_start_token_id,
     )
     
+    if getattr(training_args, "bf16", False):
+        if not (torch.cuda.is_available() and torch.cuda.is_bf16_supported()):
+            print("⚠️ [device warning] BF16 requested but not supported on this device. Disabling bf16.")
+            training_args.bf16 = False
+
+    if getattr(training_args, "gradient_checkpointing", False):
+        print("⚡ [finetune] Enabling gradient checkpointing (ViT5 + QA-CLIP + ConvNeXt MRA) to save VRAM...")
+        model.gradient_checkpointing_enable()
+
     # 5. Loss, Metrics, Collator
     data_collator = ViT5VQADataCollator(
         tokenizer=tokenizer,

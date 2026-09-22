@@ -1,5 +1,7 @@
 import os
 import sys
+# Optimize CUDA memory allocation to prevent fragmentation OOM
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 if hasattr(sys.stderr, 'reconfigure'):
@@ -810,6 +812,15 @@ def main(args_list=None):
     model.config.lambda_bbox_ce = _lam
     
     model.to(DEVICE)
+
+    if getattr(training_args, "bf16", False):
+        if not (torch.cuda.is_available() and torch.cuda.is_bf16_supported()):
+            print("⚠️ [device warning] BF16 requested but not supported on this device. Disabling bf16.")
+            training_args.bf16 = False
+
+    if getattr(training_args, "gradient_checkpointing", False):
+        print("⚡ [pretrain] Enabling gradient checkpointing (ViT5 + QA-CLIP + ConvNeXt MRA) to save VRAM...")
+        model.gradient_checkpointing_enable()
 
     # PRETRAIN-ONLY partial vision unfreeze (representation learning). Done HERE in
     # the training script via requires_grad — NOT inside models/ — so the model

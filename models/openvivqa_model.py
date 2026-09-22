@@ -107,6 +107,72 @@ class T5PolluteHead(nn.Module):
 class OpenViVQAModel(PreTrainedModel):
     config_class = OpenViVQAConfig
     base_model_prefix = "openvivqa"
+    supports_gradient_checkpointing = True
+
+    @property
+    def target_dtype(self):
+        if hasattr(self, "vit5") and hasattr(self.vit5, "get_input_embeddings"):
+            emb = self.vit5.get_input_embeddings()
+            if emb is not None and hasattr(emb, "weight"):
+                return emb.weight.dtype
+        return torch.float32
+
+    def enable_input_require_grads(self):
+        if hasattr(self, "vit5") and hasattr(self.vit5, "enable_input_require_grads"):
+            self.vit5.enable_input_require_grads()
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        self._gradient_checkpointing = True
+        if hasattr(self, "vit5") and hasattr(self.vit5, "gradient_checkpointing_enable"):
+            try:
+                self.vit5.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
+            except Exception as e:
+                print(f"ℹ️ Could not enable gradient checkpointing on vit5: {e}")
+        if hasattr(self, "qa_clip") and hasattr(self.qa_clip, "vision_model") and hasattr(self.qa_clip.vision_model, "gradient_checkpointing_enable"):
+            try:
+                self.qa_clip.vision_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=gradient_checkpointing_kwargs)
+            except Exception as e:
+                print(f"ℹ️ Could not enable gradient checkpointing on qa_clip: {e}")
+        if hasattr(self, "mra_cnn"):
+            self._enable_mra_cnn_gradient_checkpointing()
+
+    def _enable_mra_cnn_gradient_checkpointing(self):
+        if not hasattr(self, "mra_cnn") or not hasattr(self.mra_cnn, "encoder"):
+            return
+        from torch.utils.checkpoint import checkpoint
+        from transformers.modeling_outputs import BaseModelOutputWithNoAttention
+        mra_model = self.mra_cnn
+        def checkpointed_encoder_forward(hidden_states, output_hidden_states=False, return_dict=True):
+            all_hidden_states = () if output_hidden_states else None
+            for i, layer_module in enumerate(mra_model.encoder.stages):
+                if output_hidden_states:
+                    all_hidden_states = all_hidden_states + (hidden_states,)
+                if mra_model.training and hidden_states.requires_grad:
+                    hidden_states = checkpoint(layer_module, hidden_states, use_reentrant=False)
+                else:
+                    hidden_states = layer_module(hidden_states)
+            if output_hidden_states:
+                all_hidden_states = all_hidden_states + (hidden_states,)
+            if not return_dict:
+                return tuple(v for v in [hidden_states, all_hidden_states] if v is not None)
+            return BaseModelOutputWithNoAttention(
+                last_hidden_state=hidden_states,
+                hidden_states=all_hidden_states,
+            )
+        self.mra_cnn.encoder.forward = checkpointed_encoder_forward
+
+    def gradient_checkpointing_disable(self):
+        self._gradient_checkpointing = False
+        if hasattr(self, "vit5") and hasattr(self.vit5, "gradient_checkpointing_disable"):
+            try:
+                self.vit5.gradient_checkpointing_disable()
+            except Exception:
+                pass
+        if hasattr(self, "qa_clip") and hasattr(self.qa_clip, "vision_model") and hasattr(self.qa_clip.vision_model, "gradient_checkpointing_disable"):
+            try:
+                self.qa_clip.vision_model.gradient_checkpointing_disable()
+            except Exception:
+                pass
 
     def __init__(self, config):
         super().__init__(config)
@@ -123,8 +189,6 @@ class OpenViVQAModel(PreTrainedModel):
             obj.pad_token_id = pad_id
             obj.eos_token_id = eos_id
             obj.decoder_start_token_id = dec_start_id
-
-        self.target_dtype = self.vit5.get_input_embeddings().weight.dtype
 
         # Khởi tạo QACLIP
         d_text = getattr(config, "qa_clip_d_text", None) or self.d_model
@@ -967,8 +1031,10 @@ class OpenViVQAModel(PreTrainedModel):
             print("⚠️ [pretrain guard] non-finite in fused_seq (QA-CLIP vision) → nan_to_num")
             fused_seq = torch.nan_to_num(fused_seq, nan=0.0, posinf=1e4, neginf=-1e4)
 
-        # Notebook gốc / TWA paper: dùng mask 1D chuẩn — original và related token
-        # được encode cùng nhau với full attention (KHÔNG chặn cross-half).
+        # Gradient checkpointing requires input to require grad for proper backprop
+        if self.training and bool(getattr(self, "_gradient_checkpointing", False) or getattr(self, "is_gradient_checkpointing", False)) and not fused_seq.requires_grad:
+            fused_seq.requires_grad_(True)
+
         want_enc_attn = bool(run_t5_guided_vs or return_visual_search_debug)
         enc_out = self.vit5.encoder(
             inputs_embeds=fused_seq,
