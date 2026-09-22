@@ -26,7 +26,7 @@ class ModelArguments:
         metadata={"help": "Resolution for ViT input (interpolates pos-embed if differs from backbone native resolution)."}
     )
     vs_backbone: str = field(
-        default="facebook/convnextv2-base-22k-224",
+        default="facebook/convnextv2-base-22k-384",
         metadata={"help": "ConvNeXt backbone for high-res MRA or VisualSearch."}
     )
     # Ablation Flags

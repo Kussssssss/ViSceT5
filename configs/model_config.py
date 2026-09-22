@@ -33,7 +33,7 @@ class OpenViVQAConfig(PretrainedConfig):
         vit5_name: str = "VietAI/vit5-base",
         clip_vision_name: str = "openai/clip-vit-base-patch16",
         clip_image_size: int = 336,
-        vs_backbone: str = "facebook/convnextv2-base-22k-224",
+        vs_backbone: str = "facebook/convnextv2-base-22k-384",
         bootstrap_from_pretrained: bool = True,
         local_submodule_dir: Optional[str] = None,
         pretrain: bool = True,
