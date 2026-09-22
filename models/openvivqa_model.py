@@ -128,17 +128,18 @@ class OpenViVQAModel(PreTrainedModel):
 
         # Khởi tạo QACLIP
         d_text = getattr(config, "qa_clip_d_text", None) or self.d_model
+        clip_name = str(getattr(config, "clip_vision_name", "openai/clip-vit-base-patch16"))
+        target_clip_sz = int(getattr(config, "clip_image_size", 336))
         self.qa_clip = QACLIPEncoder.from_pretrained(
-            getattr(config, "clip_vision_name", "openai/clip-vit-base-patch16"),
+            clip_name,
             instruction_dim=d_text,
             integration_point="late",
             freeze_clip=True,
+            image_size=target_clip_sz,
         )
 
-        # Khởi tạo Bộ tiền xử lý ảnh — PHẢI khớp image_size của CLIP (pixel_values đưa vào CLIP):
-        # base16=224, L14-336=336. (Không dùng vs_target_size ở đây vì nó có thể lệch resolution
-        # của CLIP → position-embedding mismatch.)
-        img_sz = int(getattr(self.qa_clip.config, "image_size", 224))
+        # Khởi tạo Bộ tiền xử lý ảnh — khớp image_size của CLIP (336x336 cho ViT-base @ 336):
+        img_sz = int(getattr(self.qa_clip.config, "image_size", target_clip_sz))
         self.image_processor = CLIPImageProcessor(
             do_resize=bool(getattr(config, "do_resize", True)),
             do_center_crop=bool(getattr(config, "do_center_crop", False)),
@@ -150,20 +151,16 @@ class OpenViVQAModel(PreTrainedModel):
         self.clip_hidden = int(getattr(self.qa_clip.config, "hidden_size", 768))
 
         # Khởi tạo Visual Search (Kính lúp)
-        self.visual_search = VisualSearch(
-            vit_processor=self.image_processor,
-            model_config=self.config,
-            vit_dim=self.d_model,
-            device=getattr(self.config, "ocr_cuda_device", "cuda:0"),
-            vs_local_dir=None,
-            local_files_only=False,
-        )
-        self.visual_search.vit_processor = self.image_processor
-        # Tắt AVF = bỏ hẳn module → 27.87M tham số (chủ yếu ConvNeXt) không còn dùng tới.
-        # Vẫn dựng ở trên để tiêu RNG đúng thứ tự (nó đứng TRƯỚC mọi module khác), rồi mới
-        # gỡ đi: tiết kiệm ~111MB VRAM và một lượt .to(device), state_dict cũng sạch.
-        if not bool(getattr(self.config, "ablation_use_vs", True)):
-            del self.visual_search
+        if bool(getattr(self.config, "ablation_use_vs", True)):
+            self.visual_search = VisualSearch(
+                vit_processor=self.image_processor,
+                model_config=self.config,
+                vit_dim=self.d_model,
+                device=getattr(self.config, "ocr_cuda_device", "cuda:0"),
+                vs_local_dir=None,
+                local_files_only=False,
+            )
+            self.visual_search.vit_processor = self.image_processor
 
         # Khởi tạo OCR Consformer (Bản Full)
         self.seq_max_ocr = int(getattr(config, "ocr_max_scene_text", 180))
@@ -303,8 +300,8 @@ class OpenViVQAModel(PreTrainedModel):
             # neu chia se cung object thi save_pretrained (safetensors) bao loi "shared tensors".
             from transformers import ConvNextV2Model
             self.mra_cnn = ConvNextV2Model.from_pretrained(
-                str(getattr(self.config, "vs_backbone", "facebook/convnextv2-tiny-22k-224")))
-            _final_dim = int(list(getattr(self.mra_cnn.config, "hidden_sizes", [96, 192, 384, 768]))[-1])
+                str(getattr(self.config, "vs_backbone", "facebook/convnextv2-base-22k-224")))
+            _final_dim = int(list(getattr(self.mra_cnn.config, "hidden_sizes", [128, 256, 512, 1024]))[-1])
             self.mra_cnn_dim = _final_dim
             # Lưới patch ViT và số kênh suy từ CLIP config (base16@224=14x14/768; L14@336=24x24/1024).
             _vcfg = self.qa_clip.vision_model.config
@@ -352,6 +349,30 @@ class OpenViVQAModel(PreTrainedModel):
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
     def get_encoder(self): return self.vit5.get_encoder()
     def get_decoder(self): return self.vit5.get_decoder()
+
+    def load_state_dict(self, state_dict: Dict[str, Any], strict: bool = True):
+        k = "qa_clip.vision_model.embeddings.position_embedding.weight"
+        if k in state_dict and hasattr(self, "qa_clip") and hasattr(self.qa_clip, "vision_model"):
+            emb_layer = getattr(self.qa_clip.vision_model.embeddings, "position_embedding", None)
+            if emb_layer is not None:
+                model_pos_emb = emb_layer.weight
+                ckpt_pos_emb = state_dict[k]
+                if ckpt_pos_emb.shape[0] != model_pos_emb.shape[0]:
+                    if ckpt_pos_emb.shape[0] == 197 and model_pos_emb.shape[0] == 442:
+                        print("🔄 [OpenViVQA] Auto-interpolating checkpoint pos_embed 197 -> 442 (336x336)")
+                        cls_p = ckpt_pos_emb[:1, :].unsqueeze(0)
+                        pat_p = ckpt_pos_emb[1:, :].unsqueeze(0).transpose(1, 2).reshape(1, ckpt_pos_emb.shape[1], 14, 14)
+                        new_pat = F.interpolate(pat_p.float(), size=(21, 21), mode="bicubic", align_corners=False).to(ckpt_pos_emb.dtype)
+                        new_pat = new_pat.reshape(1, ckpt_pos_emb.shape[1], 441).transpose(1, 2)
+                        state_dict[k] = torch.cat([cls_p, new_pat], dim=1).squeeze(0)
+                    elif ckpt_pos_emb.shape[0] == 442 and model_pos_emb.shape[0] == 197:
+                        print("🔄 [OpenViVQA] Auto-interpolating checkpoint pos_embed 442 -> 197 (224x224)")
+                        cls_p = ckpt_pos_emb[:1, :].unsqueeze(0)
+                        pat_p = ckpt_pos_emb[1:, :].unsqueeze(0).transpose(1, 2).reshape(1, ckpt_pos_emb.shape[1], 21, 21)
+                        new_pat = F.interpolate(pat_p.float(), size=(14, 14), mode="bicubic", align_corners=False).to(ckpt_pos_emb.dtype)
+                        new_pat = new_pat.reshape(1, ckpt_pos_emb.shape[1], 196).transpose(1, 2)
+                        state_dict[k] = torch.cat([cls_p, new_pat], dim=1).squeeze(0)
+        return super().load_state_dict(state_dict, strict=strict)
 
     # --- ENCODE TEXT ---
     def _encode_text(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor], device: torch.device):
@@ -412,7 +433,8 @@ class OpenViVQAModel(PreTrainedModel):
         # the NaN root fix in MMCLIPAttention + the fused_seq guard keep it stable.
         _frozen_pt = (bool(getattr(self, "_pretrain_stage", False))
                       and bool(getattr(self.qa_clip.config, "freeze_clip", False))
-                      and not bool(getattr(self, "_vision_trainable", False)))
+                      and not bool(getattr(self, "_vision_trainable", False))
+                      and not bool(getattr(self, "use_mra", False)))
         if _frozen_pt:
             with torch.no_grad():
                 qa_out = self.qa_clip(pixel_values=pixel_values, text_emb=text_emb, text_mask=text_mask, output_attentions=want_attn, return_dict=True)

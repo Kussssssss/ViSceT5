@@ -57,7 +57,7 @@ class VisualSearch(nn.Module):
         self.vit_processor = vit_processor
         self.dim = int(vit_dim)
 
-        backbone = str(getattr(self.cfg, "vs_backbone", "facebook/convnextv2-tiny-22k-224"))
+        backbone = str(getattr(self.cfg, "vs_backbone", "facebook/convnextv2-base-22k-224"))
         need_local = bool(local_files_only)
 
         cnn_ok = proc_ok = False
@@ -101,6 +101,9 @@ class VisualSearch(nn.Module):
             if need_local:
                 raise OSError("Offline/local-only but ImageProcessor not found")
             self.processor = AutoImageProcessor.from_pretrained(backbone, local_files_only=False)
+
+        _cnn_dim = int(list(getattr(self.cnn.config, "hidden_sizes", [128, 256, 512, 1024]))[-1]) if self.cnn is not None else self.dim
+        self.crop_proj = nn.Linear(_cnn_dim, self.dim) if _cnn_dim != self.dim else nn.Identity()
 
         init_image_size = self._pick_size(self.vit_processor)
         init_patch_size = int(getattr(self.cfg, "vs_patch_size", 16))
@@ -431,6 +434,8 @@ class VisualSearch(nn.Module):
 
         B_out, C_out, Hp, Wp = feats.shape
         crop_tokens = feats.permute(0, 2, 3, 1).reshape(B_out, Hp * Wp, C_out)
+        if hasattr(self, "crop_proj"):
+            crop_tokens = self.crop_proj(crop_tokens)
         return crop_tokens, cnn_activation
 
     def _proc_params(self, W0, H0):

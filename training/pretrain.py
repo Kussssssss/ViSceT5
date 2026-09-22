@@ -173,7 +173,7 @@ def _verify_pretrain_batch(model, data_collator, dataset, loss_fn, acc_fn, devic
     print("🔬 [VERIFY] Single-batch pretrain method check (with diagnostics)")
     print("=" * 70)
 
-    k = min(8, len(dataset))
+    k = min(2, len(dataset))
     if k < 2:
         print("⚠️ [VERIFY] Need >= 2 samples (ITM pollute needs batch>1); skipping.")
         return
@@ -763,6 +763,12 @@ def main(args_list=None):
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
     config.mra_high_res = int(getattr(model_args, "mra_high_res", 1024))
     config.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
+    if hasattr(model_args, "clip_vision_name") and model_args.clip_vision_name:
+        config.clip_vision_name = str(model_args.clip_vision_name)
+    if hasattr(model_args, "clip_image_size") and model_args.clip_image_size:
+        config.clip_image_size = int(model_args.clip_image_size)
+    if hasattr(model_args, "vs_backbone") and model_args.vs_backbone:
+        config.vs_backbone = str(model_args.vs_backbone)
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")

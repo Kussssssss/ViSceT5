@@ -283,6 +283,24 @@ def main(args_list=None):
         training_args.resume_from_checkpoint = resume_dir
 
     ckpt_to_load = model_args.model_name_or_path
+    if ckpt_to_load and os.path.isdir(ckpt_to_load):
+        # If directory doesn't have model.safetensors or pytorch_model.bin directly, check for checkpoint-*
+        has_direct_weight = (os.path.exists(os.path.join(ckpt_to_load, "model.safetensors")) or
+                             os.path.exists(os.path.join(ckpt_to_load, "pytorch_model.bin")))
+        if not has_direct_weight:
+            subdirs = [os.path.join(ckpt_to_load, d) for d in os.listdir(ckpt_to_load)
+                       if os.path.isdir(os.path.join(ckpt_to_load, d)) and d.startswith("checkpoint-")]
+            if subdirs:
+                def _step_key(s):
+                    try:
+                        return int(os.path.basename(s).split("-")[1])
+                    except Exception:
+                        return 0
+                subdirs.sort(key=_step_key)
+                resolved = subdirs[-1]
+                print(f"🔍 [finetune] Auto-resolved checkpoint dir: '{ckpt_to_load}' -> '{resolved}'")
+                ckpt_to_load = resolved
+                model_args.model_name_or_path = resolved
 
     # 4. Tokenizer & Model
     if ckpt_to_load:
@@ -329,6 +347,12 @@ def main(args_list=None):
     # MRA (Mixture-of-Resolution) phải build ở __init__ → gán cờ lên config TRƯỚC khi dựng model.
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
     config.mra_high_res = int(getattr(model_args, "mra_high_res", 1024))
+    if hasattr(model_args, "clip_vision_name") and model_args.clip_vision_name:
+        config.clip_vision_name = str(model_args.clip_vision_name)
+    if hasattr(model_args, "clip_image_size") and model_args.clip_image_size:
+        config.clip_image_size = int(model_args.clip_image_size)
+    if hasattr(model_args, "vs_backbone") and model_args.vs_backbone:
+        config.vs_backbone = str(model_args.vs_backbone)
 
     model = OpenViVQAModel(config)
     if ckpt_to_load:

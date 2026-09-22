@@ -4,6 +4,7 @@ QACLIPEncoder — CLIP with instruction-guided late-fusion encoder.
 """
 
 from typing import Optional, Tuple, Union
+import math
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -126,7 +127,7 @@ class MMCLIPEncoderLayer(nn.Module):
             attention_mask=attention_mask,
             causal_attention_mask=causal_attention_mask,
             output_attentions=output_attentions,
-            kv_states=self.instruct_dim_reduce(instruct_states) if self.instruct_dim_reduce else instruct_states,
+            kv_states=self.instruct_dim_reduce(instruct_states) if (self.instruct_dim_reduce and instruct_states is not None) else instruct_states,
             kv_masks=instruct_masks
         )
         hidden_states = residual + hidden_states
@@ -344,20 +345,83 @@ class QACLIPEncoder(CLIPPreTrainedModel):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
 
-    def __init__(self, config: CLIPVisionConfig, instruction_dim: int = 768, freeze_clip: bool = False):
+    def __init__(self, config: CLIPVisionConfig, instruction_dim: int = 768, freeze_clip: bool = False, image_size: Optional[int] = None):
         super().__init__(config)
         self.config.instruction_dim = int(getattr(self.config, "instruction_dim", instruction_dim))
         self.config.integration_point = getattr(self.config, "integration_point", "late")
         self.config.freeze_clip = bool(getattr(self.config, "freeze_clip", freeze_clip))
         self.vision_model = CLIPVisionTransformer(self.config)
+        tgt_sz = image_size if image_size is not None else getattr(self.config, "image_size", None)
+        if tgt_sz is not None and int(tgt_sz) != int(self.vision_model.embeddings.image_size):
+            self.interpolate_position_embedding(int(tgt_sz))
         self._apply_freeze()
         self.post_init()
+
+    def interpolate_position_embedding(self, target_image_size: int):
+        """Interpolate 2D position embeddings in CLIPVisionEmbeddings to match target_image_size (e.g. 224 -> 336).
+        Preserves CLS token (index 0) and applies 2D bicubic interpolation to the patch tokens.
+        """
+        embeddings = self.vision_model.embeddings
+        patch_size = int(embeddings.patch_size)
+        old_grid = int(embeddings.image_size) // patch_size
+        new_grid = int(target_image_size) // patch_size
+
+        if old_grid == new_grid and embeddings.num_positions == (new_grid * new_grid + 1):
+            return
+
+        new_num_patches = new_grid * new_grid
+        new_num_positions = new_num_patches + 1
+
+        old_weight = embeddings.position_embedding.weight.data
+        embed_dim = old_weight.shape[1]
+
+        # If already matching target number of positions, just update config/metadata
+        if old_weight.shape[0] == new_num_positions:
+            embeddings.image_size = target_image_size
+            embeddings.num_positions = new_num_positions
+            embeddings.num_patches = new_num_patches
+            self.vision_model.config.image_size = target_image_size
+            self.config.image_size = target_image_size
+            return
+
+        old_num_patches = old_weight.shape[0] - 1
+        actual_old_grid = int(math.isqrt(old_num_patches))
+
+        cls_pos = old_weight[:1, :].unsqueeze(0)
+        patch_pos = old_weight[1:, :].unsqueeze(0)
+
+        patch_pos = patch_pos.transpose(1, 2).reshape(1, embed_dim, actual_old_grid, actual_old_grid)
+
+        new_patch_pos = F.interpolate(
+            patch_pos.float(),
+            size=(new_grid, new_grid),
+            mode="bicubic",
+            align_corners=False,
+        ).to(dtype=old_weight.dtype)
+
+        new_patch_pos = new_patch_pos.reshape(1, embed_dim, new_num_patches).transpose(1, 2)
+        new_pos = torch.cat([cls_pos, new_patch_pos], dim=1).squeeze(0)
+
+        new_position_embedding = nn.Embedding(new_num_positions, embed_dim)
+        new_position_embedding.weight.data.copy_(new_pos)
+
+        if bool(getattr(self.config, "freeze_clip", False)):
+            new_position_embedding.weight.requires_grad = False
+
+        embeddings.position_embedding = new_position_embedding
+        embeddings.register_buffer("position_ids", torch.arange(new_num_positions).expand((1, -1)), persistent=False)
+        embeddings.num_positions = new_num_positions
+        embeddings.num_patches = new_num_patches
+        embeddings.image_size = target_image_size
+        self.vision_model.config.image_size = target_image_size
+        self.config.image_size = target_image_size
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
         instruction_dim = kwargs.pop("instruction_dim", None)
         integration_point = kwargs.pop("integration_point", None)
         freeze_clip = kwargs.pop("freeze_clip", None)
+        target_image_size = kwargs.pop("image_size", None)
         model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
         if instruction_dim is not None:
             model.config.instruction_dim = int(instruction_dim)
@@ -365,6 +429,8 @@ class QACLIPEncoder(CLIPPreTrainedModel):
             model.config.integration_point = integration_point
         if freeze_clip is not None:
             model.config.freeze_clip = bool(freeze_clip)
+        if target_image_size is not None and int(target_image_size) != int(model.vision_model.embeddings.image_size):
+            model.interpolate_position_embedding(int(target_image_size))
         model._apply_freeze()
         return model
 

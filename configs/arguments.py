@@ -17,6 +17,18 @@ class ModelArguments:
         default=None,
         metadata={"help": "Path to YAML configuration file"}
     )
+    clip_vision_name: str = field(
+        default="openai/clip-vit-base-patch16",
+        metadata={"help": "CLIP vision backbone name or path."}
+    )
+    clip_image_size: int = field(
+        default=336,
+        metadata={"help": "Resolution for ViT input (interpolates pos-embed if differs from backbone native resolution)."}
+    )
+    vs_backbone: str = field(
+        default="facebook/convnextv2-base-22k-224",
+        metadata={"help": "ConvNeXt backbone for high-res MRA or VisualSearch."}
+    )
     # Ablation Flags
     ablation_use_qaclip: bool = field(
         default=True,
