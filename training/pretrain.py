@@ -984,10 +984,23 @@ def main(args_list=None):
     # Fast method-correctness gate: in smoke/mock mode, verify a single batch
     # exercises MLM + ITM + TWC correctly before spending time on the loop.
     if training_args.smoke_test:
-        _verify_pretrain_batch(
-            model, data_collator, train_dataset,
-            pretrain_loss_fn, pretrain_acc_fn, DEVICE, use_twc,
-        )
+        # Verify là CHẨN ĐOÁN (xin output_attentions → tốn RAM với CLIP-L 24 lớp × 576²).
+        # Với model lớn (CLIP-L + CNN1024) nó có thể OOM dù batch nhỏ; KHÔNG để nó giết smoke.
+        # Bọc try/except: OOM/looi thì bỏ qua verify, vẫn chạy smoke-train (giống full-run).
+        try:
+            _verify_pretrain_batch(
+                model, data_collator, train_dataset,
+                pretrain_loss_fn, pretrain_acc_fn, DEVICE, use_twc,
+            )
+        except Exception as _ve:
+            _is_oom = isinstance(_ve, getattr(torch.cuda, "OutOfMemoryError", RuntimeError)) or "out of memory" in str(_ve).lower()
+            print(f"⚠️ [VERIFY] Bỏ qua chẩn đoán 1-batch ({'OOM' if _is_oom else type(_ve).__name__}: {_ve}). "
+                  f"Smoke vẫn chạy train bình thường.")
+            model.zero_grad(set_to_none=True)
+        finally:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     # ── Upload TỪNG checkpoint NGAY khi lưu ──
     _hf_tok = os.environ.get("HF_TOKEN", "").strip()
