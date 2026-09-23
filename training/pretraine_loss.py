@@ -475,9 +475,10 @@ class PreTrainTWCAccuracy(BaseMetric):
 
 # HÀM METRIC TỔNG - TỰ ĐỘNG ĐIỀU HƯỚNG THEO ABLATION MODE
 class GlobalPretrainAccuracy(BaseMetric):
-    def __init__(self, mode="all"):
+    def __init__(self, mode="all", tokenizer=None):
         super().__init__("global_acc")
         self.mode = mode
+        self.tokenizer = tokenizer
         self.mlm_fn = PreTrainMLMAccuracy()
         self.itm_fn = PreTrainContraAccuracy()
         self.twc_fn = PreTrainTWCAccuracy()
@@ -488,11 +489,30 @@ class GlobalPretrainAccuracy(BaseMetric):
             logits = model_output["logits"]
             labels = sample_list["labels"].to(logits.device)
             mask = (labels != -100)
+            token_acc = 0.0
+            em_mean = 0.0
+            f1_mean = 0.0
             if mask.any():
                 preds = logits.argmax(dim=-1)
                 token_acc = (preds[mask] == labels[mask]).float().mean().item()
-            else:
-                token_acc = 0.0
+                if self.tokenizer is not None:
+                    from training.metrics import compute_f1_em
+                    pred_texts = []
+                    label_texts = []
+                    for b_idx in range(labels.size(0)):
+                        m_b = mask[b_idx]
+                        if m_b.any():
+                            gold_ids = labels[b_idx][m_b].tolist()
+                            pred_ids = preds[b_idx][m_b].tolist()
+                            gold_str = self.tokenizer.decode(gold_ids, skip_special_tokens=True).strip()
+                            pred_str = self.tokenizer.decode(pred_ids, skip_special_tokens=True).strip()
+                            label_texts.append(gold_str)
+                            pred_texts.append(pred_str)
+                    if len(label_texts) > 0:
+                        f1_mean, em_mean = compute_f1_em(pred_texts, label_texts)
+                else:
+                    em_mean = token_acc
+                    f1_mean = token_acc
             
             bbox_acc = 0.0
             if "target_bbox_bins" in sample_list and sample_list["target_bbox_bins"] is not None and "bbox_logits" in model_output and model_output["bbox_logits"] is not None:
@@ -504,8 +524,12 @@ class GlobalPretrainAccuracy(BaseMetric):
                     # Tolerance: within 20 bins (~2% of coordinate span across 1000 bins)
                     bbox_acc = ((bb_preds[bb_mask] - bb_targets[bb_mask]).abs() <= 20).float().mean().item()
 
-            # Trọng số phản ánh cân bằng: 70% Sinh từ vựng (chính) + 30% Định vị toạ độ (bổ trợ)
-            total_acc = (0.7 * token_acc + 0.3 * bbox_acc) if bbox_acc > 0 else token_acc
+            # Trọng số phản ánh cân bằng: 50% F1 + 20% EM + 30% Định vị toạ độ (bổ trợ)
+            if bbox_acc > 0:
+                total_acc = 0.5 * f1_mean + 0.2 * em_mean + 0.3 * bbox_acc
+            else:
+                total_acc = 0.7 * f1_mean + 0.3 * em_mean
+
             _loss_tensor = model_output.get("loss", torch.tensor(0.0))
             loss_val = _loss_tensor.mean().item() if torch.is_tensor(_loss_tensor) else float(_loss_tensor)
             _t_loss = model_output.get("text_loss", _loss_tensor)
@@ -515,8 +539,9 @@ class GlobalPretrainAccuracy(BaseMetric):
 
             device = logits.device
             return torch.tensor(
-                [total_acc, token_acc, bbox_acc, t_loss_val, b_loss_val, loss_val],
-                device=device
+                [total_acc, token_acc, bbox_acc, t_loss_val, b_loss_val, loss_val, em_mean, f1_mean],
+                device=device,
+                dtype=torch.float32
             )
 
         # 1. Lấy Acc

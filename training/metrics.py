@@ -135,7 +135,8 @@ def compute_f1_em(preds: List[str], labels: List[str]):
 
         # Trường hợp 1 bên rỗng
         if len(p_toks) == 0 or len(l_toks) == 0:
-            f1_scores.append(0.0)
+            f1 = 1.0 if len(p_toks) == len(l_toks) == 0 else 0.0
+            f1_scores.append(f1)
             em_scores.append(em)
             continue
 
@@ -152,6 +153,9 @@ def compute_f1_em(preds: List[str], labels: List[str]):
         f1_scores.append(f1)
         em_scores.append(em)
 
+    if not f1_scores:
+        return 0.0, 0.0
+
     return float(np.mean(f1_scores)), float(np.mean(em_scores))
 
 
@@ -167,7 +171,20 @@ def simple_pretrain_aggregator(eval_pred):
     else:
         mean_vals = np.mean(preds, axis=0)
 
-        # PreSTU SplitOCR Dual-Target mode (6 metrics: total_acc, text_acc, bbox_acc, text_loss, bbox_loss, total_loss)
+        # PreSTU SplitOCR Dual-Target mode (8 metrics: total_acc, text_acc, bbox_acc, text_loss, bbox_loss, total_loss, em, f1)
+        if mean_vals.shape[0] == 8:
+            return {
+                "pretrain_acc": float(mean_vals[0]),
+                "acc_text": float(mean_vals[1]),
+                "acc_bbox": float(mean_vals[2]),
+                "loss_text": float(mean_vals[3]),
+                "loss_bbox": float(mean_vals[4]),
+                "loss_total": float(mean_vals[5]),
+                "em": float(mean_vals[6]),
+                "f1": float(mean_vals[7]),
+            }
+
+        # PreSTU SplitOCR Dual-Target fallback (6 metrics)
         if mean_vals.shape[0] == 6:
             return {
                 "pretrain_acc": float(mean_vals[0]),
@@ -234,6 +251,9 @@ def build_compute_metrics_finetune(tokenizer_for_metrics):
             gen_ids = gen_ids.detach().cpu().to(torch.long).numpy()
         gen_ids = np.asarray(gen_ids, dtype=np.int64)
 
+        if gen_ids.ndim == 3:
+            gen_ids = np.argmax(gen_ids, axis=-1)
+
         pad_id = tokenizer_for_metrics.pad_token_id or 0
         gen_ids[gen_ids < 0] = pad_id
 
@@ -298,6 +318,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 self.processing_class = self.tokenizer
         self.pretrain_loss_fn = pretrain_loss_fn
         self.pretrain_acc_fn = pretrain_acc_fn
+        if self.pretrain_acc_fn is not None and getattr(self.pretrain_acc_fn, "tokenizer", None) is None:
+            self.pretrain_acc_fn.tokenizer = self.tokenizer
         self._running_loss = 0.0
         self._running_acc = 0.0
         self._running_cnt = 0
@@ -483,18 +505,23 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
             avg_acc = self._running_acc / self._running_cnt
             current_epoch = self.state.epoch or 0.0
 
-            if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) == 6:
+            if isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) in (6, 8):
                 txt_a = batch_acc[1].item()
                 box_a = batch_acc[2].item()
                 txt_l = batch_acc[3].item()
                 box_l = batch_acc[4].item()
+                extra_str = ""
+                if len(batch_acc) >= 8:
+                    em_v = batch_acc[6].item()
+                    f1_v = batch_acc[7].item()
+                    extra_str = f", EM:{em_v:.4f}, F1:{f1_v:.4f}"
                 print(
                     f"[Pretrain SplitOCR] step={step_idx} | epoch={current_epoch:.3f} | "
                     f"Total Loss={avg_loss:.4f}, Acc={avg_acc:.4f} | "
-                    f"Text -> Loss:{txt_l:.4f}, Acc:{txt_a:.4f} | "
+                    f"Text -> Loss:{txt_l:.4f}, Acc:{txt_a:.4f}{extra_str} | "
                     f"BBox -> Loss:{box_l:.4f}, Acc:{box_a:.4f}"
                 )
-            elif isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) > 6:
+            elif isinstance(batch_acc, torch.Tensor) and batch_acc.ndim > 0 and len(batch_acc) > 8:
                 twc_a = batch_acc[2].item()
                 twc_l = batch_acc[5].item()
                 gen_l = batch_acc[8].item() if len(batch_acc) >= 9 else 0.0

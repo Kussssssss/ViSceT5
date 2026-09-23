@@ -371,14 +371,19 @@ def _debug_split_ocr(model, data_collator, dataset, device, n_show=5):
     labels = batch["labels"]
     in_ids = batch["input_ids"]
     shown = 0
+    all_preds, all_golds = [], []
+    from training.metrics import compute_f1_em
     for i in range(labels.size(0)):
         pos = [p for p, t in enumerate(labels[i].tolist()) if t != -100]
         prompt = tok.decode([int(t) for t in in_ids[i].tolist() if int(t) != data_collator.pad_id], skip_special_tokens=True).strip()
         gold = tok.decode([int(labels[i][p]) for p in pos], skip_special_tokens=True).strip()
         prd = tok.decode([int(pred[i][p].item()) for p in pos], skip_special_tokens=True).strip()
+        all_preds.append(prd)
+        all_golds.append(gold)
+        s_f1, s_em = compute_f1_em([prd], [gold])
         print(f"  [sample {i}] Prompt: {prompt[:90]}")
         print(f"              Target: {gold[:80]}")
-        print(f"              Pred  : {prd[:80]}")
+        print(f"              Pred  : {prd[:80]}  (EM={s_em:.2f}, F1={s_f1:.2f})")
         if "bbox_logits" in out and "target_bbox_bins" in batch:
             bb_logits = out["bbox_logits"]
             bb_targets = batch["target_bbox_bins"]
@@ -393,6 +398,9 @@ def _debug_split_ocr(model, data_collator, dataset, device, n_show=5):
         shown += 1
         if shown >= n_show:
             break
+    if all_preds:
+        batch_f1, batch_em = compute_f1_em(all_preds, all_golds)
+        print(f"  --> Batch Debug Summary: EM = {batch_em:.4f} | F1 = {batch_f1:.4f}")
     print("=" * 70 + "\n")
     model.train()
 
@@ -459,12 +467,6 @@ def _debug_mlm_predictions(model, data_collator, dataset, device, n_show=5):
             break
     if shown == 0:
         print("  (không có mẫu sạch nào có vị trí mask trong batch này)")
-    print("=" * 70 + "\n")
-    model.train()
-
-
-    if shown == 0:
-        print("  (no cloze spans in this batch — no question∩OCR overlap)")
     print("=" * 70 + "\n")
     model.train()
 
@@ -853,7 +855,7 @@ def main(args_list=None):
 
     # 5. Loss, Metrics, Collator
     pretrain_loss_fn = ViT5PretrainLoss(pretrain_ablation_mode=mode)
-    pretrain_acc_fn = GlobalPretrainAccuracy(mode=mode)
+    pretrain_acc_fn = GlobalPretrainAccuracy(mode=mode, tokenizer=tokenizer)
 
     data_collator = ViT5VQADataCollator(
         tokenizer=tokenizer,
