@@ -917,6 +917,11 @@ class OpenViVQAModel(PreTrainedModel):
         # ----------------------------------------------------
         # 3. ABLATION MODULE: OCR CONSFORMER (Only used in Finetune when OCR features provided)
         # ----------------------------------------------------
+        # Vị trí slot mask-box CHỈ được gán ở nhánh pretrain (bbox head). Khởi tạo None
+        # TRƯỚC nhánh để FINETUNE (không có bbox) không bị UnboundLocalError khi khối bbox
+        # phía dưới tham chiếu mask_box_start.
+        mask_box_start = None
+        mask_box_end = None
         if not self.pretrain and twa_word_ids is not None and ocr_info is not None:
             word_ids_for_ocr = twa_word_ids.to(device)
             pad_id = self.vit5.config.pad_token_id
