@@ -1010,16 +1010,47 @@ def main(args_list=None):
     )
     if not _hf_tok:
         try:
+            from google.colab import userdata
+            _hf_tok = userdata.get("HF_TOKEN") or ""
+        except Exception:
+            pass
+    if not _hf_tok:
+        try:
             from huggingface_hub import get_token
             _hf_tok = get_token() or ""
         except Exception:
             _hf_tok = ""
+
+    if _hf_tok:
+        os.environ.setdefault("HF_TOKEN", _hf_tok)
+        try:
+            from huggingface_hub import login
+            login(token=_hf_tok, add_to_git_credential=False)
+        except Exception:
+            pass
 
     _hf_repo = (
         os.environ.get("HF_REPO", "").strip()
         or getattr(training_args, "hub_model_id", None)
         or ""
     )
+    if not _hf_repo:
+        try:
+            from google.colab import userdata
+            _hf_repo = userdata.get("HF_REPO") or ""
+        except Exception:
+            pass
+    if _hf_tok and not _hf_repo:
+        try:
+            from huggingface_hub import HfApi
+            _who = HfApi(token=_hf_tok).whoami()
+            _user = _who.get("name") or _who.get("username")
+            if _user:
+                _hf_repo = f"{_user}/ViSceT5-mra-pretrain"
+                print(f"ℹ️ [HF] Tự động xác định pretrain HF repo từ tài khoản: {_hf_repo}")
+        except Exception as _e:
+            pass
+
     if getattr(training_args, "push_to_hub", False):
         # Tắt cờ push_to_hub nội bộ của HF Trainer (vì phụ thuộc git-lfs dễ lỗi trên Kaggle)
         # Thay vào đó, toàn bộ việc upload checkpoint và model được thực hiện qua HfApi.upload_folder thuần REST API.
