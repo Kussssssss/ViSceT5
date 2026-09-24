@@ -523,6 +523,40 @@ def main(args_list=None):
         print("⚡ [finetune] Enabling gradient checkpointing (ViT5 + QA-CLIP + ConvNeXt MRA) to save VRAM...")
         model.gradient_checkpointing_enable()
 
+    # Finetune partial or full vision unfreeze (n=0 keeps frozen, n=-1 or n>=num_layers unfreezes FULL ViT).
+    _vuf = int(getattr(model_args, "vision_unfreeze_last_n", 0))
+    if _vuf != 0 and hasattr(model, "qa_clip") and hasattr(model.qa_clip, "vision_model"):
+        if "VISION_LR_SCALE" not in os.environ:
+            os.environ["VISION_LR_SCALE"] = "0.1"
+        try:
+            _layers = model.qa_clip.vision_model.encoder.layers
+            _cnt = 0
+            if _vuf == -1 or _vuf >= len(_layers):
+                for _p in model.qa_clip.vision_model.parameters():
+                    if not _p.requires_grad:
+                        _p.requires_grad = True
+                        _cnt += _p.numel()
+                print(f"🧊➡️🔥 [finetune] FULL ViT unfreeze: TẤT CẢ {len(_layers)} layers + embeddings + layernorms "
+                      f"của CLIP-vision → +{_cnt:,} params trainable. (grads ON)")
+            elif _vuf > 0:
+                _k = min(_vuf, len(_layers))
+                for _layer in _layers[-_k:]:
+                    for _p in _layer.parameters():
+                        if not _p.requires_grad:
+                            _p.requires_grad = True
+                            _cnt += _p.numel()
+                _pln = getattr(model.qa_clip.vision_model, "post_layernorm", None)
+                if _pln is not None:
+                    for _p in _pln.parameters():
+                        if not _p.requires_grad:
+                            _p.requires_grad = True
+                            _cnt += _p.numel()
+                print(f"🧊➡️🔥 [finetune] vision unfreeze: last {_k}/{len(_layers)} CLIP-vision "
+                      f"layers (+post_layernorm) → +{_cnt:,} params trainable. (grads ON)")
+            model._vision_trainable = True
+        except Exception as _e:
+            print(f"⚠️ [finetune] vision unfreeze skipped ({_e}).")
+
     # 5. Loss, Metrics, Collator
     data_collator = ViT5VQADataCollator(
         tokenizer=tokenizer,

@@ -824,32 +824,43 @@ def main(args_list=None):
         print("⚡ [pretrain] Enabling gradient checkpointing (ViT5 + QA-CLIP + ConvNeXt MRA) to save VRAM...")
         model.gradient_checkpointing_enable()
 
-    # PRETRAIN-ONLY partial vision unfreeze (representation learning). Done HERE in
+    # PRETRAIN-ONLY partial or full vision unfreeze (representation learning). Done HERE in
     # the training script via requires_grad — NOT inside models/ — so the model
     # architecture stays identical to main and finetune (which rebuilds the model)
-    # is completely unaffected. n=0 keeps the frozen backbone (default).
+    # is completely unaffected. n=0 keeps the frozen backbone (default). n=-1 or n>=num_layers unfreezes FULL ViT.
     _vuf = int(getattr(model_args, "vision_unfreeze_last_n", 0))
-    if _vuf > 0:
+    if _vuf != 0:
         if "VISION_LR_SCALE" not in os.environ:
             os.environ["VISION_LR_SCALE"] = "0.1"
         try:
             _layers = model.qa_clip.vision_model.encoder.layers
-            _k = min(_vuf, len(_layers)); _cnt = 0
-            for _layer in _layers[-_k:]:
-                for _p in _layer.parameters():
+            _cnt = 0
+            if _vuf == -1 or _vuf >= len(_layers):
+                for _p in model.qa_clip.vision_model.parameters():
                     if not _p.requires_grad:
-                        _p.requires_grad = True; _cnt += _p.numel()
-            _pln = getattr(model.qa_clip.vision_model, "post_layernorm", None)
-            if _pln is not None:
-                for _p in _pln.parameters():
-                    if not _p.requires_grad:
-                        _p.requires_grad = True; _cnt += _p.numel()
+                        _p.requires_grad = True
+                        _cnt += _p.numel()
+                print(f"🧊➡️🔥 [pretrain] FULL ViT unfreeze: TẤT CẢ {len(_layers)} layers + embeddings + layernorms "
+                      f"của CLIP-vision → +{_cnt:,} params trainable. (grads ON)")
+            elif _vuf > 0:
+                _k = min(_vuf, len(_layers))
+                for _layer in _layers[-_k:]:
+                    for _p in _layer.parameters():
+                        if not _p.requires_grad:
+                            _p.requires_grad = True
+                            _cnt += _p.numel()
+                _pln = getattr(model.qa_clip.vision_model, "post_layernorm", None)
+                if _pln is not None:
+                    for _p in _pln.parameters():
+                        if not _p.requires_grad:
+                            _p.requires_grad = True
+                            _cnt += _p.numel()
+                print(f"🧊➡️🔥 [pretrain] vision unfreeze: last {_k}/{len(_layers)} CLIP-vision "
+                      f"layers (+post_layernorm) → +{_cnt:,} params trainable. (grads ON)")
             # Tell the forward NOT to no_grad/detach QA-CLIP (grads must flow to the
             # unfrozen layers). NaN root fix + fused_seq guard keep it stable; the
             # training_step qa_clip grad-clip prevents explosion.
             model._vision_trainable = True
-            print(f"🧊➡️🔥 [pretrain] vision unfreeze: last {_k}/{len(_layers)} CLIP-vision "
-                  f"layers (+post_layernorm) → +{_cnt:,} params trainable. (grads ON)")
         except Exception as _e:
             print(f"⚠️ [pretrain] vision unfreeze skipped ({_e}).")
 

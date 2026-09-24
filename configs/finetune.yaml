@@ -9,6 +9,7 @@ ablation_use_qaclip: true    # (1) Late-fusion QACLIP
 ablation_use_vs: true        # (2) Visual Search (crop)
 ablation_use_ocr: true       # (3) OCR Consformer
 ablation_use_ocr_aug: true   # (4) OCR augmentation (correct/noise/keep → nối bản OCR augment cạnh OCR gốc)
+vision_unfreeze_last_n: 0      # Mở băng ViT trong finetune: 0 = giữ đóng băng, 4 = top-4 layers, -1 = full ViT
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
