@@ -73,7 +73,8 @@ class ModelArguments:
     )
     vision_unfreeze_last_n: int = field(
         default=0,
-        metadata={"help": "Unfreeze last N CLIP vision layers (+post_layernorm) so pretrain learns visual features. 0 = frozen backbone."}
+        metadata={"help": "Unfreeze last N CLIP vision layers (+post_layernorm) so pretrain/finetune learns visual features. "
+                          "0 = frozen backbone. N >= total layers or -1 = unfreeze FULL ViT (all layers + embeddings + layernorms)."}
     )
     mlm_mask_mode: str = field(
         default="wholeword",
