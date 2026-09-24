@@ -273,6 +273,55 @@ def main(args_list=None):
     ocr_config = DEFAULT_OCR_CONFIG
     vision_ocr = Vision_Encode_Ocr_Feature(ocr_config)
     
+    # ── Hugging Face credentials & repo resolution ──
+    _hf_tok = (
+        os.environ.get("HF_TOKEN", "").strip()
+        or getattr(training_args, "hub_token", None)
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN", "").strip()
+    )
+    if not _hf_tok:
+        try:
+            from google.colab import userdata
+            _hf_tok = userdata.get("HF_TOKEN") or ""
+        except Exception:
+            pass
+    if not _hf_tok:
+        try:
+            from huggingface_hub import get_token
+            _hf_tok = get_token() or ""
+        except Exception:
+            _hf_tok = ""
+
+    if _hf_tok:
+        os.environ.setdefault("HF_TOKEN", _hf_tok)
+        try:
+            from huggingface_hub import login
+            login(token=_hf_tok, add_to_git_credential=False)
+        except Exception:
+            pass
+
+    _hf_repo = (
+        os.environ.get("HF_REPO", "").strip()
+        or getattr(training_args, "hub_model_id", None)
+        or ""
+    )
+    if not _hf_repo:
+        try:
+            from google.colab import userdata
+            _hf_repo = userdata.get("HF_REPO") or ""
+        except Exception:
+            pass
+    if _hf_tok and not _hf_repo:
+        try:
+            from huggingface_hub import HfApi
+            _who = HfApi(token=_hf_tok).whoami()
+            _user = _who.get("name") or _who.get("username")
+            if _user:
+                _hf_repo = f"{_user}/ViSceT5-mra-finetune"
+                print(f"ℹ️ [HF] Tự động xác định finetune HF repo từ tài khoản: {_hf_repo}")
+        except Exception:
+            pass
+
     # 3. Handle Weights Downloads
     if training_args.pretrain_weights_id:
         PRETRAIN_CKPT_DIR = os.path.join(training_args.output_dir, "pretrain_ckpt_base")
@@ -285,6 +334,47 @@ def main(args_list=None):
         training_args.resume_from_checkpoint = resume_dir
 
     ckpt_to_load = model_args.model_name_or_path
+    if ckpt_to_load and not os.path.exists(ckpt_to_load):
+        _downloaded = False
+        try:
+            from huggingface_hub import snapshot_download
+            print(f"🌐 [finetune] '{ckpt_to_load}' không tìm thấy trên local. Thử tải từ Hugging Face Hub...")
+            _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
+            snapshot_download(
+                repo_id=ckpt_to_load,
+                repo_type="model",
+                token=_hf_tok if _hf_tok else None,
+                local_dir=_hf_dir,
+                ignore_patterns=["*optimizer.pt", "*rng_state*", "*scheduler.pt", "checkpoint-*/**"]
+            )
+            ckpt_to_load = _hf_dir
+            model_args.model_name_or_path = _hf_dir
+            _downloaded = True
+            print(f"✅ [finetune] Đã tải xong pretrain model từ Hub ({ckpt_to_load}) về: {_hf_dir}")
+        except Exception:
+            pass
+
+        if not _downloaded and _hf_tok:
+            try:
+                from huggingface_hub import HfApi, snapshot_download
+                _who = HfApi(token=_hf_tok).whoami()
+                _user = _who.get("name") or _who.get("username")
+                _candidate_repo = f"{_user}/ViSceT5-mra-pretrain"
+                print(f"🌐 [finetune] Thử tìm pretrain repo trên tài khoản HF: {_candidate_repo}...")
+                _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
+                snapshot_download(
+                    repo_id=_candidate_repo,
+                    repo_type="model",
+                    token=_hf_tok,
+                    local_dir=_hf_dir,
+                    ignore_patterns=["*optimizer.pt", "*rng_state*", "*scheduler.pt", "checkpoint-*/**"]
+                )
+                ckpt_to_load = _hf_dir
+                model_args.model_name_or_path = _hf_dir
+                print(f"✅ [finetune] Tìm thấy và đã tải xong pretrain model từ Hub: {_candidate_repo} -> {_hf_dir}")
+            except Exception as _e2:
+                print(f"ℹ️ [finetune] Không tìm thấy pretrain repo tự động ({_e2}); tiếp tục khởi tạo mặc định.")
+
     if ckpt_to_load and os.path.isdir(ckpt_to_load):
         # If directory doesn't have model.safetensors or pytorch_model.bin directly, check for checkpoint-*
         has_direct_weight = (os.path.exists(os.path.join(ckpt_to_load, "model.safetensors")) or
@@ -494,30 +584,9 @@ def main(args_list=None):
         compute_metrics=compute_metrics_fn,
     )
 
-    # ── Upload TỪNG checkpoint NGAY khi lưu (chống mất dữ liệu khi Vast bị reclaim) ──
-    # Bài học: run_pipeline chỉ upload SAU khi train xong (bước 3.5); finetune crash
-    # hoặc máy interruptible bị chiếm giữa chừng → mất trắng dù đã set HF_REPO. Callback
-    # này push checkpoint mới nhất lên HF ngay mỗi lần Trainer save (dùng HfApi.upload_folder
-    # thuần API — KHÔNG cần git-lfs). Gated bằng env HF_TOKEN+HF_REPO hoặc --push_to_hub/--hub_model_id.
-    _hf_tok = (
-        os.environ.get("HF_TOKEN", "").strip()
-        or getattr(training_args, "hub_token", None)
-        or os.environ.get("HUGGING_FACE_HUB_TOKEN", "").strip()
-    )
-    if not _hf_tok:
-        try:
-            from huggingface_hub import get_token
-            _hf_tok = get_token() or ""
-        except Exception:
-            _hf_tok = ""
-
-    _hf_repo = (
-        os.environ.get("HF_REPO", "").strip()
-        or getattr(training_args, "hub_model_id", None)
-        or ""
-    )
+    # ── Upload TỪNG checkpoint NGAY khi lưu (chống mất dữ liệu khi Vast/Colab bị reclaim) ──
     if getattr(training_args, "push_to_hub", False):
-        # Tắt cờ push_to_hub nội bộ của HF Trainer (vì phụ thuộc git-lfs dễ lỗi trên Kaggle)
+        # Tắt cờ push_to_hub nội bộ của HF Trainer (vì phụ thuộc git-lfs dễ lỗi trên Kaggle/Colab)
         # Thay vào đó, toàn bộ việc upload checkpoint và model được thực hiện qua HfApi.upload_folder thuần REST API.
         training_args.push_to_hub = False
 
