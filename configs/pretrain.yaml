@@ -52,3 +52,9 @@ fp16: false
 bf16: true
 gradient_checkpointing: true
 report_to: "none"
+
+# Hugging Face Hub (tự động đẩy checkpoint & model tốt nhất lên repo để chống mất)
+push_to_hub: false
+hub_model_id: null
+hub_token: null
+hub_private_repo: false

@@ -54,3 +54,9 @@ report_to: "none"
 
 generation_max_length: 56
 generation_num_beams: 4
+
+# Hugging Face Hub (tự động đẩy checkpoint & model tốt nhất lên repo để chống mất)
+push_to_hub: false
+hub_model_id: null
+hub_token: null
+hub_private_repo: false

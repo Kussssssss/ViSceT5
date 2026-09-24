@@ -498,9 +498,29 @@ def main(args_list=None):
     # Bài học: run_pipeline chỉ upload SAU khi train xong (bước 3.5); finetune crash
     # hoặc máy interruptible bị chiếm giữa chừng → mất trắng dù đã set HF_REPO. Callback
     # này push checkpoint mới nhất lên HF ngay mỗi lần Trainer save (dùng HfApi.upload_folder
-    # thuần API — KHÔNG cần git-lfs). Gated bằng env HF_TOKEN+HF_REPO; không set thì bỏ qua.
-    _hf_tok = os.environ.get("HF_TOKEN", "").strip()
-    _hf_repo = os.environ.get("HF_REPO", "").strip()
+    # thuần API — KHÔNG cần git-lfs). Gated bằng env HF_TOKEN+HF_REPO hoặc --push_to_hub/--hub_model_id.
+    _hf_tok = (
+        os.environ.get("HF_TOKEN", "").strip()
+        or getattr(training_args, "hub_token", None)
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN", "").strip()
+    )
+    if not _hf_tok:
+        try:
+            from huggingface_hub import get_token
+            _hf_tok = get_token() or ""
+        except Exception:
+            _hf_tok = ""
+
+    _hf_repo = (
+        os.environ.get("HF_REPO", "").strip()
+        or getattr(training_args, "hub_model_id", None)
+        or ""
+    )
+    if getattr(training_args, "push_to_hub", False):
+        # Tắt cờ push_to_hub nội bộ của HF Trainer (vì phụ thuộc git-lfs dễ lỗi trên Kaggle)
+        # Thay vào đó, toàn bộ việc upload checkpoint và model được thực hiện qua HfApi.upload_folder thuần REST API.
+        training_args.push_to_hub = False
+
     if _hf_tok and _hf_repo:
         from transformers.trainer_callback import TrainerCallback
         from huggingface_hub import HfApi
@@ -512,6 +532,12 @@ def main(args_list=None):
                 ck = os.path.join(self.out, f"checkpoint-{state.global_step}")
                 if not os.path.isdir(ck):
                     return
+                # Lưu kèm tokenizer vào checkpoint để checkpoint hoàn toàn độc lập
+                try:
+                    if tokenizer is not None:
+                        tokenizer.save_pretrained(ck)
+                except Exception:
+                    pass
                 # KHÔNG push checkpoint HỎNG (NaN/inf): tránh làm nguồn resume bị nhiễm độc
                 # → lần sau auto-resume nạp lại trạng thái hỏng (death-spiral). Bỏ qua bản này.
                 _model = kw.get("model")
@@ -647,6 +673,29 @@ def main(args_list=None):
     
     # Save best
     trainer.save_model(training_args.output_dir)
+    try:
+        if tokenizer is not None:
+            tokenizer.save_pretrained(training_args.output_dir)
+    except Exception:
+        pass
+
+    if _hf_tok and _hf_repo:
+        try:
+            print(f"☁️ [HF] Đang upload model tốt nhất từ {training_args.output_dir} lên repo: {_hf_repo} ...")
+            from huggingface_hub import HfApi
+            api = HfApi(token=_hf_tok)
+            api.create_repo(repo_id=_hf_repo, repo_type="model", exist_ok=True)
+            _light = os.environ.get("HF_PUSH_OPTIM", "1").lower() in ("0", "false", "no", "off")
+            _ignore = ["*optimizer.pt", "*rng_state*", "*scheduler.pt", "checkpoint-*/**"] if _light else ["checkpoint-*/**"]
+            api.upload_folder(
+                folder_path=training_args.output_dir,
+                repo_id=_hf_repo,
+                repo_type="model",
+                ignore_patterns=_ignore,
+            )
+            print(f"✅ [HF] Đã lưu thành công model tốt nhất lên Hugging Face Hub: https://huggingface.co/{_hf_repo}")
+        except Exception as _e:
+            print(f"⚠️ [HF] Upload model cuối lên HF lỗi: {_e}")
     
     print("✅ Finetune complete and saved successfully.")
 
