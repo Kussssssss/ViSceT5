@@ -579,6 +579,12 @@ class ViT5VQADataCollator:
         if mask_prob is not None: self.mask_prob = float(mask_prob)
         if mask_seed is not None: self.mask_seed = int(mask_seed)
         if debug is not None: self.debug = bool(debug)
+        if self.pretrain:
+            self.txt_max_len = 128
+            self.tgt_max_len = 128
+        else:
+            self.txt_max_len = int(getattr(self.cfg, "text_max_input_length", 32))
+            self.tgt_max_len = int(getattr(self.cfg, "text_max_target_length", 56))
 
     def _is_noise_text(self, s, q_tokens_set=None):
         if not s: return True
@@ -974,8 +980,9 @@ class ViT5VQADataCollator:
                         rel = found if found else tok
                     else: rel = tok
             related.append(rel)
+        pad_tok = self.tokenizer.pad_token or "<pad>"
         while len(padded) < ocr_max_num:
-            padded.append(self.tokenizer.pad_token); related.append(self.tokenizer.pad_token)
+            padded.append(pad_tok); related.append(pad_tok)
         return padded, related
 
     def _add_cons_ocr_info(self, ocr_tokens, ocr_max_num):
@@ -1219,6 +1226,8 @@ class ViT5VQADataCollator:
         # NHÁNH FINETUNE / INFERENCE
         # =========================================================
         else:
+            use_ocr_aug = bool(getattr(self, "use_ocr_aug_finetune", False))
+            adv_pro = float(getattr(self, "adv_probability_finetune", 1.0))
             ocr_info_list, twa_char_list, twa_char_mask_list, twa_word_ids_list, ocr_to_word_map_list, ocr_mask_list = [], [], [], [], [], []
 
             for i in range(len(batch)):
