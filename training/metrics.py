@@ -357,6 +357,8 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
 
         def _is_vision(n):
+            if "mra_adapters" in n:
+                return False  # Newly initialized adapter -> full base LR
             return ("qa_clip" in n) or ("mra_cnn" in n) or ("visual_search" in n)
 
         def _grp(is_v, is_d):
