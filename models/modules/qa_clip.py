@@ -140,64 +140,153 @@ class MMCLIPEncoderLayer(nn.Module):
             outputs += (attn_weights,)
         return outputs
 
-class MRAdapter(nn.Module):
-    """Mixture-of-Resolution Adapter (Luo et al., 2024, Eq. 3-4).
-
-    Bom dac trung CUOI cua ConvNeXt do-phan-giai-cao (F_vh) vao token ViT do-phan-giai-thap,
-    CUNG vi tri o (token i CNN <-> patch i ViT, deu row-major tren luoi grid x grid):
-
-        F' = F_vl + f_l(F_vl) + g . f_h(F_vh)
-        g  = tanh(W2 . GELU(W1 . pool([f_l(F_vl); f_h(F_vh)])))
-
-    - f_l: conv block (dwconv 3x3 + LN + pointwise MLP) tren luoi ViT; residual F_vl+f_l
-           nam O NGOAI theo Eq.3 (KHONG residual noi bo -> tranh cong F_vl hai lan).
-    - f_h: MLP dua kenh ConvNeXt (d_cnn) ve d_vit (dung paper: "f_h is an MLP layer").
-    - g  : cong dong theo kenh. DUNG paper Eq.4: W1 in R^{2d x d/2}, W2 in R^{d/2 x d},
-           fv = pool([f_l; f_h]) (2d), sigma=GELU, delta=Tanh, g in R^d.
-           Khoi tao ~0 (W2 std=1e-3) -> luc dau nhanh high-res gan TAT, model bat dau
-           tu dung CLIP thuan roi mo dan (an toan nhu ReZero), gradient van chay tu buoc 1.
+class MultiPathAlignModule(nn.Module):
+    """Features combination module at the final stage of ViT (LLaVA-HR / MRA).
+    Combines fast (ViT) and slow (ConvNeXt) features before feeding to projector/LLM.
     """
-
-    def __init__(self, d_vit: int, d_cnn: int, grid: int = 14):
+    def __init__(self, fast_vision_dim: int, slow_vision_dim: int):
         super().__init__()
+        self.fast_proj = nn.Linear(fast_vision_dim, fast_vision_dim)
+        self.slow_proj = nn.Linear(slow_vision_dim, fast_vision_dim)
+
+    def forward(self, fast_feat: torch.Tensor, slow_feat: torch.Tensor) -> torch.Tensor:
+        if slow_feat.ndim == 4:
+            b, c, h, w = slow_feat.shape
+            slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
+        if slow_feat.shape[1] < fast_feat.shape[1]:
+            b, l, c = slow_feat.shape
+            src_size = int(math.isqrt(l))
+            dst_size = int(math.isqrt(fast_feat.shape[1]))
+            slow_feat = slow_feat.transpose(1, 2).view(b, c, src_size, src_size)
+            slow_feat = F.interpolate(slow_feat.float(), size=(dst_size, dst_size), mode='bilinear',
+                                      align_corners=True).to(dtype=slow_feat.dtype)
+            slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
+        elif slow_feat.shape[1] > fast_feat.shape[1]:
+            b, l, c = slow_feat.shape
+            src_size = int(math.isqrt(l))
+            dst_size = int(math.isqrt(fast_feat.shape[1]))
+            slow_feat = slow_feat.transpose(1, 2).view(b, c, src_size, src_size)
+            if src_size % dst_size == 0:
+                stride = src_size // dst_size
+                slow_feat = F.avg_pool2d(slow_feat, stride, stride)
+            else:
+                slow_feat = F.adaptive_avg_pool2d(slow_feat, (dst_size, dst_size))
+            slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
+        return self.fast_proj(fast_feat) + self.slow_proj(slow_feat)
+
+
+class S2FStitchAlignModuleV2(nn.Module):
+    """Mixture-of-Resolution Adapter (MR-Adapter, Luo et al., ICLR 2025 / LLaVA-HR).
+    Official implementation from authors' repository (S2FStitchAlignModuleV2).
+
+    Slow-to-Fast (S2F) alignment: injects fine-grained high-resolution ConvNeXt (slow branch)
+    representations into low-resolution ViT (fast branch) tokens at stage boundaries:
+        F'_vl = F_vl + fast_proj(GELU(fast_conv(F_vl))) + slow_feat_align * gate.tanh()
+    where:
+        - fast_conv is 7x7 depthwise conv (ConvNeXt-style receptive field)
+        - fast_proj is 1x1 conv
+        - slow_conv is 1x1 conv
+        - slow_proj is 1x1 conv
+        - gate is dynamic MLP mapping pooled [fast; slow_align] -> 1 (scalar gating bounded in [-1, 1])
+        - zero_init: zero-initializes projection layers for exact identity mapping at step 0 (ReZero-style)
+    """
+    def __init__(
+        self,
+        fast_vision_dim: Optional[int] = None,
+        slow_vision_dim: Optional[int] = None,
+        zero_init: bool = True,
+        d_vit: Optional[int] = None,
+        d_cnn: Optional[int] = None,
+        grid: int = 14,
+    ):
+        super().__init__()
+        fast_dim = int(fast_vision_dim if fast_vision_dim is not None else d_vit)
+        slow_dim = int(slow_vision_dim if slow_vision_dim is not None else d_cnn)
+        self.fast_vision_dim = fast_dim
+        self.slow_vision_dim = slow_dim
         self.grid = int(grid)
-        # f_l: depthwise 3x3 + pointwise MLP tren luoi ViT
-        self.dwconv = nn.Conv2d(d_vit, d_vit, kernel_size=3, padding=1, groups=d_vit)
-        self.ln_l = nn.LayerNorm(d_vit)
-        self.pw1 = nn.Linear(d_vit, d_vit)
-        self.pw2 = nn.Linear(d_vit, d_vit)
-        # f_h: MLP 2 lop kenh ConvNeXt -> d_vit (dung paper: "f_h is an MLP").
-        self.d_cnn = int(d_cnn)
-        self.ln_h = nn.LayerNorm(d_cnn)
-        self.fh = nn.Sequential(
-            nn.Linear(d_cnn, d_vit),
+
+        # Slow (high-res CNN) branch: 1x1 conv -> GELU -> 1x1 conv
+        self.slow_conv = nn.Conv2d(slow_dim, slow_dim, 1)
+        self.slow_proj = nn.Conv2d(slow_dim, fast_dim, 1)
+
+        # Fast (low-res ViT) branch: 7x7 depthwise conv -> GELU -> 1x1 conv
+        self.fast_conv = nn.Conv2d(fast_dim, fast_dim, 7, padding=3, groups=fast_dim)
+        self.fast_proj = nn.Conv2d(fast_dim, fast_dim, 1)
+
+        # Dynamic Gating: MLP mapping pooled [fast; slow] to scalar gate
+        self.gate = nn.Sequential(
+            nn.Linear(fast_dim * 2, fast_dim // 2),
             nn.GELU(),
-            nn.Linear(d_vit, d_vit),
+            nn.Linear(fast_dim // 2, 1)
         )
-        # cong g DUNG paper Eq.4: W1 in R^{2d x d/2}, W2 in R^{d/2 x d}.
-        self.w1 = nn.Linear(2 * d_vit, d_vit // 2)
-        self.w2 = nn.Linear(d_vit // 2, d_vit)
-        # Init W2 NHO nhung KHAC 0: cong g bat dau ~0 (khoi dong nhe nhang, gan CLIP thuan)
-        # nhung gradient VAN chay vao nhanh high-res tu buoc dau. Neu zero-init hoan toan thi
-        # g=0 lam ca nhanh f_h lan duong gate->f_h deu 0 -> ConvNeXt bi dong bang 1 buoc.
-        nn.init.normal_(self.w2.weight, std=1e-3)
-        nn.init.zeros_(self.w2.bias)
 
-    def _f_l(self, x):                    # x: [B, N, d_vit], N = grid*grid
-        B, N, C = x.shape
-        g = self.grid
-        h = x.transpose(1, 2).reshape(B, C, g, g)
-        h = self.dwconv(h).reshape(B, C, N).transpose(1, 2)   # [B,N,C]
-        h = self.ln_l(h)
-        h = self.pw2(F.gelu(self.pw1(h)))
-        return h
+        # Weight initialization matching author's repo
+        nn.init.xavier_uniform_(self.slow_conv.weight)
+        nn.init.xavier_uniform_(self.fast_conv.weight)
+        nn.init.zeros_(self.slow_conv.bias)
+        nn.init.zeros_(self.fast_conv.bias)
+        if zero_init:
+            nn.init.zeros_(self.slow_proj.weight)
+            nn.init.zeros_(self.fast_proj.weight)
+        else:
+            nn.init.xavier_uniform_(self.slow_proj.weight)
+            nn.init.xavier_uniform_(self.fast_proj.weight)
+        nn.init.zeros_(self.slow_proj.bias)
+        nn.init.zeros_(self.fast_proj.bias)
 
-    def forward(self, f_vl, f_vh):        # f_vl:[B,N,d_vit]  f_vh:[B,N,d_cnn]
-        fl = self._f_l(f_vl)                              # [B,N,d_vit]
-        fh = self.fh(self.ln_h(f_vh))                     # [B,N,d_vit]
-        pooled = torch.cat([fl.mean(1), fh.mean(1)], dim=-1)   # [B, 2*d_vit]
-        g = torch.tanh(self.w2(F.gelu(self.w1(pooled))))       # [B, d_vit]
-        return f_vl + fl + g.unsqueeze(1) * fh
+    def src2dst_align(self, src_feat: torch.Tensor, dst_feat: torch.Tensor) -> Tuple[torch.Tensor, int]:
+        dst_size = int(math.isqrt(dst_feat.shape[1]))
+        if src_feat.shape[1] == dst_feat.shape[1]:
+            return src_feat, dst_size
+        b, l, c = src_feat.shape
+        src_size = int(math.isqrt(l))
+        src_feat = src_feat.transpose(1, 2).view(b, c, src_size, src_size)
+        if src_size < dst_size:
+            # upsample
+            src_feat = F.interpolate(
+                src_feat.float(), size=(dst_size, dst_size), mode='bilinear', align_corners=True
+            ).to(dtype=src_feat.dtype)
+        elif src_size > dst_size:
+            # pooling
+            if src_size % dst_size == 0:
+                stride = src_size // dst_size
+                src_feat = F.avg_pool2d(src_feat, stride, stride)
+            else:
+                src_feat = F.adaptive_avg_pool2d(src_feat, (dst_size, dst_size))
+        src_feat = src_feat.view(b, c, -1).transpose(1, 2)
+        return src_feat, dst_size
+
+    def forward(self, fast_feat: torch.Tensor, slow_feat: torch.Tensor) -> torch.Tensor:
+        # Support both 4D [B, C, H, W] and 3D [B, L, C] input for slow_feat
+        if slow_feat.ndim == 3:
+            b, l, c = slow_feat.shape
+            src_size = int(math.isqrt(l))
+            slow_feat = slow_feat.transpose(1, 2).view(b, c, src_size, src_size)
+
+        b, c, h, w = slow_feat.shape
+        _, _, d = fast_feat.shape
+
+        # High-res branch processing
+        slow_feat = self.slow_proj(F.gelu(self.slow_conv(slow_feat)))
+        slow_feat = slow_feat.view(b, d, -1).transpose(1, 2)
+        slow_feat_align, dst_size = self.src2dst_align(slow_feat, fast_feat)
+
+        # Low-res branch processing (7x7 depthwise + 1x1 pointwise with residual)
+        fast_feat_2d = fast_feat.transpose(1, 2).view(b, d, dst_size, dst_size)
+        fast_feat_2d = fast_feat_2d + self.fast_proj(F.gelu(self.fast_conv(fast_feat_2d)))
+        fast_feat = fast_feat_2d.view(b, d, dst_size * dst_size).transpose(1, 2)
+
+        # Dynamic soft gating across tokens
+        pooled = torch.cat([fast_feat, slow_feat_align], dim=-1).mean(dim=1)
+        gate = self.gate(pooled).unsqueeze(1)  # [B, 1, 1]
+
+        # Fusion
+        fast_feat = fast_feat + slow_feat_align * gate.tanh()
+        return fast_feat
+
+
+MRAdapter = S2FStitchAlignModuleV2
 
 
 class InstructCLIPEncoder(nn.Module):

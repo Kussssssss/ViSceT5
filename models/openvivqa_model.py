@@ -8,7 +8,9 @@ scope in the notebook source; it is restored here as a proper class method.
 """
 
 from configs.model_config import OpenViVQAConfig
-from models.modules.qa_clip import QACLIPEncoder, MRAdapter
+from models.modules.qa_clip import (
+    QACLIPEncoder, MRAdapter, S2FStitchAlignModuleV2, MultiPathAlignModule
+)
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding, SpatialCirclePosition
 from models.modules.visual_search import VisualSearch, AVFFusion
@@ -372,15 +374,16 @@ class OpenViVQAModel(PreTrainedModel):
             _grid = int(_vcfg.image_size) // int(_vcfg.patch_size)
             _nl = int(_vcfg.num_hidden_layers)
             self.mra_grid = _grid
-            # Bơm ĐÚNG paper: ĐẶC TRƯNG CUỐI của CNN (một F_vh, align về _grid) vào 3 STAGE CUỐI
-            # của ViT. Ranh giới 3 stage cuối của ViT L-lớp: [L/2, 3L/4, L] (0-index -1).
+            # Bơm ĐÚNG paper / code tác giả: 3 stage boundaries [L//4 - 1, 2*L//4 - 1, 3*L//4 - 1]
+            # (tương ứng với sau các layer [2, 5, 8] đối với ViT-12, hoặc [5, 11, 17] đối với ViT-24).
             _layer_ids = list(getattr(self.config, "mra_layer_ids", None) or
-                              [_nl // 2 - 1, 3 * _nl // 4 - 1, _nl - 1])
+                              [_nl // 4 - 1, 2 * _nl // 4 - 1, 3 * _nl // 4 - 1])
             enc = self.qa_clip.vision_model.encoder
             enc.mra_layer_ids = _layer_ids
-            # Tất cả adapter cùng d_vit=clip_hidden, d_cnn=feature cuối CNN, grid=lưới ViT.
+            # Tất cả adapter dùng S2FStitchAlignModuleV2 (MRAdapter) chuẩn repo tác giả.
             enc.mra_adapters = nn.ModuleList([
-                MRAdapter(d_vit=self.clip_hidden, d_cnn=_final_dim, grid=_grid) for _ in _layer_ids
+                MRAdapter(fast_vision_dim=self.clip_hidden, slow_vision_dim=_final_dim, zero_init=True, grid=_grid)
+                for _ in _layer_ids
             ])
             # Chuan hoa ImageNet cho ConvNeXt (dang buffer de theo device/dtype).
             self.register_buffer("mra_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
@@ -792,11 +795,8 @@ class OpenViVQAModel(PreTrainedModel):
             arrs.append(torch.from_numpy(np.asarray(im2, dtype=np.float32) / 255.0).permute(2, 0, 1))
         x = torch.stack(arrs).to(device)                                   # [B,3,hr,hr] in [0,1]
         x = (x - self.mra_mean.to(device)) / self.mra_std.to(device)
-        st = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype)).last_hidden_state  # [B,d_final,32,32]@1024
-        g = int(self.mra_grid)
-        st = F.adaptive_avg_pool2d(st, (g, g))                             # lop align -> [B,d_final,g,g]
-        B_, C_, _, _ = st.shape
-        return st.reshape(B_, C_, g * g).transpose(1, 2).to(self.target_dtype)  # [B,g*g,d_final]
+        st = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype)).last_hidden_state  # [B, d_final, H, W]
+        return st.to(self.target_dtype)
 
     def forward(
         self,
