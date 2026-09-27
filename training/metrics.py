@@ -356,14 +356,17 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         base, wd = self.args.learning_rate, self.args.weight_decay
         named = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
 
+        def _is_vision(n):
+            return ("qa_clip" in n) or ("mra_cnn" in n) or ("visual_search" in n)
+
         def _grp(is_v, is_d):
-            ps = [p for n, p in named if (("qa_clip" in n) == is_v) and ((n in decay) == is_d)]
+            ps = [p for n, p in named if (_is_vision(n) == is_v) and ((n in decay) == is_d)]
             return {"params": ps, "weight_decay": wd if is_d else 0.0,
                     "lr": base * (_vlr if is_v else 1.0)}
         groups = [_grp(v, d) for v in (True, False) for d in (True, False)]
         groups = [g for g in groups if g["params"]]
-        _nv = sum(p.numel() for n, p in named if "qa_clip" in n)
-        print(f">>> [pretrain] differential LR: qa_clip(vision) lr×{_vlr} (~{_nv:,} params) | rest lr×1")
+        _nv = sum(p.numel() for n, p in named if _is_vision(n))
+        print(f">>> [pretrain] differential LR: vision backbones lr×{_vlr} (~{_nv:,} params) | rest lr×1")
         self.optimizer = torch.optim.AdamW(groups, lr=base, betas=(0.9, 0.999), eps=1e-8)
         return self.optimizer
 
