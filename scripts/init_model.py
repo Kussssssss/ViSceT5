@@ -27,7 +27,7 @@ except ImportError:
 
 def main():
     repos_to_download = [
-        "openai/clip-vit-base-patch16",
+        "timm/vit_base_patch16_clip_384.laion2b_ft_in1k",
         "VietAI/vit5-base"
     ]
 

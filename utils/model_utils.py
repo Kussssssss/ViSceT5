@@ -3,6 +3,13 @@ utils/model_utils.py
 print_trainable_params(), safe_download_weights().
 """
 
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    try: sys.stdout.reconfigure(encoding='utf-8')
+    except Exception: pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try: sys.stderr.reconfigure(encoding='utf-8')
+    except Exception: pass
 import time
 import gc
 import torch
@@ -13,9 +20,10 @@ from huggingface_hub import snapshot_download
 def safe_download_weights(repos, max_retries=3, delay=5):
     for repo in repos:
         print(f"📥 Downloading weights for {repo}...")
+        ign = ["*.msgpack", "*.h5", "*.ot", "pytorch_model.bin"] if "timm" in repo else ["*.msgpack", "*.h5", "*.ot"]
         for attempt in range(max_retries):
             try:
-                snapshot_download(repo_id=repo, local_files_only=False)
+                snapshot_download(repo_id=repo, local_files_only=False, ignore_patterns=ign)
                 print(f"✅ Successfully downloaded {repo}")
                 break
             except Exception as e:
