@@ -449,6 +449,82 @@ class CLIPVisionTransformer(nn.Module):
             attentions=encoder_outputs.attentions,
         )
 
+
+def convert_timm_vit_to_clip_state_dict(timm_sd: dict, prefix: str = "vision_model.") -> dict:
+    """Converts a timm ViT state dict (e.g. vit_base_patch16_clip_384.laion2b_ft_in1k)
+    into a Hugging Face CLIPVisionTransformer state dict.
+
+    Mappings:
+      - cls_token [1, 1, 768] -> embeddings.class_embedding [768]
+      - patch_embed.proj.weight [768, 3, 16, 16] -> embeddings.patch_embedding.weight
+      - pos_embed [1, 577, 768] -> embeddings.position_embedding.weight [577, 768]
+      - norm_pre.weight/bias -> pre_layrnorm.weight/bias
+      - norm.weight/bias -> post_layernorm.weight/bias
+      - blocks.{i}.norm1 -> encoder.layers.{i}.layer_norm1
+      - blocks.{i}.norm2 -> encoder.layers.{i}.layer_norm2
+      - blocks.{i}.mlp.fc1/fc2 -> encoder.layers.{i}.mlp.fc1/fc2
+      - blocks.{i}.attn.proj -> encoder.layers.{i}.self_attn.out_proj
+      - blocks.{i}.attn.qkv [2304, 768] -> self_attn.q_proj, k_proj, v_proj [768, 768] each
+    """
+    clip_sd = {}
+    if 'cls_token' in timm_sd:
+        clip_sd[f'{prefix}embeddings.class_embedding'] = timm_sd['cls_token'].squeeze()
+    if 'patch_embed.proj.weight' in timm_sd:
+        clip_sd[f'{prefix}embeddings.patch_embedding.weight'] = timm_sd['patch_embed.proj.weight']
+    if 'pos_embed' in timm_sd:
+        clip_sd[f'{prefix}embeddings.position_embedding.weight'] = timm_sd['pos_embed'].squeeze(0)
+    if 'norm_pre.weight' in timm_sd:
+        clip_sd[f'{prefix}pre_layrnorm.weight'] = timm_sd['norm_pre.weight']
+    if 'norm_pre.bias' in timm_sd:
+        clip_sd[f'{prefix}pre_layrnorm.bias'] = timm_sd['norm_pre.bias']
+    if 'norm.weight' in timm_sd:
+        clip_sd[f'{prefix}post_layernorm.weight'] = timm_sd['norm.weight']
+    if 'norm.bias' in timm_sd:
+        clip_sd[f'{prefix}post_layernorm.bias'] = timm_sd['norm.bias']
+
+    num_blocks = 0
+    while f'blocks.{num_blocks}.norm1.weight' in timm_sd or f'blocks.{num_blocks}.attn.qkv.weight' in timm_sd:
+        num_blocks += 1
+
+    for i in range(num_blocks):
+        prefix_timm = f'blocks.{i}.'
+        prefix_clip = f'{prefix}encoder.layers.{i}.'
+        if f'{prefix_timm}norm1.weight' in timm_sd:
+            clip_sd[f'{prefix_clip}layer_norm1.weight'] = timm_sd[f'{prefix_timm}norm1.weight']
+        if f'{prefix_timm}norm1.bias' in timm_sd:
+            clip_sd[f'{prefix_clip}layer_norm1.bias'] = timm_sd[f'{prefix_timm}norm1.bias']
+        if f'{prefix_timm}norm2.weight' in timm_sd:
+            clip_sd[f'{prefix_clip}layer_norm2.weight'] = timm_sd[f'{prefix_timm}norm2.weight']
+        if f'{prefix_timm}norm2.bias' in timm_sd:
+            clip_sd[f'{prefix_clip}layer_norm2.bias'] = timm_sd[f'{prefix_timm}norm2.bias']
+        if f'{prefix_timm}mlp.fc1.weight' in timm_sd:
+            clip_sd[f'{prefix_clip}mlp.fc1.weight'] = timm_sd[f'{prefix_timm}mlp.fc1.weight']
+        if f'{prefix_timm}mlp.fc1.bias' in timm_sd:
+            clip_sd[f'{prefix_clip}mlp.fc1.bias'] = timm_sd[f'{prefix_timm}mlp.fc1.bias']
+        if f'{prefix_timm}mlp.fc2.weight' in timm_sd:
+            clip_sd[f'{prefix_clip}mlp.fc2.weight'] = timm_sd[f'{prefix_timm}mlp.fc2.weight']
+        if f'{prefix_timm}mlp.fc2.bias' in timm_sd:
+            clip_sd[f'{prefix_clip}mlp.fc2.bias'] = timm_sd[f'{prefix_timm}mlp.fc2.bias']
+        if f'{prefix_timm}attn.proj.weight' in timm_sd:
+            clip_sd[f'{prefix_clip}self_attn.out_proj.weight'] = timm_sd[f'{prefix_timm}attn.proj.weight']
+        if f'{prefix_timm}attn.proj.bias' in timm_sd:
+            clip_sd[f'{prefix_clip}self_attn.out_proj.bias'] = timm_sd[f'{prefix_timm}attn.proj.bias']
+        if f'{prefix_timm}attn.qkv.weight' in timm_sd:
+            qkv_w = timm_sd[f'{prefix_timm}attn.qkv.weight']
+            dim = qkv_w.shape[1]
+            clip_sd[f'{prefix_clip}self_attn.q_proj.weight'] = qkv_w[:dim, :]
+            clip_sd[f'{prefix_clip}self_attn.k_proj.weight'] = qkv_w[dim:2*dim, :]
+            clip_sd[f'{prefix_clip}self_attn.v_proj.weight'] = qkv_w[2*dim:3*dim, :]
+        if f'{prefix_timm}attn.qkv.bias' in timm_sd:
+            qkv_b = timm_sd[f'{prefix_timm}attn.qkv.bias']
+            dim = qkv_b.shape[0] // 3
+            clip_sd[f'{prefix_clip}self_attn.q_proj.bias'] = qkv_b[:dim]
+            clip_sd[f'{prefix_clip}self_attn.k_proj.bias'] = qkv_b[dim:2*dim]
+            clip_sd[f'{prefix_clip}self_attn.v_proj.bias'] = qkv_b[2*dim:3*dim]
+
+    return clip_sd
+
+
 class QACLIPEncoder(CLIPPreTrainedModel):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
@@ -530,6 +606,54 @@ class QACLIPEncoder(CLIPPreTrainedModel):
         integration_point = kwargs.pop("integration_point", None)
         freeze_clip = kwargs.pop("freeze_clip", None)
         target_image_size = kwargs.pop("image_size", None)
+
+        pretrained_str = str(pretrained_model_name_or_path)
+        is_timm = ("timm/" in pretrained_str) or ("vit_base_patch16_clip_384" in pretrained_str)
+
+        if is_timm:
+            import os
+            from huggingface_hub import hf_hub_download
+            import safetensors.torch
+
+            target_sz = int(target_image_size) if target_image_size is not None else 384
+            config = CLIPVisionConfig(
+                hidden_size=768,
+                intermediate_size=3072,
+                num_hidden_layers=12,
+                num_attention_heads=12,
+                image_size=target_sz,
+                patch_size=16,
+                hidden_act="quick_gelu",
+            )
+            ins_dim = int(instruction_dim) if instruction_dim is not None else 768
+            frz = bool(freeze_clip) if freeze_clip is not None else False
+            config.instruction_dim = ins_dim
+            config.integration_point = integration_point if integration_point is not None else "late"
+            config.freeze_clip = frz
+
+            model = cls(config, instruction_dim=ins_dim, freeze_clip=frz, image_size=target_sz)
+
+            if os.path.isfile(pretrained_str):
+                weights_path = pretrained_str
+            else:
+                try:
+                    weights_path = hf_hub_download(repo_id=pretrained_str, filename="model.safetensors")
+                except Exception:
+                    weights_path = hf_hub_download(repo_id=pretrained_str, filename="pytorch_model.bin")
+
+            if weights_path.endswith(".safetensors"):
+                timm_sd = safetensors.torch.load_file(weights_path)
+            else:
+                timm_sd = torch.load(weights_path, map_location="cpu")
+
+            converted_sd = convert_timm_vit_to_clip_state_dict(timm_sd, prefix="vision_model.")
+            model.load_state_dict(converted_sd, strict=False)
+
+            if target_sz != int(model.vision_model.embeddings.image_size):
+                model.interpolate_position_embedding(target_sz)
+            model._apply_freeze()
+            return model
+
         model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
         if instruction_dim is not None:
             model.config.instruction_dim = int(instruction_dim)
