@@ -67,6 +67,11 @@ class ModelArguments:
         default=1024,
         metadata={"help": "Input resolution of the MRA high-resolution ConvNeXt pathway."}
     )
+    mra_kernel_size: Optional[int] = field(
+        default=None,
+        metadata={"help": "Kernel size for MR-Adapter depthwise conv. None = auto-select based on grid "
+                          "(3 for grid<=16 like 224px, 3 or 5 for grid<28 like 336/384px, 7 for grid>=28 like 1024px)."}
+    )
     loss_ablation_mode: str = field(
         default="all",
         metadata={"help": "Pretrain loss ablation mode: 'all', 'only_itm_mlm', 'only_twc_ocr_aug', 'gen_all', 'gen'"}
