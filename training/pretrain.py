@@ -766,6 +766,8 @@ def main(args_list=None):
     config.ablation_use_ocr = bool(getattr(model_args, "ablation_use_ocr", True))
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
     config.mra_high_res = int(getattr(model_args, "mra_high_res", 1024))
+    if hasattr(model_args, "mra_kernel_size") and model_args.mra_kernel_size is not None:
+        config.mra_kernel_size = int(model_args.mra_kernel_size)
     config.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
     if hasattr(model_args, "clip_vision_name") and model_args.clip_vision_name:
         config.clip_vision_name = str(model_args.clip_vision_name)
