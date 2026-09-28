@@ -439,6 +439,8 @@ def main(args_list=None):
     # MRA (Mixture-of-Resolution) phải build ở __init__ → gán cờ lên config TRƯỚC khi dựng model.
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
     config.mra_high_res = int(getattr(model_args, "mra_high_res", 1024))
+    if hasattr(model_args, "mra_kernel_size") and model_args.mra_kernel_size is not None:
+        config.mra_kernel_size = int(model_args.mra_kernel_size)
     if hasattr(model_args, "clip_vision_name") and model_args.clip_vision_name:
         config.clip_vision_name = str(model_args.clip_vision_name)
     if hasattr(model_args, "clip_image_size") and model_args.clip_image_size:
