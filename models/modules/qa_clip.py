@@ -198,6 +198,7 @@ class S2FStitchAlignModuleV2(nn.Module):
         d_vit: Optional[int] = None,
         d_cnn: Optional[int] = None,
         grid: int = 14,
+        kernel_size: Optional[int] = None,
     ):
         super().__init__()
         fast_dim = int(fast_vision_dim if fast_vision_dim is not None else d_vit)
@@ -206,12 +207,30 @@ class S2FStitchAlignModuleV2(nn.Module):
         self.slow_vision_dim = slow_dim
         self.grid = int(grid)
 
+        # Receptive field scaling for ViT grid:
+        # - Grid 14x14 (ViT 224): 3x3 kernel (receptive field 3/14 ~ 21.4%) matches LLaVA-HR's 7x7 on 32x32 (7/32 ~ 21.9%).
+        # - Grid 21x21 / 24x24 (ViT 336/384): 3x3 or 5x5 kernel (3/21 ~ 14.3%, 5/24 ~ 20.8%).
+        # - Grid >= 28 (e.g. 32x32 in LLaVA-HR 1024): 7x7 kernel (~21.9%).
+        # groups=fast_dim ensures DEPTHWISE conv: each channel dimension has its own independent filter,
+        # preventing channels from mixing in spatial convolution. Channel mixing is handled by 1x1 fast_proj.
+        if kernel_size is not None:
+            k = int(kernel_size)
+        elif self.grid <= 16:
+            k = 3
+        elif self.grid < 28:
+            k = 3
+        else:
+            k = 7
+        padding = k // 2
+        self.kernel_size = k
+        self.padding = padding
+
         # Slow (high-res CNN) branch: 1x1 conv -> GELU -> 1x1 conv
         self.slow_conv = nn.Conv2d(slow_dim, slow_dim, 1)
         self.slow_proj = nn.Conv2d(slow_dim, fast_dim, 1)
 
-        # Fast (low-res ViT) branch: 7x7 depthwise conv -> GELU -> 1x1 conv
-        self.fast_conv = nn.Conv2d(fast_dim, fast_dim, 7, padding=3, groups=fast_dim)
+        # Fast (low-res ViT) branch: Depthwise Conv (groups=fast_dim) + 1x1 pointwise conv
+        self.fast_conv = nn.Conv2d(fast_dim, fast_dim, k, padding=padding, groups=fast_dim)
         self.fast_proj = nn.Conv2d(fast_dim, fast_dim, 1)
 
         # Dynamic Gating: MLP mapping pooled [fast; slow] to scalar gate

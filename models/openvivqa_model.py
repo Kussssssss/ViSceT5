@@ -380,9 +380,15 @@ class OpenViVQAModel(PreTrainedModel):
                               [_nl // 4 - 1, 2 * _nl // 4 - 1, 3 * _nl // 4 - 1])
             enc = self.qa_clip.vision_model.encoder
             enc.mra_layer_ids = _layer_ids
-            # Tất cả adapter dùng S2FStitchAlignModuleV2 (MRAdapter) chuẩn repo tác giả.
+            _k_size = getattr(self.config, "mra_kernel_size", None)
             enc.mra_adapters = nn.ModuleList([
-                MRAdapter(fast_vision_dim=self.clip_hidden, slow_vision_dim=_final_dim, zero_init=True, grid=_grid)
+                MRAdapter(
+                    fast_vision_dim=self.clip_hidden,
+                    slow_vision_dim=_final_dim,
+                    zero_init=True,
+                    grid=_grid,
+                    kernel_size=_k_size,
+                )
                 for _ in _layer_ids
             ])
             # Chuan hoa ImageNet cho ConvNeXt (dang buffer de theo device/dtype).
@@ -425,20 +431,16 @@ class OpenViVQAModel(PreTrainedModel):
                 model_pos_emb = emb_layer.weight
                 ckpt_pos_emb = state_dict[k]
                 if ckpt_pos_emb.shape[0] != model_pos_emb.shape[0]:
-                    if ckpt_pos_emb.shape[0] == 197 and model_pos_emb.shape[0] == 442:
-                        print("🔄 [OpenViVQA] Auto-interpolating checkpoint pos_embed 197 -> 442 (336x336)")
-                        cls_p = ckpt_pos_emb[:1, :].unsqueeze(0)
-                        pat_p = ckpt_pos_emb[1:, :].unsqueeze(0).transpose(1, 2).reshape(1, ckpt_pos_emb.shape[1], 14, 14)
-                        new_pat = F.interpolate(pat_p.float(), size=(21, 21), mode="bicubic", align_corners=False).to(ckpt_pos_emb.dtype)
-                        new_pat = new_pat.reshape(1, ckpt_pos_emb.shape[1], 441).transpose(1, 2)
-                        state_dict[k] = torch.cat([cls_p, new_pat], dim=1).squeeze(0)
-                    elif ckpt_pos_emb.shape[0] == 442 and model_pos_emb.shape[0] == 197:
-                        print("🔄 [OpenViVQA] Auto-interpolating checkpoint pos_embed 442 -> 197 (224x224)")
-                        cls_p = ckpt_pos_emb[:1, :].unsqueeze(0)
-                        pat_p = ckpt_pos_emb[1:, :].unsqueeze(0).transpose(1, 2).reshape(1, ckpt_pos_emb.shape[1], 21, 21)
-                        new_pat = F.interpolate(pat_p.float(), size=(14, 14), mode="bicubic", align_corners=False).to(ckpt_pos_emb.dtype)
-                        new_pat = new_pat.reshape(1, ckpt_pos_emb.shape[1], 196).transpose(1, 2)
-                        state_dict[k] = torch.cat([cls_p, new_pat], dim=1).squeeze(0)
+                    old_num_patches = ckpt_pos_emb.shape[0] - 1
+                    new_num_patches = model_pos_emb.shape[0] - 1
+                    old_g = int(math.isqrt(old_num_patches))
+                    new_g = int(math.isqrt(new_num_patches))
+                    print(f"🔄 [OpenViVQA] Auto-interpolating checkpoint pos_embed {old_num_patches+1} ({old_g}x{old_g}) -> {new_num_patches+1} ({new_g}x{new_g})")
+                    cls_p = ckpt_pos_emb[:1, :].unsqueeze(0)
+                    pat_p = ckpt_pos_emb[1:, :].unsqueeze(0).transpose(1, 2).reshape(1, ckpt_pos_emb.shape[1], old_g, old_g)
+                    new_pat = F.interpolate(pat_p.float(), size=(new_g, new_g), mode="bicubic", align_corners=False).to(ckpt_pos_emb.dtype)
+                    new_pat = new_pat.reshape(1, ckpt_pos_emb.shape[1], new_num_patches).transpose(1, 2)
+                    state_dict[k] = torch.cat([cls_p, new_pat], dim=1).squeeze(0)
         return super().load_state_dict(state_dict, strict=strict)
 
     # --- ENCODE TEXT ---
