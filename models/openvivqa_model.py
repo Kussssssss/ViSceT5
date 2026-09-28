@@ -194,8 +194,11 @@ class OpenViVQAModel(PreTrainedModel):
 
         # Khởi tạo QACLIP
         d_text = getattr(config, "qa_clip_d_text", None) or self.d_model
-        clip_name = str(getattr(config, "clip_vision_name", "openai/clip-vit-base-patch16"))
-        target_clip_sz = int(getattr(config, "clip_image_size", 336))
+        clip_name = str(getattr(config, "clip_vision_name", "timm/vit_base_patch16_clip_384.laion2b_ft_in1k"))
+        target_clip_sz = getattr(config, "clip_image_size", None)
+        if target_clip_sz is None:
+            target_clip_sz = 384 if "384" in clip_name else 336
+        target_clip_sz = int(target_clip_sz)
         self.qa_clip = QACLIPEncoder.from_pretrained(
             clip_name,
             instruction_dim=d_text,

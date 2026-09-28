@@ -18,11 +18,11 @@ class ModelArguments:
         metadata={"help": "Path to YAML configuration file"}
     )
     clip_vision_name: str = field(
-        default="openai/clip-vit-base-patch16",
-        metadata={"help": "CLIP vision backbone name or path."}
+        default="timm/vit_base_patch16_clip_384.laion2b_ft_in1k",
+        metadata={"help": "CLIP/ViT vision backbone name or path."}
     )
     clip_image_size: int = field(
-        default=336,
+        default=384,
         metadata={"help": "Resolution for ViT input (interpolates pos-embed if differs from backbone native resolution)."}
     )
     vs_backbone: str = field(
