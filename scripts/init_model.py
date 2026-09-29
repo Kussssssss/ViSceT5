@@ -28,7 +28,8 @@ except ImportError:
 def main():
     repos_to_download = [
         "timm/vit_base_patch16_clip_384.laion2b_ft_in1k",
-        "VietAI/vit5-base"
+        "VietAI/vit5-base",
+        "timm/convnext_large_mlp.clip_laion2b_ft_320"
     ]
 
     try:
@@ -40,9 +41,11 @@ def main():
     gc.collect()
     torch.cuda.empty_cache()
 
-    print("🚀 Initializing OpenViVQAModel...")
+    print("🚀 Initializing OpenViVQAModel (PreSTU + MRA)...")
 
     config = OpenViVQAConfig()
+    config.ablation_use_mra = True
+    config.ablation_use_vs = False
 
     try:
         model = OpenViVQAModel(config)
