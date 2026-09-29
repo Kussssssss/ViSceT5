@@ -26,8 +26,14 @@ class ModelArguments:
         metadata={"help": "Resolution for ViT input (interpolates pos-embed if differs from backbone native resolution)."}
     )
     vs_backbone: str = field(
-        default="facebook/convnextv2-base-22k-384",
-        metadata={"help": "ConvNeXt backbone for high-res MRA or VisualSearch."}
+        default="timm/convnext_large_mlp.clip_laion2b_ft_320",
+        metadata={"help": "ConvNeXt backbone for high-res MRA or VisualSearch. "
+                          "LAION-2B options: timm/convnext_large_mlp.clip_laion2b_ft_320 (official LLaVA-HR default), "
+                          "timm/convnext_base.clip_laion2b, or facebook/convnextv2-base-22k-384."}
+    )
+    freeze_mra_cnn: bool = field(
+        default=True,
+        metadata={"help": "Whether to freeze ConvNeXt backbone weights for MRA (default True as in official LLaVA-HR repo)."}
     )
     # Ablation Flags
     ablation_use_qaclip: bool = field(

@@ -110,6 +110,7 @@ class OpenViVQAModel(PreTrainedModel):
     config_class = OpenViVQAConfig
     base_model_prefix = "openvivqa"
     supports_gradient_checkpointing = True
+    _keys_to_ignore_on_load_unexpected = [r"mra_cnn\..*"]
 
     @property
     def target_dtype(self):
@@ -139,7 +140,16 @@ class OpenViVQAModel(PreTrainedModel):
             self._enable_mra_cnn_gradient_checkpointing()
 
     def _enable_mra_cnn_gradient_checkpointing(self):
-        if not hasattr(self, "mra_cnn") or not hasattr(self.mra_cnn, "encoder"):
+        if not hasattr(self, "mra_cnn"):
+            return
+        if getattr(self, "mra_cnn_is_timm", False):
+            if hasattr(self.mra_cnn, "set_grad_checkpointing"):
+                try:
+                    self.mra_cnn.set_grad_checkpointing(True)
+                except Exception as e:
+                    print(f"ℹ️ Could not enable gradient checkpointing on mra_cnn (timm): {e}")
+            return
+        if not hasattr(self.mra_cnn, "encoder"):
             return
         from torch.utils.checkpoint import checkpoint
         from transformers.modeling_outputs import BaseModelOutputWithNoAttention
@@ -173,6 +183,11 @@ class OpenViVQAModel(PreTrainedModel):
         if hasattr(self, "qa_clip") and hasattr(self.qa_clip, "vision_model") and hasattr(self.qa_clip.vision_model, "gradient_checkpointing_disable"):
             try:
                 self.qa_clip.vision_model.gradient_checkpointing_disable()
+            except Exception:
+                pass
+        if hasattr(self, "mra_cnn") and hasattr(self.mra_cnn, "set_grad_checkpointing"):
+            try:
+                self.mra_cnn.set_grad_checkpointing(False)
             except Exception:
                 pass
 
@@ -367,12 +382,44 @@ class OpenViVQAModel(PreTrainedModel):
         if self.use_mra:
             # ConvNeXt do-phan-giai-cao RIENG cho MRA. KHONG tai dung visual_search.cnn:
             # neu chia se cung object thi save_pretrained (safetensors) bao loi "shared tensors".
-            from transformers import ConvNextV2Model
-            self.mra_cnn = ConvNextV2Model.from_pretrained(
-                str(getattr(self.config, "vs_backbone", "facebook/convnextv2-base-22k-384")))
-            _final_dim = int(list(getattr(self.mra_cnn.config, "hidden_sizes", [128, 256, 512, 1024]))[-1])
+            # Mac dinh dung dung backbone ConvNeXt pretrained tu LAION-2B nhu repo LLaVA-HR (Luo et al., ICLR 2025):
+            # convnext_large_mlp.clip_laion2b_ft_320 (hoac convnext_base.clip_laion2b).
+            bb = str(getattr(self.config, "vs_backbone", "timm/convnext_large_mlp.clip_laion2b_ft_320"))
+            clean_name = bb
+            if clean_name.startswith("timm/"):
+                clean_name = clean_name[5:]
+            elif clean_name.startswith("hf-hub:timm/"):
+                clean_name = clean_name[12:]
+
+            is_timm = False
+            try:
+                import timm
+                if clean_name in timm.list_models(clean_name) or any(clean_name.startswith(p) for p in ["convnext_", "timm/"]) or "laion" in clean_name:
+                    pretrained_weights = bool(getattr(self.config, "bootstrap_from_pretrained", True))
+                    self.mra_cnn = timm.create_model(clean_name, pretrained=pretrained_weights, num_classes=0)
+                    self.mra_cnn_is_timm = True
+                    is_timm = True
+                    _final_dim = getattr(self.mra_cnn, "num_features", None)
+                    if _final_dim is None:
+                        _final_dim = int(self.mra_cnn.head.fc.in_features) if hasattr(self.mra_cnn, "head") and hasattr(self.mra_cnn.head, "fc") else 1536
+            except Exception as e:
+                print(f"⚠️ [MRA] timm.create_model('{clean_name}') exception: {e}, falling back to transformers...")
+                is_timm = False
+
+            if not is_timm:
+                from transformers import ConvNextV2Model
+                self.mra_cnn = ConvNextV2Model.from_pretrained(bb)
+                self.mra_cnn_is_timm = False
+                _final_dim = int(list(getattr(self.mra_cnn.config, "hidden_sizes", [128, 256, 512, 1024]))[-1])
+
             self.mra_cnn_dim = _final_dim
-            # Lưới patch ViT và số kênh suy từ CLIP config (base16@224=14x14/768; L14@336=24x24/1024).
+
+            # Freeze MRA CNN backbone if requested (default True as in official LLaVA-HR repo)
+            if getattr(self.config, "freeze_mra_cnn", True):
+                for p in self.mra_cnn.parameters():
+                    p.requires_grad = False
+
+            # Lưới patch ViT và số kênh suy từ CLIP config (base16@224=14x14/768; L14@336=24x24/1024; base@384=24x24/768).
             _vcfg = self.qa_clip.vision_model.config
             _grid = int(_vcfg.image_size) // int(_vcfg.patch_size)
             _nl = int(_vcfg.num_hidden_layers)
@@ -394,9 +441,23 @@ class OpenViVQAModel(PreTrainedModel):
                 )
                 for _ in _layer_ids
             ])
-            # Chuan hoa ImageNet cho ConvNeXt (dang buffer de theo device/dtype).
-            self.register_buffer("mra_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1), persistent=False)
-            self.register_buffer("mra_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1), persistent=False)
+
+            # Normalization statistics (tu dong trich xuat tu timm model cfg hoac mac dinh OpenAI CLIP stats)
+            m_mean = [0.48145466, 0.4578275, 0.40821073]
+            m_std = [0.26862954, 0.26130258, 0.27577711]
+            if hasattr(self.mra_cnn, "default_cfg") and isinstance(self.mra_cnn.default_cfg, dict):
+                m_mean = list(self.mra_cnn.default_cfg.get("mean", m_mean))
+                m_std = list(self.mra_cnn.default_cfg.get("std", m_std))
+            elif hasattr(self.mra_cnn, "pretrained_cfg") and isinstance(self.mra_cnn.pretrained_cfg, dict):
+                m_mean = list(self.mra_cnn.pretrained_cfg.get("mean", m_mean))
+                m_std = list(self.mra_cnn.pretrained_cfg.get("std", m_std))
+            elif not getattr(self, "mra_cnn_is_timm", False):
+                # Fallback cho transformers ConvNeXt-V2 (ImageNet norm)
+                m_mean = [0.485, 0.456, 0.406]
+                m_std = [0.229, 0.224, 0.225]
+
+            self.register_buffer("mra_mean", torch.tensor(m_mean, dtype=torch.float32).view(1, 3, 1, 1), persistent=False)
+            self.register_buffer("mra_std", torch.tensor(m_std, dtype=torch.float32).view(1, 3, 1, 1), persistent=False)
 
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
@@ -785,11 +846,9 @@ class OpenViVQAModel(PreTrainedModel):
     # =====================================================================
     def _encode_mra_highres(self, pil_images, device):
         """Nhanh CAO cua MRA (Feast-Your-Eyes, Eq.2): ConvNeXt tren ANH GOC @ mra_high_res
-        -> lay ĐẶC TRƯNG CUỐI CÙNG (last_hidden_state, stage cuoi 768ch @768px = 24x24),
-        align (adaptive_avg_pool2d) ve 14x14 -> MOT tensor [B,196,d_final] dung chung cho
-        moi diem bom. Tra None neu tat MRA / thieu anh.
-
-        BAT BUOC dung anh GOC (pil_images), KHONG phai pixel_values 224 (da mat chi tiet).
+        -> lay ĐẶC TRƯNG CUỐI CÙNG (last_hidden_state / forward_features, stage cuoi:
+        1536ch cho ConvNeXt-Large, 1024ch cho ConvNeXt-Base).
+        Tra None neu tat MRA / thieu anh.
         """
         if not getattr(self, "use_mra", False) or pil_images is None:
             return None
@@ -800,7 +859,21 @@ class OpenViVQAModel(PreTrainedModel):
             arrs.append(torch.from_numpy(np.asarray(im2, dtype=np.float32) / 255.0).permute(2, 0, 1))
         x = torch.stack(arrs).to(device)                                   # [B,3,hr,hr] in [0,1]
         x = (x - self.mra_mean.to(device)) / self.mra_std.to(device)
-        st = self.mra_cnn(pixel_values=x.to(self.mra_cnn.dtype)).last_hidden_state  # [B, d_final, H, W]
+
+        cnn_dtype = next(self.mra_cnn.parameters()).dtype
+        any_trainable = any(p.requires_grad for p in self.mra_cnn.parameters())
+        if not any_trainable:
+            with torch.no_grad():
+                if getattr(self, "mra_cnn_is_timm", False):
+                    st = self.mra_cnn.forward_features(x.to(cnn_dtype))
+                else:
+                    st = self.mra_cnn(pixel_values=x.to(cnn_dtype)).last_hidden_state
+        else:
+            if getattr(self, "mra_cnn_is_timm", False):
+                st = self.mra_cnn.forward_features(x.to(cnn_dtype))
+            else:
+                st = self.mra_cnn(pixel_values=x.to(cnn_dtype)).last_hidden_state
+
         return st.to(self.target_dtype)
 
     def forward(

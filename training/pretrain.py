@@ -775,6 +775,8 @@ def main(args_list=None):
         config.clip_image_size = int(model_args.clip_image_size)
     if hasattr(model_args, "vs_backbone") and model_args.vs_backbone:
         config.vs_backbone = str(model_args.vs_backbone)
+    if hasattr(model_args, "freeze_mra_cnn"):
+        config.freeze_mra_cnn = bool(model_args.freeze_mra_cnn)
     model = OpenViVQAModel(config)
     if ckpt_to_load:
         print(f"\n📥 Loading weights manually from: {ckpt_to_load}")
