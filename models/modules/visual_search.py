@@ -58,6 +58,8 @@ class VisualSearch(nn.Module):
         self.dim = int(vit_dim)
 
         backbone = str(getattr(self.cfg, "vs_backbone", "facebook/convnextv2-base-22k-384"))
+        if "timm/" in backbone or "laion" in backbone or "convnext_large_mlp" in backbone:
+            backbone = "facebook/convnextv2-base-22k-384"
         need_local = bool(local_files_only)
 
         cnn_ok = proc_ok = False
@@ -95,12 +97,18 @@ class VisualSearch(nn.Module):
         if not cnn_ok:
             if need_local:
                 raise OSError("Offline/local-only but ConvNeXt backbone not found")
-            self.cnn = ConvNextV2Model.from_pretrained(backbone, local_files_only=False)
+            try:
+                self.cnn = ConvNextV2Model.from_pretrained(backbone, local_files_only=False)
+            except Exception:
+                self.cnn = ConvNextV2Model.from_pretrained("facebook/convnextv2-base-22k-384", local_files_only=False)
 
         if not proc_ok:
             if need_local:
                 raise OSError("Offline/local-only but ImageProcessor not found")
-            self.processor = AutoImageProcessor.from_pretrained(backbone, local_files_only=False)
+            try:
+                self.processor = AutoImageProcessor.from_pretrained(backbone, local_files_only=False)
+            except Exception:
+                self.processor = AutoImageProcessor.from_pretrained("facebook/convnextv2-base-22k-384", local_files_only=False)
 
         _cnn_dim = int(list(getattr(self.cnn.config, "hidden_sizes", [128, 256, 512, 1024]))[-1]) if self.cnn is not None else self.dim
         self.crop_proj = nn.Linear(_cnn_dim, self.dim) if _cnn_dim != self.dim else nn.Identity()
