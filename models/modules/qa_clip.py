@@ -187,7 +187,7 @@ class S2FStitchAlignModuleV2(nn.Module):
         - fast_proj is 1x1 conv
         - slow_conv is 1x1 conv
         - slow_proj is 1x1 conv
-        - gate is dynamic MLP mapping pooled [fast; slow_align] -> 1 (scalar gating bounded in [-1, 1])
+        - gate is dynamic MLP mapping pooled [fast; slow_align] -> d (channel-wise gating bounded in [-1, 1])
         - zero_init: zero-initializes projection layers for exact identity mapping at step 0 (ReZero-style)
     """
     def __init__(
@@ -233,11 +233,11 @@ class S2FStitchAlignModuleV2(nn.Module):
         self.fast_conv = nn.Conv2d(fast_dim, fast_dim, k, padding=padding, groups=fast_dim)
         self.fast_proj = nn.Conv2d(fast_dim, fast_dim, 1)
 
-        # Dynamic Gating: MLP mapping pooled [fast; slow] to scalar gate
+        # Dynamic Channel-wise Gating: MLP mapping pooled [fast; slow] to feature dimension d
         self.gate = nn.Sequential(
             nn.Linear(fast_dim * 2, fast_dim // 2),
             nn.GELU(),
-            nn.Linear(fast_dim // 2, 1)
+            nn.Linear(fast_dim // 2, fast_dim)
         )
 
         # Weight initialization matching author's repo
@@ -296,11 +296,11 @@ class S2FStitchAlignModuleV2(nn.Module):
         fast_feat_2d = fast_feat_2d + self.fast_proj(F.gelu(self.fast_conv(fast_feat_2d)))
         fast_feat = fast_feat_2d.view(b, d, dst_size * dst_size).transpose(1, 2)
 
-        # Dynamic soft gating across tokens
-        pooled = torch.cat([fast_feat, slow_feat_align], dim=-1).mean(dim=1)
-        gate = self.gate(pooled).unsqueeze(1)  # [B, 1, 1]
+        # Dynamic soft channel-wise gating across feature dimension d
+        pooled = torch.cat([fast_feat, slow_feat_align], dim=-1).mean(dim=1)  # [B, 2*d]
+        gate = self.gate(pooled).unsqueeze(1)  # [B, 1, d]
 
-        # Fusion
+        # Fusion: channel-wise modulated residual injection
         fast_feat = fast_feat + slow_feat_align * gate.tanh()
         return fast_feat
 

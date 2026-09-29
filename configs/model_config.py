@@ -33,7 +33,8 @@ class OpenViVQAConfig(PretrainedConfig):
         vit5_name: str = "VietAI/vit5-base",
         clip_vision_name: str = "timm/vit_base_patch16_clip_384.laion2b_ft_in1k",
         clip_image_size: int = 384,
-        vs_backbone: str = "facebook/convnextv2-base-22k-384",
+        vs_backbone: str = "timm/convnext_large_mlp.clip_laion2b_ft_320",
+        freeze_mra_cnn: bool = True,
         bootstrap_from_pretrained: bool = True,
         local_submodule_dir: Optional[str] = None,
         pretrain: bool = True,
@@ -94,6 +95,7 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_vision_name = clip_vision_name
         self.clip_image_size = int(clip_image_size)
         self.vs_backbone = vs_backbone
+        self.freeze_mra_cnn = bool(freeze_mra_cnn)
         self.bootstrap_from_pretrained = bool(bootstrap_from_pretrained)
         self.local_submodule_dir = local_submodule_dir
 
