@@ -18,18 +18,16 @@ class ModelArguments:
         metadata={"help": "Path to YAML configuration file"}
     )
     clip_vision_name: str = field(
-        default="timm/vit_base_patch16_clip_384.laion2b_ft_in1k",
-        metadata={"help": "CLIP/ViT vision backbone name or path."}
+        default="openai/clip-vision-base-patch16" if False else "openai/clip-vit-base-patch16",
+        metadata={"help": "CLIP/ViT vision backbone name or path (default: openai/clip-vit-base-patch16)."}
     )
     clip_image_size: int = field(
-        default=384,
-        metadata={"help": "Resolution for ViT input (interpolates pos-embed if differs from backbone native resolution)."}
+        default=336,
+        metadata={"help": "Resolution for ViT input (336 for ViT-B/16 @ 336)."}
     )
     vs_backbone: str = field(
-        default="timm/convnext_large_mlp.clip_laion2b_ft_320",
-        metadata={"help": "ConvNeXt backbone for high-res MRA or VisualSearch. "
-                          "LAION-2B options: timm/convnext_large_mlp.clip_laion2b_ft_320 (official LLaVA-HR default), "
-                          "timm/convnext_base.clip_laion2b, or facebook/convnextv2-base-22k-384."}
+        default="facebook/convnextv2-base-22k-384",
+        metadata={"help": "ConvNeXt backbone for high-res MRA or VisualSearch (default: facebook/convnextv2-base-22k-384)."}
     )
     freeze_mra_cnn: bool = field(
         default=True,

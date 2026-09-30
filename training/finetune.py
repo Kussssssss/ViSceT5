@@ -438,6 +438,8 @@ def main(args_list=None):
                         _cand = f"{_user}/{_suffix}"
                         if _cand not in _candidates:
                             _candidates.append(_cand)
+                if "Kus669/ViSceT5-mra-pretrain-ver2" not in _candidates:
+                    _candidates.append("Kus669/ViSceT5-mra-pretrain-ver2")
 
                 for _candidate_repo in _candidates:
                     print(f"🌐 [finetune] Thử tìm pretrain repo trên HF: {_candidate_repo}...")

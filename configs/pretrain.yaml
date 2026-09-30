@@ -11,9 +11,9 @@ use_ocr_aug_pretrain: false
 num_bbox_bins: 1000
 lambda_bbox_ce: 0.3
 vision_unfreeze_last_n: -1 # -1 hoặc 12 = unfreeze FULL ViT (tất cả 12 layers + embeddings + layernorms)
-clip_vision_name: "timm/vit_base_patch16_clip_384.laion2b_ft_in1k"
-clip_image_size: 384
-vs_backbone: "timm/convnext_large_mlp.clip_laion2b_ft_320"
+clip_vision_name: "openai/clip-vit-base-patch16"
+clip_image_size: 336
+vs_backbone: "facebook/convnextv2-base-22k-384"
 pretrain_use_vs: true
 vs_t5_guided: true
 
