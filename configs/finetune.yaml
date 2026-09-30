@@ -10,9 +10,9 @@ ablation_use_vs: true        # (2) Visual Search (crop)
 ablation_use_ocr: true       # (3) OCR Consformer
 ablation_use_ocr_aug: true   # (4) OCR augmentation (correct/noise/keep → nối bản OCR augment cạnh OCR gốc)
 vision_unfreeze_last_n: 0      # Mở băng ViT trong finetune: 0 = giữ đóng băng, 4 = top-4 layers, -1 = full ViT
-clip_vision_name: "timm/vit_base_patch16_clip_384.laion2b_ft_in1k"
-clip_image_size: 384
-vs_backbone: "timm/convnext_large_mlp.clip_laion2b_ft_320"
+clip_vision_name: "openai/clip-vit-base-patch16"
+clip_image_size: 336
+vs_backbone: "facebook/convnextv2-base-22k-384"
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"

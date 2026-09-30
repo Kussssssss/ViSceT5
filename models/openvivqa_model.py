@@ -209,7 +209,7 @@ class OpenViVQAModel(PreTrainedModel):
 
         # Khởi tạo QACLIP
         d_text = getattr(config, "qa_clip_d_text", None) or self.d_model
-        clip_name = str(getattr(config, "clip_vision_name", "timm/vit_base_patch16_clip_384.laion2b_ft_in1k"))
+        clip_name = str(getattr(config, "clip_vision_name", "openai/clip-vit-base-patch16"))
         target_clip_sz = getattr(config, "clip_image_size", None)
         if target_clip_sz is None:
             target_clip_sz = 384 if "384" in clip_name else 336
@@ -384,7 +384,7 @@ class OpenViVQAModel(PreTrainedModel):
             # neu chia se cung object thi save_pretrained (safetensors) bao loi "shared tensors".
             # Mac dinh dung dung backbone ConvNeXt pretrained tu LAION-2B nhu repo LLaVA-HR (Luo et al., ICLR 2025):
             # convnext_large_mlp.clip_laion2b_ft_320 (hoac convnext_base.clip_laion2b).
-            bb = str(getattr(self.config, "vs_backbone", "timm/convnext_large_mlp.clip_laion2b_ft_320"))
+            bb = str(getattr(self.config, "vs_backbone", "facebook/convnextv2-base-22k-384"))
             clean_name = bb
             if clean_name.startswith("timm/"):
                 clean_name = clean_name[5:]
