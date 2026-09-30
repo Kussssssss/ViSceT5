@@ -134,6 +134,14 @@ def main(args):
     final_train_df.to_csv(os.path.join(OUTPUT_PATH, "merged_train.csv"), index=False)
     final_val_df.to_csv(os.path.join(OUTPUT_PATH, "merged_val.csv"), index=False)
     final_test_df.to_csv(os.path.join(OUTPUT_PATH, "merged_test.csv"), index=False)
+    
+    # Save dataset-specific names if a single dataset was prepared
+    if len(cfg_paths) == 1 and 'NAME_SET' in locals() and NAME_SET:
+        final_train_df.to_csv(os.path.join(OUTPUT_PATH, f"merged_train_{NAME_SET}.csv"), index=False)
+        final_val_df.to_csv(os.path.join(OUTPUT_PATH, f"merged_val_{NAME_SET}.csv"), index=False)
+        final_test_df.to_csv(os.path.join(OUTPUT_PATH, f"merged_test_{NAME_SET}.csv"), index=False)
+        print(f"   💾 Saved dataset-specific CSVs (merged_train_{NAME_SET}.csv) to {OUTPUT_PATH}")
+
     print(f"   ✅ Saved prepared dataset CSVs to {OUTPUT_PATH}")
 
 if __name__ == "__main__":

@@ -191,24 +191,41 @@ def main(args_list=None):
     print(f">>> Preparing Dataset: {data_args.dataset_name}")
     from configs.base_config import OUTPUT_PATH
     _ds = data_args.dataset_name
-    # DATASET-AWARE cache: tên file mang tên dataset để đổi dataset KHÔNG bị cache cũ
-    # (vd merged_train.csv của ViTextVQA) che mất → tránh âm thầm train nhầm dữ liệu.
-    train_csv = os.path.join(OUTPUT_PATH, f"merged_train_{_ds}.csv")
-    val_csv = os.path.join(OUTPUT_PATH, f"merged_val_{_ds}.csv")
-    # Back-compat: cache cũ KHÔNG hậu tố là của ViTextVQA — chỉ dùng cho đúng nó.
-    _legacy_tr = os.path.join(OUTPUT_PATH, "merged_train.csv")
-    _legacy_va = os.path.join(OUTPUT_PATH, "merged_val.csv")
-    if (not (os.path.exists(train_csv) and os.path.exists(val_csv))
-            and _ds == "ViTextVQA"
-            and os.path.exists(_legacy_tr) and os.path.exists(_legacy_va)):
-        train_csv, val_csv = _legacy_tr, _legacy_va
 
-    if os.path.exists(train_csv) and os.path.exists(val_csv):
-        print(f"ℹ️ Found prepared CSV cache for {_ds}: {os.path.basename(train_csv)}. Loading directly...")
+    # Tuyệt đối không đọc nhầm cache từ thư mục pretrain
+    _search_dirs = []
+    if OUTPUT_PATH and "pretrain" not in OUTPUT_PATH.lower():
+        _search_dirs.append(OUTPUT_PATH)
+    for _d in ("./output/finetune_data", "./output/finetune", "./output/data_vitextvqa", "./output"):
+        if _d not in _search_dirs and os.path.isdir(_d):
+            _search_dirs.append(_d)
+
+    train_csv, val_csv = None, None
+    for _dir in _search_dirs:
+        _named_tr = os.path.join(_dir, f"merged_train_{_ds}.csv")
+        _named_va = os.path.join(_dir, f"merged_val_{_ds}.csv")
+        if os.path.isfile(_named_tr) and os.path.isfile(_named_va):
+            train_csv, val_csv = _named_tr, _named_va
+            break
+
+        _leg_tr = os.path.join(_dir, "merged_train.csv")
+        _leg_va = os.path.join(_dir, "merged_val.csv")
+        if os.path.isfile(_leg_tr) and os.path.isfile(_leg_va):
+            # Kiểm tra xem file merged_train.csv này có phải là VQA thật không (chứa câu hỏi)
+            try:
+                _sample = pd.read_csv(_leg_tr, nrows=5)
+                if "question" in _sample.columns and ("question_id" in _sample.columns or "annotations" in _sample.columns or "answer" in _sample.columns):
+                    train_csv, val_csv = _leg_tr, _leg_va
+                    break
+            except Exception:
+                pass
+
+    if train_csv and val_csv and os.path.exists(train_csv) and os.path.exists(val_csv):
+        print(f"ℹ️ Found prepared CSV cache for {_ds}: {train_csv}. Loading directly...")
         train_df = pd.read_csv(train_csv)
         val_df = pd.read_csv(val_csv)
     else:
-        print(f"ℹ️ CSV cache not found. Preparing via Hub...")
+        print(f"ℹ️ CSV cache for {_ds} not found. Preparing via Hub...")
         raw_dir = os.path.join(data_args.data_dir, "raw")
         out_dir = os.path.join(data_args.data_dir, "processed")
         hub = DatasetHubLoader(raw_dir, out_dir)
@@ -244,9 +261,11 @@ def main(args_list=None):
             return
         # Ghi cache dataset-aware để lần chạy sau nạp thẳng (không prepare lại).
         try:
-            train_df.to_csv(os.path.join(OUTPUT_PATH, f"merged_train_{_ds}.csv"), index=False)
-            val_df.to_csv(os.path.join(OUTPUT_PATH, f"merged_val_{_ds}.csv"), index=False)
-            print(f"💾 Đã lưu cache: merged_train_{_ds}.csv / merged_val_{_ds}.csv")
+            _cache_out = OUTPUT_PATH if (OUTPUT_PATH and "pretrain" not in OUTPUT_PATH.lower()) else "./output/finetune_data"
+            os.makedirs(_cache_out, exist_ok=True)
+            train_df.to_csv(os.path.join(_cache_out, f"merged_train_{_ds}.csv"), index=False)
+            val_df.to_csv(os.path.join(_cache_out, f"merged_val_{_ds}.csv"), index=False)
+            print(f"💾 Đã lưu cache: merged_train_{_ds}.csv / merged_val_{_ds}.csv vào {_cache_out}")
         except Exception as _e:
             print(f"ℹ️ Không ghi được cache CSV ({_e}); không sao, sẽ prepare lại lần sau.")
 
