@@ -358,22 +358,43 @@ def main(args_list=None):
     if ckpt_to_load and not os.path.exists(ckpt_to_load):
         _downloaded = False
         try:
-            from huggingface_hub import snapshot_download
-            print(f"🌐 [finetune] '{ckpt_to_load}' không tìm thấy trên local. Thử tải từ Hugging Face Hub...")
+            from huggingface_hub import list_repo_files, snapshot_download
+            print(f"🌐 [finetune] '{ckpt_to_load}' không tìm thấy trên local. Đang tải từ Hugging Face Hub...")
             _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
+
+            _repo_files = []
+            try:
+                _repo_files = list_repo_files(ckpt_to_load, token=_hf_tok if _hf_tok else None)
+            except Exception:
+                pass
+
+            _allow = None
+            _ignore = ["*optimizer.pt", "*rng_state*", "*scheduler.pt"]
+            if "model.safetensors" in _repo_files or "pytorch_model.bin" in _repo_files:
+                # Repo root đã có sẵn model -> chỉ tải root, không tải thêm checkpoint-*
+                _ignore.append("checkpoint-*/**")
+            elif any(f.startswith("checkpoint-") for f in _repo_files):
+                # Repo root chưa có model -> tải checkpoint mới nhất
+                _sub_cks = sorted({f.split("/")[0] for f in _repo_files if f.startswith("checkpoint-")},
+                                  key=lambda x: int(x.split("-")[1]) if "-" in x and x.split("-")[1].isdigit() else 0)
+                if _sub_cks:
+                    _latest_sub = _sub_cks[-1]
+                    _allow = [f"{_latest_sub}/**", "*.json", "spiece.model"]
+
             snapshot_download(
                 repo_id=ckpt_to_load,
                 repo_type="model",
                 token=_hf_tok if _hf_tok else None,
                 local_dir=_hf_dir,
-                ignore_patterns=["*optimizer.pt", "*rng_state*", "*scheduler.pt", "checkpoint-*/**"]
+                allow_patterns=_allow,
+                ignore_patterns=_ignore,
             )
             ckpt_to_load = _hf_dir
             model_args.model_name_or_path = _hf_dir
             _downloaded = True
-            print(f"✅ [finetune] Đã tải xong pretrain model từ Hub ({ckpt_to_load}) về: {_hf_dir}")
-        except Exception:
-            pass
+            print(f"✅ [finetune] Đã tải xong pretrain model từ Hub ({model_args.model_name_or_path}) về: {_hf_dir}")
+        except Exception as _e_dl:
+            print(f"⚠️ [finetune] Lỗi khi tải trực tiếp từ Hub '{ckpt_to_load}': {_e_dl}")
 
         if not _downloaded and _hf_tok:
             try:
