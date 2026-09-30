@@ -300,17 +300,36 @@ def main(args_list=None):
         except Exception:
             pass
 
+    # ── Hugging Face repo resolution for finetuning ──
+    # Ưu tiên HF_FINETUNE_REPO, sau đó hub_model_id, sau đó HF_REPO (nếu không phải pretrain).
+    # Nếu HF_REPO mang tên pretrain, tự động đổi "pretrain" -> "finetune" để tránh ghi đè
+    # repo pretrain hoặc nạp nhầm optimizer của pretrain vào finetune.
     _hf_repo = (
-        os.environ.get("HF_REPO", "").strip()
+        os.environ.get("HF_FINETUNE_REPO", "").strip()
+        or os.environ.get("HF_REPO_FINETUNE", "").strip()
         or getattr(training_args, "hub_model_id", None)
         or ""
     )
     if not _hf_repo:
+        _general_repo = os.environ.get("HF_REPO", "").strip()
+        if _general_repo:
+            if "pretrain" in _general_repo.lower():
+                _hf_repo = _general_repo.replace("pretrain", "finetune").replace("Pretrain", "Finetune")
+            else:
+                _hf_repo = _general_repo
+
+    if not _hf_repo:
         try:
             from google.colab import userdata
-            _hf_repo = userdata.get("HF_REPO") or ""
+            _ud = userdata.get("HF_FINETUNE_REPO") or userdata.get("HF_REPO") or ""
+            if _ud:
+                if "pretrain" in _ud.lower():
+                    _hf_repo = _ud.replace("pretrain", "finetune").replace("Pretrain", "Finetune")
+                else:
+                    _hf_repo = _ud
         except Exception:
             pass
+
     if _hf_tok and not _hf_repo:
         try:
             from huggingface_hub import HfApi
@@ -318,9 +337,11 @@ def main(args_list=None):
             _user = _who.get("name") or _who.get("username")
             if _user:
                 _hf_repo = f"{_user}/ViSceT5-mra-finetune"
-                print(f"ℹ️ [HF] Tự động xác định finetune HF repo từ tài khoản: {_hf_repo}")
         except Exception:
             pass
+
+    if _hf_repo:
+        print(f"ℹ️ [HF] Target Finetune Repo: '{_hf_repo}'")
 
     # 3. Handle Weights Downloads
     if training_args.pretrain_weights_id:
@@ -359,19 +380,43 @@ def main(args_list=None):
                 from huggingface_hub import HfApi, snapshot_download
                 _who = HfApi(token=_hf_tok).whoami()
                 _user = _who.get("name") or _who.get("username")
-                _candidate_repo = f"{_user}/ViSceT5-mra-pretrain"
-                print(f"🌐 [finetune] Thử tìm pretrain repo trên tài khoản HF: {_candidate_repo}...")
-                _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
-                snapshot_download(
-                    repo_id=_candidate_repo,
-                    repo_type="model",
-                    token=_hf_tok,
-                    local_dir=_hf_dir,
-                    ignore_patterns=["*optimizer.pt", "*rng_state*", "*scheduler.pt", "checkpoint-*/**"]
-                )
-                ckpt_to_load = _hf_dir
-                model_args.model_name_or_path = _hf_dir
-                print(f"✅ [finetune] Tìm thấy và đã tải xong pretrain model từ Hub: {_candidate_repo} -> {_hf_dir}")
+                _candidates = []
+                if os.environ.get("HF_PRETRAIN_REPO"):
+                    _candidates.append(os.environ.get("HF_PRETRAIN_REPO").strip())
+                _raw_hf = os.environ.get("HF_REPO", "").strip()
+                if _raw_hf and "pretrain" in _raw_hf.lower():
+                    _candidates.append(_raw_hf)
+                try:
+                    from google.colab import userdata
+                    _ud_pt = userdata.get("HF_PRETRAIN_REPO") or (userdata.get("HF_REPO") if "pretrain" in (userdata.get("HF_REPO") or "").lower() else None)
+                    if _ud_pt and _ud_pt not in _candidates:
+                        _candidates.append(_ud_pt)
+                except Exception:
+                    pass
+                if _user:
+                    for _suffix in ("ViSceT5-mra-pretrain-ver2", "ViSceT5-mra-pretrain", "ViSceT5-pretrain"):
+                        _cand = f"{_user}/{_suffix}"
+                        if _cand not in _candidates:
+                            _candidates.append(_cand)
+
+                for _candidate_repo in _candidates:
+                    print(f"🌐 [finetune] Thử tìm pretrain repo trên HF: {_candidate_repo}...")
+                    _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
+                    try:
+                        snapshot_download(
+                            repo_id=_candidate_repo,
+                            repo_type="model",
+                            token=_hf_tok,
+                            local_dir=_hf_dir,
+                            ignore_patterns=["*optimizer.pt", "*rng_state*", "*scheduler.pt"]
+                        )
+                        ckpt_to_load = _hf_dir
+                        model_args.model_name_or_path = _hf_dir
+                        print(f"✅ [finetune] Tìm thấy và đã tải xong pretrain model từ Hub: {_candidate_repo} -> {_hf_dir}")
+                        _downloaded = True
+                        break
+                    except Exception as _e_cand:
+                        continue
             except Exception as _e2:
                 print(f"ℹ️ [finetune] Không tìm thấy pretrain repo tự động ({_e2}); tiếp tục khởi tạo mặc định.")
 
@@ -721,57 +766,88 @@ def main(args_list=None):
     if (not training_args.resume_from_checkpoint and _hf_tok and _hf_repo
             and not training_args.smoke_test
             and os.environ.get("RESUME_FROM_HF", "auto").lower() not in ("0", "false", "no", "off")):
-        try:
-            from huggingface_hub import list_repo_files, snapshot_download
-            from safetensors.torch import load_file as _load_sft
-            _files = list_repo_files(_hf_repo, token=_hf_tok)
-            _cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
-                          key=lambda x: int(x.split("-")[1]))
-            if _cks:
-                _latest = _cks[-1]
-                _has_optim = f"{_latest}/optimizer.pt" in _files
-                print(f"♻️ [HF-resume] repo có {len(_cks)} checkpoint; mới nhất={_latest} "
-                      f"(optimizer.pt: {'CÓ' if _has_optim else 'THIẾU'}).")
-                if _has_optim:
-                    # CHỈ tải checkpoint MỚI NHẤT, không tải toàn bộ. Repo HF tích luỹ mọi
-                    # epoch (~4.5GB/checkpoint); tải hết vào đĩa Kaggle ~20GB sẽ đầy đĩa
-                    # ngay khi resume và crash lúc lưu (No space left / unexpected pos).
-                    # Resume chỉ cần đúng checkpoint mới nhất.
-                    print(f"♻️ [HF-resume] tải RIÊNG {_latest} về {training_args.output_dir} ...")
-                    snapshot_download(_hf_repo, repo_type="model", token=_hf_tok,
-                                      local_dir=training_args.output_dir,
-                                      allow_patterns=[f"{_latest}/**"])
-                    _resume_dir = os.path.join(training_args.output_dir, _latest)
-                    # KIỂM TRA checkpoint có NaN/inf không → KHÔNG resume vào trạng thái hỏng
-                    # (nếu không sẽ nạp lại trọng số NaN mãi mãi — death-spiral).
-                    _mp = os.path.join(_resume_dir, "model.safetensors")
-                    _corrupt = False
-                    if os.path.isfile(_mp):
-                        try:
-                            _corrupt = any((not torch.isfinite(v).all())
-                                           for v in _load_sft(_mp).values())
-                        except Exception:
-                            _corrupt = False
-                    if not os.path.isfile(os.path.join(_resume_dir, "optimizer.pt")):
-                        pass
-                    elif _corrupt:
-                        print(f"🛑 [HF-resume] checkpoint {_latest} chứa trọng số NaN/inf → BỎ resume "
-                              f"(tránh nạp lại trạng thái hỏng). Hãy XOÁ checkpoint hỏng trên HF (hoặc "
-                              f"dùng HF_REPO mới / RESUME_FROM_HF=0) rồi train lại từ đầu.")
+        if "pretrain" in _hf_repo.lower():
+            print(f"ℹ️ [HF-resume] Bỏ qua auto-resume từ '{_hf_repo}' vì đây là repo Pretrain "
+                  f"(khác kiến trúc/optimizer với finetune). Trọng số pretrain đã được nạp qua model_name_or_path.")
+        else:
+            try:
+                from huggingface_hub import list_repo_files, snapshot_download
+                from safetensors.torch import load_file as _load_sft
+                _files = list_repo_files(_hf_repo, token=_hf_tok)
+                _cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
+                              key=lambda x: int(x.split("-")[1]))
+                if _cks:
+                    _latest = _cks[-1]
+                    _has_optim = f"{_latest}/optimizer.pt" in _files
+                    print(f"♻️ [HF-resume] repo có {len(_cks)} checkpoint; mới nhất={_latest} "
+                          f"(optimizer.pt: {'CÓ' if _has_optim else 'THIẾU'}).")
+                    if _has_optim:
+                        # CHỈ tải checkpoint MỚI NHẤT, không tải toàn bộ. Repo HF tích luỹ mọi
+                        # epoch (~4.5GB/checkpoint); tải hết vào đĩa Kaggle ~20GB sẽ đầy đĩa
+                        # ngay khi resume và crash lúc lưu (No space left / unexpected pos).
+                        # Resume chỉ cần đúng checkpoint mới nhất.
+                        print(f"♻️ [HF-resume] tải RIÊNG {_latest} về {training_args.output_dir} ...")
+                        snapshot_download(_hf_repo, repo_type="model", token=_hf_tok,
+                                          local_dir=training_args.output_dir,
+                                          allow_patterns=[f"{_latest}/**"])
+                        _resume_dir = os.path.join(training_args.output_dir, _latest)
+
+                        # KIỂM TRA checkpoint có phải từ Pretrain không (nếu có config.pretrain=True thì không resume)
+                        _is_pretrain_ckpt = False
+                        _cfg_file = os.path.join(_resume_dir, "config.json")
+                        if os.path.isfile(_cfg_file):
+                            try:
+                                with open(_cfg_file, "r", encoding="utf-8") as _f_cfg:
+                                    _c_data = json.load(_f_cfg)
+                                    if bool(_c_data.get("pretrain", False)):
+                                        _is_pretrain_ckpt = True
+                            except Exception:
+                                pass
+
+                        # KIỂM TRA checkpoint có NaN/inf không → KHÔNG resume vào trạng thái hỏng
+                        # (nếu không sẽ nạp lại trọng số NaN mãi mãi — death-spiral).
+                        _mp = os.path.join(_resume_dir, "model.safetensors")
+                        _corrupt = False
+                        if os.path.isfile(_mp):
+                            try:
+                                _corrupt = any((not torch.isfinite(v).all())
+                                               for v in _load_sft(_mp).values())
+                            except Exception:
+                                _corrupt = False
+
+                        if _is_pretrain_ckpt:
+                            print(f"⚠️ [HF-resume] Checkpoint {_latest} thuộc giai đoạn Pretrain (config.pretrain=True). "
+                                  f"Bỏ qua auto-resume để bắt đầu Finetune mới sạch sẽ.")
+                        elif not os.path.isfile(os.path.join(_resume_dir, "optimizer.pt")):
+                            pass
+                        elif _corrupt:
+                            print(f"🛑 [HF-resume] checkpoint {_latest} chứa trọng số NaN/inf → BỎ resume "
+                                  f"(tránh nạp lại trạng thái hỏng). Hãy XOÁ checkpoint hỏng trên HF (hoặc "
+                                  f"dùng HF_REPO mới / RESUME_FROM_HF=0) rồi train lại từ đầu.")
+                        else:
+                            training_args.resume_from_checkpoint = _resume_dir
+                            print(f"♻️ [HF-resume] RESUME từ {_resume_dir}")
                     else:
-                        training_args.resume_from_checkpoint = _resume_dir
-                        print(f"♻️ [HF-resume] RESUME từ {_resume_dir}")
-                else:
-                    print("⚠️ [HF-resume] checkpoint là weights-only (push cũ) → KHÔNG resume "
-                          "đúng được. Từ lần này push sẽ ĐẦY ĐỦ (HF_PUSH_OPTIM=1 mặc định).")
-        except Exception as _e:
-            print(f"⚠️ [HF-resume] bỏ qua ({type(_e).__name__}: {_e}); train bình thường.")
+                        print("⚠️ [HF-resume] checkpoint là weights-only (push cũ) → KHÔNG resume "
+                              "đúng được. Từ lần này push sẽ ĐẦY ĐỦ (HF_PUSH_OPTIM=1 mặc định).")
+            except Exception as _e:
+                print(f"⚠️ [HF-resume] bỏ qua ({type(_e).__name__}: {_e}); train bình thường.")
 
     print(">>> Starting Finetune...")
     if training_args.resume_from_checkpoint:
         from training.metrics import seed_train_metrics_from_checkpoint
         seed_train_metrics_from_checkpoint(training_args.output_dir, training_args.resume_from_checkpoint)
-        train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+        try:
+            train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+        except (ValueError, RuntimeError) as _err:
+            if any(k in str(_err).lower() for k in ("parameter group", "optimizer", "size of optimizer", "state_dict")):
+                print(f"\n⚠️ [resume-fallback] Lỗi nạp optimizer/scheduler từ checkpoint: {_err}")
+                print("💡 Nguyên nhân: Checkpoint đến từ stage pretrain hoặc khác kiến trúc/số nhóm tham số.")
+                print("🔄 Tự động fallback: Bắt đầu finetune từ epoch 0 với optimizer mới (giữ trọn vẹn trọng số model đã nạp)!\n")
+                training_args.resume_from_checkpoint = None
+                train_result = trainer.train()
+            else:
+                raise _err
     else:
         train_result = trainer.train()
 

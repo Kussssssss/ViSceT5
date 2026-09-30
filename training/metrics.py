@@ -368,7 +368,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
         groups = [_grp(v, d) for v in (True, False) for d in (True, False)]
         groups = [g for g in groups if g["params"]]
         _nv = sum(p.numel() for n, p in named if _is_vision(n))
-        print(f">>> [pretrain] differential LR: vision backbones lr×{_vlr} (~{_nv:,} params) | rest lr×1")
+        print(f">>> [optimizer] differential LR: vision backbones lr×{_vlr} (~{_nv:,} params) | rest lr×1")
         self.optimizer = torch.optim.AdamW(groups, lr=base, betas=(0.9, 0.999), eps=1e-8)
         return self.optimizer
 
