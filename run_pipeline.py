@@ -361,7 +361,10 @@ def run():
             hf_token = os.environ.get("HF_TOKEN", "")
             hf_repo = os.environ.get("HF_REPO", "")
             
-            if hf_token and hf_repo:
+            _is_mock = os.environ.get("MOCK_TEST", "").lower() in ("true", "1")
+            if _is_mock:
+                print("\n🧹 [MOCK_TEST] Bỏ qua bước 3.5 upload lên Hugging Face (không lưu mock).")
+            elif hf_token and hf_repo:
                 print("\n>>> [Step 3.5] Uploading checkpoints to Hugging Face Hub...")
                 from huggingface_hub import HfApi
                 api = HfApi(token=hf_token)

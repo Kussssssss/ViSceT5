@@ -40,7 +40,7 @@ from data.collator import ViT5VQADataCollator
 from training.pretraine_loss import ViT5PretrainLoss, GlobalPretrainAccuracy
 from training.metrics import TaskSpecificTrainer, simple_pretrain_aggregator
 from utils.io_utils import download_and_extract_checkpoint
-from utils.model_utils import safe_load_tokenizer
+from utils.model_utils import safe_load_tokenizer, is_mock_checkpoint
 
 # --- Torch >= 2.6 compat for resume ---------------------------------------------
 # PyTorch 2.6 flipped torch.load's default to weights_only=True. HF Trainer's
@@ -717,8 +717,10 @@ def main(args_list=None):
         training_args.warmup_ratio = 0.0
         training_args.logging_steps = max(1, n_steps // 20)
         training_args.eval_steps = max(1, n_steps // 3)
-        training_args.save_steps = n_steps
-        training_args.save_total_limit = 1
+        # MOCK / SMOKE TEST: TUYỆT ĐỐI KHÔNG LƯU checkpoint để tránh ghi đè / nhiễm bẩn
+        training_args.save_strategy = "no"
+        training_args.save_steps = 0
+        training_args.save_total_limit = 0
         # Avoid best-model bookkeeping that needs many aligned eval/save steps.
         training_args.load_best_model_at_end = False
         # MOCK: ALWAYS print full debug (per-step Loss(M/I/TWC/GEN) + post-train
@@ -1071,7 +1073,7 @@ def main(args_list=None):
         # Thay vào đó, toàn bộ việc upload checkpoint và model được thực hiện qua HfApi.upload_folder thuần REST API.
         training_args.push_to_hub = False
 
-    if _hf_tok and _hf_repo:
+    if _hf_tok and _hf_repo and not training_args.smoke_test:
         from transformers.trainer_callback import TrainerCallback
         from huggingface_hub import HfApi
         class _PushEachCheckpoint(TrainerCallback):
@@ -1116,15 +1118,33 @@ def main(args_list=None):
             and not training_args.smoke_test
             and os.environ.get("RESUME_FROM_HF", "auto").lower() not in ("0", "false", "no", "off")):
         try:
-            from huggingface_hub import list_repo_files, snapshot_download
+            from huggingface_hub import list_repo_files, snapshot_download, hf_hub_download
             from safetensors.torch import load_file as _load_sft
             _files = list_repo_files(_hf_repo, token=_hf_tok)
-            _cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
-                          key=lambda x: int(x.split("-")[1]))
-            if _cks:
-                _latest = _cks[-1]
+            _all_cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
+                              key=lambda x: int(x.split("-")[1]))
+
+            # Lọc bỏ các checkpoint được sinh ra từ mock/smoke test (chỉ resume từ full pretrain hợp lệ)
+            _valid_cks = []
+            for _c in _all_cks:
+                _is_mock = False
+                if f"{_c}/trainer_state.json" in _files:
+                    try:
+                        _ts_file = hf_hub_download(_hf_repo, f"{_c}/trainer_state.json", repo_type="model", token=_hf_tok)
+                        with open(_ts_file, "r", encoding="utf-8") as _f:
+                            _ts_data = json.load(_f)
+                        if is_mock_checkpoint(_ts_data):
+                            _is_mock = True
+                            print(f"⚠️ [HF-resume] BỎ QUA checkpoint {_c} trên HF vì được tạo từ mock run (max_steps={_ts_data.get('max_steps')}).")
+                    except Exception:
+                        pass
+                if not _is_mock:
+                    _valid_cks.append(_c)
+
+            if _valid_cks:
+                _latest = _valid_cks[-1]
                 _has_optim = f"{_latest}/optimizer.pt" in _files
-                print(f"♻️ [HF-resume] repo có {len(_cks)} checkpoint; mới nhất={_latest} "
+                print(f"♻️ [HF-resume] repo có {len(_valid_cks)} checkpoint hợp lệ; mới nhất={_latest} "
                       f"(optimizer.pt: {'CÓ' if _has_optim else 'THIẾU'}).")
                 if _has_optim:
                     print(f"♻️ [HF-resume] tải {_latest} về {training_args.output_dir} ...")
@@ -1144,13 +1164,35 @@ def main(args_list=None):
                         pass
                     elif _corrupt:
                         print(f"🛑 [HF-resume] checkpoint {_latest} chứa trọng số NaN/inf → BỎ resume.")
+                    elif is_mock_checkpoint(_resume_dir):
+                        print(f"🛑 [HF-resume] checkpoint {_latest} sau khi tải là mock checkpoint → BỎ resume.")
+                        import shutil
+                        shutil.rmtree(_resume_dir, ignore_errors=True)
                     else:
                         training_args.resume_from_checkpoint = _resume_dir
                         print(f"♻️ [HF-resume] RESUME từ {_resume_dir}")
                 else:
                     print("⚠️ [HF-resume] checkpoint là weights-only (push cũ) → KHÔNG resume đúng được.")
+            else:
+                if _all_cks:
+                    print(f"ℹ️ [HF-resume] Tất cả {len(_all_cks)} checkpoint trên HF repo là từ mock run → BỎ QUA, bắt đầu train mới từ đầu.")
         except Exception as _e:
             print(f"⚠️ [HF-resume] bỏ qua ({type(_e).__name__}: {_e}); train bình thường.")
+
+    # Dọn dẹp các checkpoint mock cục bộ trong output_dir (nếu còn tồn tại từ lần chạy trước)
+    if os.path.isdir(training_args.output_dir):
+        import shutil
+        for _item in os.listdir(training_args.output_dir):
+            _item_path = os.path.join(training_args.output_dir, _item)
+            if os.path.isdir(_item_path) and _item.startswith("checkpoint-"):
+                if is_mock_checkpoint(_item_path):
+                    print(f"🧹 [pretrain] Xoá checkpoint mock còn sót lại trên đĩa: {_item_path}")
+                    shutil.rmtree(_item_path, ignore_errors=True)
+
+    if training_args.resume_from_checkpoint:
+        if is_mock_checkpoint(training_args.resume_from_checkpoint):
+            print(f"🛑 [resume] Checkpoint '{training_args.resume_from_checkpoint}' là từ mock run → BỎ QUA resume để train chuẩn từ đầu!")
+            training_args.resume_from_checkpoint = None
 
     print(">>> Starting Pretrain...")
     if training_args.resume_from_checkpoint:
@@ -1168,32 +1210,35 @@ def main(args_list=None):
         _debug_split_ocr(model, data_collator, val_dataset, DEVICE)
 
     # Save best
-    trainer.save_model(training_args.output_dir)
-    try:
-        if tokenizer is not None:
-            tokenizer.save_pretrained(training_args.output_dir)
-    except Exception:
-        pass
-
-    if _hf_tok and _hf_repo:
+    if not training_args.smoke_test:
+        trainer.save_model(training_args.output_dir)
         try:
-            print(f"☁️ [HF] Đang upload model tốt nhất từ {training_args.output_dir} lên repo: {_hf_repo} ...")
-            from huggingface_hub import HfApi
-            api = HfApi(token=_hf_tok)
-            api.create_repo(repo_id=_hf_repo, repo_type="model", exist_ok=True)
-            _light = os.environ.get("HF_PUSH_OPTIM", "1").lower() in ("0", "false", "no", "off")
-            _ignore = ["*optimizer.pt", "*rng_state*", "*scheduler.pt", "checkpoint-*/**"] if _light else ["checkpoint-*/**"]
-            api.upload_folder(
-                folder_path=training_args.output_dir,
-                repo_id=_hf_repo,
-                repo_type="model",
-                ignore_patterns=_ignore,
-            )
-            print(f"✅ [HF] Đã lưu thành công model tốt nhất lên Hugging Face Hub: https://huggingface.co/{_hf_repo}")
-        except Exception as _e:
-            print(f"⚠️ [HF] Upload model cuối lên HF lỗi: {_e}")
-    
-    print("✅ Pretrain complete and saved successfully.")
+            if tokenizer is not None:
+                tokenizer.save_pretrained(training_args.output_dir)
+        except Exception:
+            pass
+
+        if _hf_tok and _hf_repo:
+            try:
+                print(f"☁️ [HF] Đang upload model tốt nhất từ {training_args.output_dir} lên repo: {_hf_repo} ...")
+                from huggingface_hub import HfApi
+                api = HfApi(token=_hf_tok)
+                api.create_repo(repo_id=_hf_repo, repo_type="model", exist_ok=True)
+                _light = os.environ.get("HF_PUSH_OPTIM", "1").lower() in ("0", "false", "no", "off")
+                _ignore = ["*optimizer.pt", "*rng_state*", "*scheduler.pt", "checkpoint-*/**"] if _light else ["checkpoint-*/**"]
+                api.upload_folder(
+                    folder_path=training_args.output_dir,
+                    repo_id=_hf_repo,
+                    repo_type="model",
+                    ignore_patterns=_ignore,
+                )
+                print(f"✅ [HF] Đã lưu thành công model tốt nhất lên Hugging Face Hub: https://huggingface.co/{_hf_repo}")
+            except Exception as _e:
+                print(f"⚠️ [HF] Upload model cuối lên HF lỗi: {_e}")
+        
+        print("✅ Pretrain complete and saved successfully.")
+    else:
+        print("🧹 [smoke_test] Chế độ mock test hoàn tất: BỎ QUA lưu checkpoint và upload HF.")
 
 if __name__ == "__main__":
     main()
