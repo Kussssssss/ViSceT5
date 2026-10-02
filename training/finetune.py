@@ -378,52 +378,82 @@ def main(args_list=None):
         training_args.resume_from_checkpoint = resume_dir
 
     ckpt_to_load = model_args.model_name_or_path
+    _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
+
+    # Kiểm tra thư mục downloaded_pretrain cũ trên đĩa nếu có
+    if os.path.isdir(_hf_dir):
+        _local_cfg_path = os.path.join(_hf_dir, "config.json")
+        if os.path.exists(_local_cfg_path):
+            try:
+                import json, shutil
+                with open(_local_cfg_path, "r", encoding="utf-8") as _f_cfg:
+                    _d_cfg = json.load(_f_cfg)
+                _req_vs = str(getattr(model_args, "vs_backbone", "") or "")
+                _req_vit = str(getattr(model_args, "clip_vision_name", "") or "")
+                _disk_vs = str(_d_cfg.get("vs_backbone", "") or "")
+                _disk_vit = str(_d_cfg.get("clip_vision_name", "") or "")
+                if (_req_vs and _disk_vs and _req_vs != _disk_vs) or (_req_vit and _disk_vit and _req_vit != _disk_vit):
+                    print(f"🧹 [finetune] Checkpoint cũ trong '{_hf_dir}' không khớp kiến trúc mục tiêu "
+                          f"(vs: {_disk_vs} != {_req_vs} hoặc vit: {_disk_vit} != {_req_vit}). Đang dọn dẹp để tải đúng...")
+                    shutil.rmtree(_hf_dir, ignore_errors=True)
+                elif ckpt_to_load and not os.path.exists(ckpt_to_load):
+                    # Nếu downloaded_pretrain cũ đã khớp kiến trúc thì có thể tái sử dụng luôn
+                    print(f"♻️ [finetune] Tái sử dụng pretrain model đã tải hợp lệ từ trước: {_hf_dir}")
+                    ckpt_to_load = _hf_dir
+                    model_args.model_name_or_path = _hf_dir
+            except Exception as _e_clean:
+                print(f"⚠️ [finetune] Lỗi khi kiểm tra thư mục downloaded_pretrain cũ: {_e_clean}")
+
     if ckpt_to_load and not os.path.exists(ckpt_to_load):
         _downloaded = False
-        try:
-            from huggingface_hub import list_repo_files, snapshot_download
-            print(f"🌐 [finetune] '{ckpt_to_load}' không tìm thấy trên local. Đang tải từ Hugging Face Hub...")
-            _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
+        from huggingface_hub import list_repo_files, snapshot_download, hf_hub_download
 
-            _repo_files = []
+        # Nếu ckpt_to_load là tên repo Hugging Face hợp lệ (vd: Kus669/ViSceT5-mra-pretrain-ver4)
+        if "/" in ckpt_to_load and not ckpt_to_load.startswith((".", "/")):
             try:
-                _repo_files = list_repo_files(ckpt_to_load, token=_hf_tok if _hf_tok else None)
-            except Exception:
-                pass
+                print(f"🌐 [finetune] '{ckpt_to_load}' là repo Hub. Đang tải về '{_hf_dir}'...")
+                _repo_files = []
+                try:
+                    _repo_files = list_repo_files(ckpt_to_load, token=_hf_tok if _hf_tok else None)
+                except Exception:
+                    pass
 
-            _allow = None
-            _ignore = ["*optimizer.pt", "*rng_state*", "*scheduler.pt"]
-            if "model.safetensors" in _repo_files or "pytorch_model.bin" in _repo_files:
-                # Repo root đã có sẵn model -> chỉ tải root, không tải thêm checkpoint-*
-                _ignore.append("checkpoint-*/**")
-            elif any(f.startswith("checkpoint-") for f in _repo_files):
-                # Repo root chưa có model -> tải checkpoint mới nhất
-                _sub_cks = sorted({f.split("/")[0] for f in _repo_files if f.startswith("checkpoint-")},
-                                  key=lambda x: int(x.split("-")[1]) if "-" in x and x.split("-")[1].isdigit() else 0)
-                if _sub_cks:
-                    _latest_sub = _sub_cks[-1]
-                    _allow = [f"{_latest_sub}/**", "*.json", "spiece.model"]
+                _allow = None
+                _ignore = ["*optimizer.pt", "*rng_state*", "*scheduler.pt"]
+                if "model.safetensors" in _repo_files or "pytorch_model.bin" in _repo_files:
+                    _ignore.append("checkpoint-*/**")
+                elif any(f.startswith("checkpoint-") for f in _repo_files):
+                    _sub_cks = sorted({f.split("/")[0] for f in _repo_files if f.startswith("checkpoint-")},
+                                      key=lambda x: int(x.split("-")[1]) if "-" in x and x.split("-")[1].isdigit() else 0)
+                    if _sub_cks:
+                        _latest_sub = _sub_cks[-1]
+                        _allow = [f"{_latest_sub}/**", "*.json", "spiece.model"]
 
-            snapshot_download(
-                repo_id=ckpt_to_load,
-                repo_type="model",
-                token=_hf_tok if _hf_tok else None,
-                local_dir=_hf_dir,
-                allow_patterns=_allow,
-                ignore_patterns=_ignore,
-            )
-            ckpt_to_load = _hf_dir
-            model_args.model_name_or_path = _hf_dir
-            _downloaded = True
-            print(f"✅ [finetune] Đã tải xong pretrain model từ Hub ({model_args.model_name_or_path}) về: {_hf_dir}")
-        except Exception as _e_dl:
-            print(f"⚠️ [finetune] Lỗi khi tải trực tiếp từ Hub '{ckpt_to_load}': {_e_dl}")
+                snapshot_download(
+                    repo_id=ckpt_to_load,
+                    repo_type="model",
+                    token=_hf_tok if _hf_tok else None,
+                    local_dir=_hf_dir,
+                    allow_patterns=_allow,
+                    ignore_patterns=_ignore,
+                )
+                ckpt_to_load = _hf_dir
+                model_args.model_name_or_path = _hf_dir
+                _downloaded = True
+                print(f"✅ [finetune] Đã tải xong pretrain model từ Hub về: {_hf_dir}")
+            except Exception as _e_dl:
+                print(f"⚠️ [finetune] Lỗi khi tải trực tiếp từ Hub '{ckpt_to_load}': {_e_dl}")
 
-        if not _downloaded and _hf_tok:
+        if not _downloaded:
             try:
-                from huggingface_hub import HfApi, snapshot_download
-                _who = HfApi(token=_hf_tok).whoami()
-                _user = _who.get("name") or _who.get("username")
+                from huggingface_hub import HfApi
+                _user = None
+                if _hf_tok:
+                    try:
+                        _who = HfApi(token=_hf_tok).whoami()
+                        _user = _who.get("name") or _who.get("username")
+                    except Exception:
+                        pass
                 _candidates = []
                 if os.environ.get("HF_PRETRAIN_REPO"):
                     _candidates.append(os.environ.get("HF_PRETRAIN_REPO").strip())
@@ -437,24 +467,69 @@ def main(args_list=None):
                         _candidates.append(_ud_pt)
                 except Exception:
                     pass
+
+                _suffixes = (
+                    "ViSceT5-mra-pretrain-ver4",
+                    "ViSceT5-mra-pretrain",
+                    "ViSceT5-mra-pretrain-ver3",
+                    "ViSceT5-pretrain",
+                    "ViSceT5-mra-pretrain-ver2",
+                )
                 if _user:
-                    for _suffix in ("ViSceT5-mra-pretrain-ver2", "ViSceT5-mra-pretrain", "ViSceT5-pretrain"):
+                    for _suffix in _suffixes:
                         _cand = f"{_user}/{_suffix}"
                         if _cand not in _candidates:
                             _candidates.append(_cand)
-                if "Kus669/ViSceT5-mra-pretrain-ver2" not in _candidates:
-                    _candidates.append("Kus669/ViSceT5-mra-pretrain-ver2")
+                for _suffix in _suffixes:
+                    _cand = f"Kus669/{_suffix}"
+                    if _cand not in _candidates:
+                        _candidates.append(_cand)
 
                 for _candidate_repo in _candidates:
                     print(f"🌐 [finetune] Thử tìm pretrain repo trên HF: {_candidate_repo}...")
-                    _hf_dir = os.path.join(training_args.output_dir, "downloaded_pretrain")
+                    # Kiểm tra tính tương thích của kiến trúc trước khi tải toàn bộ trọng số
                     try:
+                        import json
+                        _cfg_file = hf_hub_download(
+                            repo_id=_candidate_repo,
+                            filename="config.json",
+                            token=_hf_tok if _hf_tok else None
+                        )
+                        with open(_cfg_file, "r", encoding="utf-8") as _f_chk:
+                            _cand_cfg = json.load(_f_chk)
+                        _req_vs = str(getattr(model_args, "vs_backbone", "") or "")
+                        _cand_vs = str(_cand_cfg.get("vs_backbone", "") or "")
+                        if _req_vs and _cand_vs and _req_vs != _cand_vs:
+                            print(f"   ⚠️ Bỏ qua {_candidate_repo} vì vs_backbone không khớp ({_cand_vs} != {_req_vs}).")
+                            continue
+                    except Exception:
+                        pass
+
+                    try:
+                        _repo_files = []
+                        try:
+                            _repo_files = list_repo_files(_candidate_repo, token=_hf_tok if _hf_tok else None)
+                        except Exception:
+                            pass
+
+                        _allow = None
+                        _ignore = ["*optimizer.pt", "*rng_state*", "*scheduler.pt"]
+                        if "model.safetensors" in _repo_files or "pytorch_model.bin" in _repo_files:
+                            _ignore.append("checkpoint-*/**")
+                        elif any(f.startswith("checkpoint-") for f in _repo_files):
+                            _sub_cks = sorted({f.split("/")[0] for f in _repo_files if f.startswith("checkpoint-")},
+                                              key=lambda x: int(x.split("-")[1]) if "-" in x and x.split("-")[1].isdigit() else 0)
+                            if _sub_cks:
+                                _latest_sub = _sub_cks[-1]
+                                _allow = [f"{_latest_sub}/**", "*.json", "spiece.model"]
+
                         snapshot_download(
                             repo_id=_candidate_repo,
                             repo_type="model",
-                            token=_hf_tok,
+                            token=_hf_tok if _hf_tok else None,
                             local_dir=_hf_dir,
-                            ignore_patterns=["*optimizer.pt", "*rng_state*", "*scheduler.pt"]
+                            allow_patterns=_allow,
+                            ignore_patterns=_ignore,
                         )
                         ckpt_to_load = _hf_dir
                         model_args.model_name_or_path = _hf_dir
