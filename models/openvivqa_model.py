@@ -505,6 +505,14 @@ class OpenViVQAModel(PreTrainedModel):
                     new_pat = F.interpolate(pat_p.float(), size=(new_g, new_g), mode="bicubic", align_corners=False).to(ckpt_pos_emb.dtype)
                     new_pat = new_pat.reshape(1, ckpt_pos_emb.shape[1], new_num_patches).transpose(1, 2)
                     state_dict[k] = torch.cat([cls_p, new_pat], dim=1).squeeze(0)
+        if not strict:
+            model_sd = self.state_dict()
+            mismatched = [mk for mk, mv in state_dict.items() if mk in model_sd and model_sd[mk].shape != mv.shape]
+            if mismatched:
+                print(f"⚠️ [OpenViVQA] load_state_dict(strict=False): Bỏ qua {len(mismatched)} key(s) do lệch kích thước tensor:")
+                for mk in mismatched[:6]:
+                    print(f"   - {mk}: ckpt {state_dict[mk].shape} != model {model_sd[mk].shape}")
+                state_dict = {k: v for k, v in state_dict.items() if k not in mismatched}
         return super().load_state_dict(state_dict, strict=strict)
 
     # --- ENCODE TEXT ---
