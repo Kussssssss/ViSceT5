@@ -752,6 +752,7 @@ class TaskSpecificTrainer(Seq2SeqTrainer):
                 "input_ids": inputs.get("input_ids"),
                 "attention_mask": inputs.get("attention_mask"),
                 "pixel_values": inputs.get("pixel_values"),
+                "pil_images": inputs.get("pil_images"),
                 "ocr_info": inputs.get("ocr_info"),
                 "ocr_mask_token": inputs.get("ocr_mask_token"),
                 "ocr_mask_box": inputs.get("ocr_mask_box"),
