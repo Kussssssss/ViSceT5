@@ -1033,6 +1033,12 @@ def main(args_list=None):
             pass
     if not _hf_tok:
         try:
+            from kaggle_secrets import UserSecretsClient
+            _hf_tok = UserSecretsClient().get_secret("HF_TOKEN") or ""
+        except Exception:
+            pass
+    if not _hf_tok:
+        try:
             from huggingface_hub import get_token
             _hf_tok = get_token() or ""
         except Exception:
@@ -1045,6 +1051,8 @@ def main(args_list=None):
             login(token=_hf_tok, add_to_git_credential=False)
         except Exception:
             pass
+    else:
+        print("ℹ️ [HF] Chưa phát hiện HF_TOKEN → Chế độ đọc Hub công khai (Auto-resume vẫn hoạt động nếu repo public; auto-push sẽ tạm tắt).")
 
     _hf_repo = (
         os.environ.get("HF_REPO", "").strip()
@@ -1057,6 +1065,12 @@ def main(args_list=None):
             _hf_repo = userdata.get("HF_REPO") or ""
         except Exception:
             pass
+    if not _hf_repo:
+        try:
+            from kaggle_secrets import UserSecretsClient
+            _hf_repo = UserSecretsClient().get_secret("HF_REPO") or ""
+        except Exception:
+            pass
     if _hf_tok and not _hf_repo:
         try:
             from huggingface_hub import HfApi
@@ -1067,6 +1081,8 @@ def main(args_list=None):
                 print(f"ℹ️ [HF] Tự động xác định pretrain HF repo từ tài khoản: {_hf_repo}")
         except Exception as _e:
             pass
+    if not _hf_repo:
+        _hf_repo = "Kus669/ViSceT5-mra-pretrain-ver4"
 
     if getattr(training_args, "push_to_hub", False):
         # Tắt cờ push_to_hub nội bộ của HF Trainer (vì phụ thuộc git-lfs dễ lỗi trên Kaggle)
@@ -1113,71 +1129,13 @@ def main(args_list=None):
         except Exception as _e:
             print(f"ℹ️ [HF] không bật được auto-push callback ({_e}); vẫn có upload cuối ở run_pipeline.")
 
-    # ── Auto-resume TỪ HF repo ──
-    if (not training_args.resume_from_checkpoint and _hf_tok and _hf_repo
-            and not training_args.smoke_test
-            and os.environ.get("RESUME_FROM_HF", "auto").lower() not in ("0", "false", "no", "off")):
-        try:
-            from huggingface_hub import list_repo_files, snapshot_download, hf_hub_download
-            from safetensors.torch import load_file as _load_sft
-            _files = list_repo_files(_hf_repo, token=_hf_tok)
-            _all_cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
-                              key=lambda x: int(x.split("-")[1]))
-
-            # Lọc bỏ các checkpoint được sinh ra từ mock/smoke test (chỉ resume từ full pretrain hợp lệ)
-            _valid_cks = []
-            for _c in _all_cks:
-                _is_mock = False
-                if f"{_c}/trainer_state.json" in _files:
-                    try:
-                        _ts_file = hf_hub_download(_hf_repo, f"{_c}/trainer_state.json", repo_type="model", token=_hf_tok)
-                        with open(_ts_file, "r", encoding="utf-8") as _f:
-                            _ts_data = json.load(_f)
-                        if is_mock_checkpoint(_ts_data):
-                            _is_mock = True
-                            print(f"⚠️ [HF-resume] BỎ QUA checkpoint {_c} trên HF vì được tạo từ mock run (max_steps={_ts_data.get('max_steps')}).")
-                    except Exception:
-                        pass
-                if not _is_mock:
-                    _valid_cks.append(_c)
-
-            if _valid_cks:
-                _latest = _valid_cks[-1]
-                _has_optim = f"{_latest}/optimizer.pt" in _files
-                print(f"♻️ [HF-resume] repo có {len(_valid_cks)} checkpoint hợp lệ; mới nhất={_latest} "
-                      f"(optimizer.pt: {'CÓ' if _has_optim else 'THIẾU'}).")
-                if _has_optim:
-                    print(f"♻️ [HF-resume] tải {_latest} về {training_args.output_dir} ...")
-                    snapshot_download(_hf_repo, repo_type="model", token=_hf_tok,
-                                      local_dir=training_args.output_dir,
-                                      allow_patterns=[f"{_latest}/**"])
-                    _resume_dir = os.path.join(training_args.output_dir, _latest)
-                    _mp = os.path.join(_resume_dir, "model.safetensors")
-                    _corrupt = False
-                    if os.path.isfile(_mp):
-                        try:
-                            _corrupt = any((not torch.isfinite(v).all())
-                                           for v in _load_sft(_mp).values())
-                        except Exception:
-                            _corrupt = False
-                    if not os.path.isfile(os.path.join(_resume_dir, "optimizer.pt")):
-                        pass
-                    elif _corrupt:
-                        print(f"🛑 [HF-resume] checkpoint {_latest} chứa trọng số NaN/inf → BỎ resume.")
-                    elif is_mock_checkpoint(_resume_dir):
-                        print(f"🛑 [HF-resume] checkpoint {_latest} sau khi tải là mock checkpoint → BỎ resume.")
-                        import shutil
-                        shutil.rmtree(_resume_dir, ignore_errors=True)
-                    else:
-                        training_args.resume_from_checkpoint = _resume_dir
-                        print(f"♻️ [HF-resume] RESUME từ {_resume_dir}")
-                else:
-                    print("⚠️ [HF-resume] checkpoint là weights-only (push cũ) → KHÔNG resume đúng được.")
-            else:
-                if _all_cks:
-                    print(f"ℹ️ [HF-resume] Tất cả {len(_all_cks)} checkpoint trên HF repo là từ mock run → BỎ QUA, bắt đầu train mới từ đầu.")
-        except Exception as _e:
-            print(f"⚠️ [HF-resume] bỏ qua ({type(_e).__name__}: {_e}); train bình thường.")
+    # ── TỰ ĐỘNG RESUME THÔNG MINH (Local Disk & HF Hub) ──
+    # 1. Dọn dẹp các checkpoint mock (nếu có từ smoke run).
+    # 2. Tìm checkpoint cục bộ hợp lệ mới nhất trên đĩa trong output_dir.
+    # 3. Tìm checkpoint từ xa hợp lệ mới nhất trên Hugging Face Hub.
+    # 4. So sánh: nếu remote có step cao hơn local -> tải remote về và resume.
+    #    Nếu local có checkpoint hợp lệ và step >= remote -> resume trực tiếp từ đĩa cục bộ.
+    _force_new = os.environ.get("FORCE_NEW_TRAIN", "0").lower() in ("1", "true", "yes")
 
     # Dọn dẹp các checkpoint mock cục bộ trong output_dir (nếu còn tồn tại từ lần chạy trước)
     if os.path.isdir(training_args.output_dir):
@@ -1188,6 +1146,111 @@ def main(args_list=None):
                 if is_mock_checkpoint(_item_path):
                     print(f"🧹 [pretrain] Xoá checkpoint mock còn sót lại trên đĩa: {_item_path}")
                     shutil.rmtree(_item_path, ignore_errors=True)
+
+    if not training_args.resume_from_checkpoint and not training_args.smoke_test and not _force_new:
+        from safetensors.torch import load_file as _load_sft
+        # 1. Tìm checkpoint cục bộ hợp lệ mới nhất
+        _local_best_step = -1
+        _local_best_dir = None
+        _allow_local = os.environ.get("RESUME_FROM_LOCAL", "auto").lower() not in ("0", "false", "no", "off")
+
+        if _allow_local and os.path.isdir(training_args.output_dir):
+            for _item in os.listdir(training_args.output_dir):
+                _item_path = os.path.join(training_args.output_dir, _item)
+                if os.path.isdir(_item_path) and _item.startswith("checkpoint-"):
+                    try:
+                        _step = int(_item.split("-")[1])
+                        _opt_path = os.path.join(_item_path, "optimizer.pt")
+                        _sft_path = os.path.join(_item_path, "model.safetensors")
+                        if os.path.isfile(_opt_path) and not is_mock_checkpoint(_item_path):
+                            _corrupt = False
+                            if os.path.isfile(_sft_path):
+                                try:
+                                    _corrupt = any((not torch.isfinite(v).all()) for v in _load_sft(_sft_path).values())
+                                except Exception:
+                                    _corrupt = False
+                            if not _corrupt and _step > _local_best_step:
+                                _local_best_step = _step
+                                _local_best_dir = _item_path
+                    except Exception:
+                        pass
+
+        # 2. Tìm checkpoint từ xa trên HF Hub hợp lệ mới nhất
+        _remote_best_step = -1
+        _remote_best_name = None
+        _allow_hf = (_hf_repo and os.environ.get("RESUME_FROM_HF", "auto").lower() not in ("0", "false", "no", "off"))
+
+        if _allow_hf:
+            try:
+                from huggingface_hub import list_repo_files, hf_hub_download
+                _tok_arg = _hf_tok if _hf_tok else None
+                _files = list_repo_files(_hf_repo, token=_tok_arg)
+                _all_cks = sorted({f.split("/")[0] for f in _files if f.startswith("checkpoint-")},
+                                  key=lambda x: int(x.split("-")[1]) if "-" in x and x.split("-")[1].isdigit() else -1)
+
+                _valid_remote = []
+                for _c in _all_cks:
+                    _is_mock = False
+                    if f"{_c}/trainer_state.json" in _files:
+                        try:
+                            _ts_file = hf_hub_download(_hf_repo, f"{_c}/trainer_state.json", repo_type="model", token=_tok_arg)
+                            with open(_ts_file, "r", encoding="utf-8") as _f:
+                                _ts_data = json.load(_f)
+                            if is_mock_checkpoint(_ts_data):
+                                _is_mock = True
+                                print(f"⚠️ [HF-resume] BỎ QUA checkpoint {_c} trên HF vì là mock run (max_steps={_ts_data.get('max_steps')}).")
+                        except Exception:
+                            pass
+                    if not _is_mock and f"{_c}/optimizer.pt" in _files:
+                        try:
+                            _step = int(_c.split("-")[1])
+                            _valid_remote.append((_step, _c))
+                        except Exception:
+                            pass
+
+                if _valid_remote:
+                    _valid_remote.sort(key=lambda x: x[0])
+                    _remote_best_step, _remote_best_name = _valid_remote[-1]
+                    print(f"🌐 [HF-resume] Repo '{_hf_repo}' có {len(_valid_remote)} checkpoint đầy đủ; mới nhất: {_remote_best_name} (step {_remote_best_step}).")
+            except Exception as _e_hf:
+                print(f"ℹ️ [HF-resume] Không kiểm tra được checkpoint trên HF repo '{_hf_repo}': {_e_hf}")
+
+        # 3. Lựa chọn resume: Remote hay Local?
+        if _remote_best_step > _local_best_step:
+            print(f"📥 [HF-resume] Checkpoint từ xa {_remote_best_name} (step {_remote_best_step}) mới hơn bản đĩa cục bộ (step {_local_best_step}). Đang tải về...")
+            try:
+                from huggingface_hub import snapshot_download
+                _tok_arg = _hf_tok if _hf_tok else None
+                snapshot_download(_hf_repo, repo_type="model", token=_tok_arg,
+                                  local_dir=training_args.output_dir,
+                                  allow_patterns=[f"{_remote_best_name}/**"])
+                _target_resume = os.path.join(training_args.output_dir, _remote_best_name)
+                
+                # Kiểm tra tính toàn vẹn
+                _mp = os.path.join(_target_resume, "model.safetensors")
+                _corrupt = False
+                if os.path.isfile(_mp):
+                    try:
+                        _corrupt = any((not torch.isfinite(v).all()) for v in _load_sft(_mp).values())
+                    except Exception:
+                        _corrupt = False
+
+                if _corrupt:
+                    print(f"🛑 [HF-resume] Checkpoint {_remote_best_name} bị lỗi NaN/inf. Bỏ qua.")
+                elif not os.path.isfile(os.path.join(_target_resume, "optimizer.pt")):
+                    print(f"🛑 [HF-resume] Checkpoint {_remote_best_name} thiếu optimizer.pt. Bỏ qua.")
+                else:
+                    training_args.resume_from_checkpoint = _target_resume
+                    print(f"♻️ [HF-resume] ĐÃ THIẾT LẬP RESUME THÀNH CÔNG từ: {_target_resume} (step {_remote_best_step})")
+            except Exception as _e_dl:
+                print(f"⚠️ [HF-resume] Lỗi khi tải checkpoint từ xa: {_e_dl}")
+
+        if not training_args.resume_from_checkpoint and _local_best_step > 0:
+            training_args.resume_from_checkpoint = _local_best_dir
+            print(f"♻️ [Local-resume] ĐÃ THIẾT LẬP RESUME từ checkpoint cục bộ: {_local_best_dir} (step {_local_best_step})")
+
+        if not training_args.resume_from_checkpoint:
+            print("ℹ️ [resume] Không có checkpoint hợp lệ để resume → Bắt đầu huấn luyện mới từ Step 0.")
 
     if training_args.resume_from_checkpoint:
         if is_mock_checkpoint(training_args.resume_from_checkpoint):
