@@ -272,6 +272,13 @@ class OpenViVQAModel(PreTrainedModel):
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
         self.post_init()
 
+        # avf_fusion là THÀNH PHẦN CỦA AVF (chỉ dùng cùng visual_search). Khi tắt AVF thì gỡ
+        # luôn, giống visual_search ở trên → mô hình không-AVF thực sự không còn tham số AVF
+        # (2.95M), và đúng giao thức ablation "module tắt thì không khởi tạo tham số".
+        # Gỡ SAU post_init để luồng RNG lúc khởi tạo giữ y hệt → kết quả KHÔNG đổi.
+        if not bool(getattr(self.config, "ablation_use_vs", True)):
+            del self.avf_fusion
+
     # --- Các hàm đồng bộ cơ bản ---
     def sync_tokenizer_ids(self, tokenizer, persist_dir: Optional[str] = None):
         if tokenizer.pad_token_id is None: tokenizer.pad_token_id = self.config.pad_token_id
