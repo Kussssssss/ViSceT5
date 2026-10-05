@@ -771,6 +771,9 @@ def main(args_list=None):
     if hasattr(model_args, "mra_kernel_size") and model_args.mra_kernel_size is not None:
         config.mra_kernel_size = int(model_args.mra_kernel_size)
     config.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
+    config.max_target_words = int(getattr(model_args, "max_target_words", 5))
+    if hasattr(model_args, "learnable_img_proj"):
+        config.learnable_img_proj = bool(model_args.learnable_img_proj)
     if hasattr(model_args, "clip_vision_name") and model_args.clip_vision_name:
         config.clip_vision_name = str(model_args.clip_vision_name)
     if hasattr(model_args, "clip_image_size") and model_args.clip_image_size:

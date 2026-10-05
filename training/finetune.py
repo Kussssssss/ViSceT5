@@ -651,6 +651,8 @@ def main(args_list=None):
         config.vs_backbone = str(model_args.vs_backbone)
     if hasattr(model_args, "freeze_mra_cnn"):
         config.freeze_mra_cnn = bool(model_args.freeze_mra_cnn)
+    if hasattr(model_args, "learnable_img_proj"):
+        config.learnable_img_proj = bool(model_args.learnable_img_proj)
 
     model = OpenViVQAModel(config)
     if ckpt_to_load:

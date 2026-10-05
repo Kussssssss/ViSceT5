@@ -188,14 +188,15 @@ def _build_grounded_cloze(question: str, ocr_norm_tokens, max_spans: int = 8,
     return " ".join(in_parts), target, sid, span_types
 
 
-def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[List[str], torch.Tensor]:
+def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[List[str], torch.Tensor, List[int]]:
     """
     Sort tokens (list of str) and boxes (torch.Tensor of shape [N, 4])
     in human reading order: top-to-bottom, then left-to-right (PreSTU section 2.1).
     boxes format: [x1, y1, x2, y2].
+    Trả về kèm hoán vị order để khớp đúng det/rec features tương ứng.
     """
     if len(tokens) <= 1 or boxes.size(0) <= 1:
-        return tokens, boxes
+        return tokens, boxes, list(range(len(tokens)))
 
     items = []
     for idx, (tok, box) in enumerate(zip(tokens, boxes)):
@@ -203,6 +204,7 @@ def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[Lis
         h = max(y2 - y1, 1e-4)
         yc = (y1 + y2) / 2.0
         items.append({
+            "idx": idx,
             "tok": tok,
             "box": box,
             "x1": x1,
@@ -236,40 +238,58 @@ def _sort_ocr_reading_order(tokens: List[str], boxes: torch.Tensor) -> Tuple[Lis
         line.sort(key=lambda it: it["x1"])
         sorted_items.extend(line)
 
+    order = [it["idx"] for it in sorted_items]
     sorted_tokens = [it["tok"] for it in sorted_items]
     sorted_boxes = torch.stack([it["box"] for it in sorted_items])
-    return sorted_tokens, sorted_boxes
+    return sorted_tokens, sorted_boxes, order
 
 
 def _splitocr_b1_gt(gt_texts, gt_boxes_sorted, sp_boxes, sp_texts,
-                    full_ocr_prob: float = 0.2, iou_thr: float = 0.5):
+                    full_ocr_prob: float = 0.2, iou_thr: float = 0.5,
+                    max_target_words: int = 5):
     """SplitOCR B1 cho VinText: TARGET = GT text (labels, sạch); PREFIX = text SILVER của
     SwinTextSpotter cho vùng prefix (khớp IoU với box GT). prefix (spotter, nhiễu) và target
     (GT, sạch) là các TỪ RỜI NHAU (tránh trùng) → model học ĐỌC + SỬA lỗi OCR từ ảnh.
-    Trả (prefix_str, target_str)."""
+    Trả (prefix_words, p_boxes, p_rows, target_words, t_boxes, t_idx, is_full)."""
     from data.gt_ocr import match_gt_to_spotter
     import random as _random
     N = len(gt_texts)
     if N == 0:
-        return "", ""
-    s = 0 if (N == 1 or _random.random() < full_ocr_prob) else _random.randint(1, N - 1)
+        return [], torch.zeros((0, 4), dtype=torch.float), [], [], torch.zeros((0, 4), dtype=torch.long), [], True
+    if N == 1 or _random.random() < full_ocr_prob:
+        s = 0
+        is_full = True
+    else:
+        min_s = 1
+        if max_target_words and int(max_target_words) > 0:
+            min_s = max(1, N - int(max_target_words))
+        s = _random.randint(min_s, N - 1)
+        is_full = False
     match = match_gt_to_spotter(gt_boxes_sorted, sp_boxes, iou_thr)
     prefix_words = []
+    p_box_list = []
+    p_rows = []
     for i in range(s):
         j = match[i]
         if 0 <= j < len(sp_texts):
             t = str(sp_texts[j]).strip()
             if t and t.lower() != "none":
-                prefix_words.append(t)          # dùng bản SILVER của spotter làm ngữ cảnh input
-    target_words = [gt_texts[i] for i in range(s, N)]   # sinh GT sạch cho vùng target
-    return " ".join(prefix_words).strip(), " ".join(target_words).strip()
+                prefix_words.append(t)
+                p_box_list.append(sp_boxes[j])
+                p_rows.append(j)
+    target_words = [gt_texts[i] for i in range(s, N)]
+    p_boxes = torch.stack(p_box_list) if len(p_box_list) > 0 else torch.zeros((0, 4), dtype=torch.float)
+    t_boxes = (torch.stack([gt_boxes_sorted[i] for i in range(s, N)]) * 1000.0).long().clamp(0, 999) if s < N and len(gt_boxes_sorted) > 0 else torch.zeros((0, 4), dtype=torch.long)
+    t_idx = list(range(s, N))
+    return prefix_words, p_boxes, p_rows, target_words, t_boxes, t_idx, is_full
 
 
 def _split_ocr_sequential(
     tokens: List[str],
     boxes: torch.Tensor,
     full_ocr_prob: float = 0.2,
-) -> Tuple[List[str], torch.Tensor, List[str], torch.Tensor]:
+    max_target_words: int = 5,
+) -> Tuple[List[str], torch.Tensor, List[int], List[str], torch.Tensor, List[int], bool]:
     """SplitOCR ĐÚNG paper PreSTU (Kil et al., 2022, §2.2.1): tokens đã sắp theo thứ tự đọc
     (trên-trái → dưới-phải); chọn NGẪU NHIÊN một điểm cắt s trong chuỗi. prefix = tokens[:s]
     (đưa vào prompt làm ngữ cảnh), target = tokens[s:] (mô hình PHẢI ĐỌC từ ảnh để sinh ra).
@@ -277,34 +297,38 @@ def _split_ocr_sequential(
     (sinh toàn bộ). full_ocr_prob = xác suất cắt ở đầu (s=0)."""
     N = len(tokens)
     if N == 0 or boxes.size(0) == 0:
-        return [], torch.zeros((0, 4), dtype=torch.float), [], torch.zeros((0, 4), dtype=torch.long)
+        return [], torch.zeros((0, 4), dtype=torch.float), [], [], torch.zeros((0, 4), dtype=torch.long), [], False
     if N == 1 or random.random() < full_ocr_prob:
         s = 0
+        is_full = True
     else:
-        s = random.randint(1, N - 1)   # prefix có s từ, target có N-s ≥ 1 từ
+        min_s = 1
+        if max_target_words and int(max_target_words) > 0:
+            min_s = max(1, N - int(max_target_words))
+        s = random.randint(min_s, N - 1)
+        is_full = False
     prefix_words = tokens[:s]
     p_boxes = boxes[:s].clone() if s > 0 else torch.zeros((0, 4), dtype=torch.float)
+    p_idx = list(range(s))
     target_words = tokens[s:]
-    t_boxes = (boxes[s:] * 1000.0).long().clamp(0, 999)
-    return prefix_words, p_boxes, target_words, t_boxes
+    t_boxes = (boxes[s:] * 1000.0).long().clamp(0, 999) if s < N else torch.zeros((0, 4), dtype=torch.long)
+    t_idx = list(range(s, N))
+    return prefix_words, p_boxes, p_idx, target_words, t_boxes, t_idx, is_full
 
 
 def _split_ocr_spatial_region(
     tokens: List[str],
     boxes: torch.Tensor,
     full_ocr_prob: float = 0.15,
-) -> Tuple[List[str], torch.Tensor, List[str], torch.Tensor]:
+    max_target_words: int = 5,
+) -> Tuple[List[str], torch.Tensor, List[int], List[str], torch.Tensor, List[int], bool]:
     """
     Splits OCR tokens into Prefix (Input context) and Target (Prediction) based on
     SPATIAL REGION CLUSTERING (Khoanh vùng cụm không gian).
     
-    Instead of arbitrary sequence splitting where targets may be scattered across
-    the entire 224x224 image, this algorithm selects a localized spatial cluster
-    around a randomly chosen anchor box.
-    
     1. Select a random anchor box.
     2. Compute anisotropic distance d_i = (dx)^2 + 2.0 * (dy)^2 to prioritize same-line / same-sign words.
-    3. Pick the top-K closest boxes as the TARGET CLUSTER (K in [1, N-1]).
+    3. Pick the top-K closest boxes as the TARGET CLUSTER (K in [1, N-1], bounded by max_target_words).
     4. Remaining boxes form the PREFIX (Input).
     5. Maintain reading-order (top-to-bottom, left-to-right) inside both sets.
     """
@@ -314,60 +338,97 @@ def _split_ocr_spatial_region(
             [],
             torch.zeros((0, 4), dtype=torch.float),
             [],
+            [],
             torch.zeros((0, 4), dtype=torch.long),
+            [],
+            False,
         )
 
     # Pure OCR mode (prob = full_ocr_prob): No prefix, target is the ENTIRE image text.
-    # Đặt TRƯỚC nhánh N==1 để full_ocr_prob=1.0 luôn cho full-read (kể cả 1 từ).
     if random.random() < full_ocr_prob:
         p_words = []
         p_b = torch.zeros((0, 4), dtype=torch.float)
         t_words = list(tokens)
         t_b = (boxes * 1000.0).long().clamp(0, 999)
-        return p_words, p_b, t_words, t_b
+        return p_words, p_b, [], t_words, t_b, list(range(N)), True
 
     if N == 1:
         if random.random() < 0.5:
-            p_words, p_b = [], torch.zeros((0, 4), dtype=torch.float)
-            t_words, t_b = tokens, (boxes * 1000.0).long().clamp(0, 999)
+            return [], torch.zeros((0, 4), dtype=torch.float), [], tokens, (boxes * 1000.0).long().clamp(0, 999), [0], True
         else:
-            p_words, p_b = tokens, boxes.clone()
-            t_words, t_b = tokens, (boxes * 1000.0).long().clamp(0, 999)
-        return p_words, p_b, t_words, t_b
+            return tokens, boxes.clone(), [0], tokens, (boxes * 1000.0).long().clamp(0, 999), [0], False
 
     # SPATIAL CLUSTERING:
-    # 1. Compute center coordinates of all boxes
     cx = (boxes[:, 0] + boxes[:, 2]) / 2.0
     cy = (boxes[:, 1] + boxes[:, 3]) / 2.0
 
-    # 2. Pick a random anchor box
     anchor_idx = random.randint(0, N - 1)
     anc_x = cx[anchor_idx]
     anc_y = cy[anchor_idx]
 
-    # 3. Anisotropic squared distance: weight dy by 2.0
     dist = (cx - anc_x) ** 2 + 2.0 * (cy - anc_y) ** 2
 
-    # 4. Determine cluster size K (number of target words)
-    k = random.randint(1, max(1, N - 1))
+    # Chặn trên số từ target để cụm target chắt và không sinh câu quá dài
+    k_max = max(1, N - 1)
+    if max_target_words and int(max_target_words) > 0:
+        k_max = min(k_max, int(max_target_words))
+    k = random.randint(1, k_max)
 
-    # 5. Top-k nearest indices to anchor form the Target Cluster
     nearest_indices = torch.argsort(dist)[:k].tolist()
     target_idx_set = set(nearest_indices)
     prefix_idx_set = [i for i in range(N) if i not in target_idx_set]
 
-    # 6. Preserve reading order inside both sets
     sorted_target_idx = sorted(list(target_idx_set))
     sorted_prefix_idx = sorted(prefix_idx_set)
 
     target_words = [tokens[i] for i in sorted_target_idx]
-    t_boxes_float = boxes[sorted_target_idx]
-    t_boxes = (t_boxes_float * 1000.0).long().clamp(0, 999)
+    t_boxes = (boxes[sorted_target_idx] * 1000.0).long().clamp(0, 999)
 
     prefix_words = [tokens[i] for i in sorted_prefix_idx]
     p_boxes = boxes[sorted_prefix_idx]
 
-    return prefix_words, p_boxes, target_words, t_boxes
+    return prefix_words, p_boxes, sorted_prefix_idx, target_words, t_boxes, sorted_target_idx, False
+
+
+def _boxes_to_patch_mask(boxes_norm: torch.Tensor, grid: int = 14) -> torch.Tensor:
+    """Raster hoá các box target (chuẩn hoá [0,1], xyxy) thành phân phối trên lưới grid×grid.
+    Đây là NHÃN GROUNDING: 'với prompt này, vùng ảnh cần nhìn nằm ở các ô nào'.
+    """
+    m = torch.zeros(grid, grid, dtype=torch.float)
+    if boxes_norm is not None and boxes_norm.numel() > 0:
+        cell = 1.0 / grid
+        for b in boxes_norm:
+            x0, y0, x1, y1 = [float(v) for v in b[:4]]
+            x0, x1 = min(x0, x1), max(x0, x1)
+            y0, y1 = min(y0, y1), max(y0, y1)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            gx0, gx1 = max(0, int(x0 * grid)), min(grid - 1, int((x1 - 1e-9) * grid))
+            gy0, gy1 = max(0, int(y0 * grid)), min(grid - 1, int((y1 - 1e-9) * grid))
+            for gy in range(gy0, gy1 + 1):
+                cy0, cy1 = gy * cell, (gy + 1) * cell
+                oh = max(0.0, min(y1, cy1) - max(y0, cy0))
+                if oh <= 0:
+                    continue
+                for gx in range(gx0, gx1 + 1):
+                    cx0, cx1 = gx * cell, (gx + 1) * cell
+                    ow = max(0.0, min(x1, cx1) - max(x0, cx0))
+                    if ow > 0:
+                        m[gy, gx] += (ow * oh) / (cell * cell)
+    tot = float(m.sum())
+    if tot <= 1e-8:
+        return torch.full((grid * grid,), 1.0 / (grid * grid), dtype=torch.float)
+    return (m / tot).reshape(-1)
+
+
+def _union_box(boxes_norm: torch.Tensor) -> Optional[torch.Tensor]:
+    """Box bao của cả cụm target (xyxy chuẩn hoá). None nếu không có box nào."""
+    if boxes_norm is None or boxes_norm.numel() == 0:
+        return None
+    return torch.stack([
+        boxes_norm[:, 0].min(), boxes_norm[:, 1].min(),
+        boxes_norm[:, 2].max(), boxes_norm[:, 3].max(),
+    ]).clamp(0.0, 1.0)
 
 
 class ViT5VQADataCollator:
@@ -1096,6 +1157,25 @@ class ViT5VQADataCollator:
             split_targets = []
             batch_prefix_boxes = []
             batch_target_boxes = []
+            batch_prefix_det = []
+            batch_prefix_rec = []
+            batch_patch_mask = []
+            batch_union_bins = []
+
+            d_det = int(getattr(self.cfg, "ocr_d_det", 256))
+            d_rec = int(getattr(self.cfg, "ocr_d_rec", 256))
+            n_bins = int(getattr(self.cfg, "num_bbox_bins", 1000))
+            max_tgt_words = int(getattr(self.cfg, "max_target_words", 5))
+
+            # Đặc trưng OCR đầy đủ (SceSpaVis) cho RIÊNG các từ PREFIX. Nhờ vậy 20.1M tham
+            # số OCREncoder / SemanticOCREmbedding / char-embedding được huấn luyện ngay trong
+            # pretrain và chuyển giao thẳng sang finetune mà KHÔNG bị rò rỉ từ target.
+            pre_info_list = []
+            pre_char = []
+            pre_char_mask = []
+            pre_word_ids = []
+            pre_map = []
+            pre_box_mask = []
 
             pad_tok = self.tokenizer.pad_token or "<pad>"
             for i in range(B):
@@ -1110,6 +1190,9 @@ class ViT5VQADataCollator:
                     valid_boxes = raw_boxes[valid_idx].clone().detach().float()
                 else:
                     valid_boxes = torch.zeros((0, 4), dtype=torch.float)
+
+                det_all = info.get("det_features")
+                rec_all = info.get("rec_features")
 
                 # ── B1 (VinText): TARGET từ GT labels (sạch), PREFIX từ spotter (silver) ──
                 _lbl = batch[i].get("label_path") if isinstance(batch[i], dict) else None
@@ -1126,57 +1209,120 @@ class ViT5VQADataCollator:
                     # spotter GỐC (aligned texts↔boxes) để khớp IoU với GT
                     _sp_boxes = ocr_raw_list[i].get("boxes", torch.zeros((0, 4)))
                     _sp_texts = list(ocr_raw_list[i].get("texts", []))
-                    _gt_texts, _gt_boxes = _sort_ocr_reading_order(_gt_texts, _gt_boxes)
+                    _gt_texts, _gt_boxes, _ = _sort_ocr_reading_order(_gt_texts, _gt_boxes)
                     _fop = float(getattr(self, "pretrain_full_ocr_prob", 0.2))
-                    prefix_str, target_str = _splitocr_b1_gt(
-                        _gt_texts, _gt_boxes, _sp_boxes, _sp_texts, full_ocr_prob=_fop)
-                    p_boxes = torch.zeros((0, 4), dtype=torch.float)
-                    t_boxes = torch.zeros((0, 4), dtype=torch.long)
-                    prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
-                    split_prompts.append(prompt_text)
-                    split_targets.append(target_str)
-                    batch_prefix_boxes.append(p_boxes)
-                    batch_target_boxes.append(t_boxes)
-                    continue
-
-                N_words = len(norm_tokens)
-                if N_words == 0:
-                    prefix_str = ""
-                    target_str = ""
-                    p_boxes = torch.zeros((0, 4), dtype=torch.float)
-                    t_boxes = torch.zeros((0, 4), dtype=torch.long)
+                    (prefix_words, p_boxes, p_rows,
+                     target_words, t_boxes, _t_idx, is_full) = _splitocr_b1_gt(
+                        _gt_texts, _gt_boxes, _sp_boxes, _sp_texts,
+                        full_ocr_prob=_fop, max_target_words=max_tgt_words)
                 else:
-                    # Sắp xếp theo trật tự đọc không gian: trên xuống dưới, trái sang phải (PreSTU Sec 2.1)
-                    norm_tokens, valid_boxes = _sort_ocr_reading_order(norm_tokens, valid_boxes)
-
-                    # Chọn cách tách prefix/target theo pretrain_split_mode:
-                    #   "sequential" (mặc định, ĐÚNG PreSTU): cắt ngẫu nhiên theo thứ tự đọc.
-                    #   "spatial": biến thể khoanh cụm không gian (giữ để ablation).
-                    _fop = float(getattr(self, "pretrain_full_ocr_prob", 0.2))
-                    if str(getattr(self, "pretrain_split_mode", "sequential")).lower() == "spatial":
-                        prefix_words, p_boxes, target_words, t_boxes = _split_ocr_spatial_region(
-                            norm_tokens, valid_boxes, full_ocr_prob=_fop)
+                    N_words = len(norm_tokens)
+                    if N_words == 0:
+                        prefix_words, target_words = [], []
+                        p_boxes = torch.zeros((0, 4), dtype=torch.float)
+                        t_boxes = torch.zeros((0, 4), dtype=torch.long)
+                        p_rows = []
+                        is_full = False
                     else:
-                        prefix_words, p_boxes, target_words, t_boxes = _split_ocr_sequential(
-                            norm_tokens, valid_boxes, full_ocr_prob=_fop)
-                    prefix_str = " ".join(prefix_words).strip()
-                    target_str = " ".join(target_words).strip()
+                        norm_tokens, valid_boxes, sort_perm = _sort_ocr_reading_order(norm_tokens, valid_boxes)
+                        _fop = float(getattr(self, "pretrain_full_ocr_prob", 0.2))
+                        if str(getattr(self, "pretrain_split_mode", "sequential")).lower() == "spatial":
+                            (prefix_words, p_boxes, p_idx,
+                             target_words, t_boxes, _t_idx, is_full) = _split_ocr_spatial_region(
+                                norm_tokens, valid_boxes, full_ocr_prob=_fop, max_target_words=max_tgt_words)
+                        else:
+                            (prefix_words, p_boxes, p_idx,
+                             target_words, t_boxes, _t_idx, is_full) = _split_ocr_sequential(
+                                norm_tokens, valid_boxes, full_ocr_prob=_fop, max_target_words=max_tgt_words)
+                        p_rows = [valid_idx[sort_perm[j]] for j in p_idx]
 
+                prefix_str = " ".join(prefix_words).strip()
+                target_str = " ".join(target_words).strip()
                 prompt_text = f"Generate ocr_text in vi: {prefix_str}".strip() if prefix_str else "Generate ocr_text in vi:"
                 split_prompts.append(prompt_text)
                 split_targets.append(target_str)
                 batch_prefix_boxes.append(p_boxes)
                 batch_target_boxes.append(t_boxes)
 
+                if len(p_rows) > 0 and det_all is not None and rec_all is not None:
+                    valid_p_rows = [r for r in p_rows if 0 <= r < det_all.size(0)]
+                    if len(valid_p_rows) > 0:
+                        p_det = det_all[valid_p_rows].clone().detach().float()
+                        p_rec = rec_all[valid_p_rows].clone().detach().float()
+                    else:
+                        p_det = torch.zeros((len(p_rows), d_det), dtype=torch.float)
+                        p_rec = torch.zeros((len(p_rows), d_rec), dtype=torch.float)
+                else:
+                    p_det = torch.zeros((len(p_rows), d_det), dtype=torch.float)
+                    p_rec = torch.zeros((len(p_rows), d_rec), dtype=torch.float)
+
+                batch_prefix_det.append(p_det)
+                batch_prefix_rec.append(p_rec)
+
+                # --- đặc trưng SceSpaVis của PREFIX (cùng thứ tự với p_boxes) ---
+                pad_ocr = list(prefix_words)[:current_max_len] if len(prefix_words) > 0 else []
+                n_pre = len(pad_ocr)
+                while len(pad_ocr) < current_max_len:
+                    pad_ocr.append(pad_tok)
+                _ca, _ma, _fid, _lens = self._add_cons_ocr_info(pad_ocr, current_max_len)
+                _map = []
+                for j, l in enumerate(_lens):
+                    _map.extend([j] * int(l.item()))
+                pre_char.append(_ca)
+                pre_char_mask.append(_ma)
+                pre_word_ids.append(_fid)
+                pre_map.append(torch.tensor(_map, dtype=torch.long))
+
+                _wm = torch.zeros(current_max_len, dtype=torch.long)
+                _wm[:n_pre] = 1
+                _bx = torch.zeros(current_max_len, 4, dtype=torch.float)
+                _dt = torch.zeros(current_max_len, d_det, dtype=torch.float)
+                _rc = torch.zeros(current_max_len, d_rec, dtype=torch.float)
+                if n_pre > 0:
+                    _bx[:n_pre] = p_boxes[:n_pre]
+                    if p_det.size(0) > 0:
+                        _w = min(p_det.size(1), d_det)
+                        _dt[:min(n_pre, p_det.size(0)), :_w] = p_det[:min(n_pre, p_det.size(0)), :_w]
+                    if p_rec.size(0) > 0:
+                        _w = min(p_rec.size(1), d_rec)
+                        _rc[:min(n_pre, p_rec.size(0)), :_w] = p_rec[:min(n_pre, p_rec.size(0)), :_w]
+                info["boxes_word_all"] = _bx
+                info["word_mask_all"] = _wm
+                info["det_features"] = _dt
+                info["rec_features"] = _rc
+                pre_info_list.append(info)
+                pre_box_mask.append(_wm)
+
+                t_norm = (t_boxes.float() / 1000.0).clamp(0.0, 1.0) if t_boxes.numel() > 0 else torch.zeros((0, 4), dtype=torch.float)
+                if is_full:
+                    batch_patch_mask.append(torch.full((196,), -1.0, dtype=torch.float))
+                    batch_union_bins.append(torch.full((4,), -100, dtype=torch.long))
+                else:
+                    batch_patch_mask.append(_boxes_to_patch_mask(t_norm, grid=14))
+                    _ub = _union_box(t_norm)
+                    if _ub is None:
+                        batch_union_bins.append(torch.full((4,), -100, dtype=torch.long))
+                    else:
+                        batch_union_bins.append((_ub * n_bins).long().clamp(0, n_bins - 1))
+
             # Pad prefix_box_coords and target_bbox_bins across the batch
             max_p_len = max([b.size(0) for b in batch_prefix_boxes], default=0)
             max_p_len = max(max_p_len, 1)
             prefix_box_coords = torch.zeros(B, max_p_len, 4, dtype=torch.float)
             prefix_box_mask = torch.zeros(B, max_p_len, dtype=torch.long)
+            prefix_det_feats = torch.zeros(B, max_p_len, d_det, dtype=torch.float)
+            prefix_rec_feats = torch.zeros(B, max_p_len, d_rec, dtype=torch.float)
             for i, pb in enumerate(batch_prefix_boxes):
                 if pb.size(0) > 0:
                     prefix_box_coords[i, :pb.size(0)] = pb
                     prefix_box_mask[i, :pb.size(0)] = 1
+                    _pd, _pr = batch_prefix_det[i], batch_prefix_rec[i]
+                    if _pd.size(0) > 0:
+                        _w = min(_pd.size(1), d_det)
+                        prefix_det_feats[i, :_pd.size(0), :_w] = _pd[:, :_w]
+                    if _pr.size(0) > 0:
+                        _w = min(_pr.size(1), d_rec)
+                        prefix_rec_feats[i, :_pr.size(0), :_w] = _pr[:, :_w]
 
             max_t_len = max([b.size(0) for b in batch_target_boxes], default=0)
             max_t_len = max(max_t_len, 1)
@@ -1211,7 +1357,7 @@ class ViT5VQADataCollator:
                 prefix_box_coords = torch.zeros(B, 0, 4, dtype=torch.float)
                 prefix_box_mask = torch.zeros(B, 0, dtype=torch.long)
 
-            return {
+            res = {
                 "input_ids": prompt_tok.input_ids.to(pixel_values.device),
                 "attention_mask": prompt_tok.attention_mask.to(pixel_values.device),
                 "labels": labels.to(pixel_values.device),
@@ -1220,7 +1366,22 @@ class ViT5VQADataCollator:
                 "target_bbox_bins": target_bbox_bins.to(pixel_values.device),
                 "prefix_box_coords": prefix_box_coords.to(pixel_values.device),
                 "prefix_box_mask": prefix_box_mask.to(pixel_values.device),
+                "prefix_det_feats": prefix_det_feats.to(pixel_values.device),
+                "prefix_rec_feats": prefix_rec_feats.to(pixel_values.device),
+                # Đặc trưng OCR đầy đủ của PREFIX -> chạy qua chính SceSpaVis mà
+                # finetune dùng, nên trọng số học được ở đây chuyển giao 1-1.
+                "ocr_info": pre_info_list,
+                "ocr_mask_box": torch.stack(pre_box_mask).to(pixel_values.device),
+                "twa_ocr_char": torch.stack(pre_char).to(pixel_values.device),
+                "twa_ocr_char_mask": torch.stack(pre_char_mask).to(pixel_values.device),
+                "twa_word_ids": torch.nn.utils.rnn.pad_sequence(
+                    pre_word_ids, batch_first=True, padding_value=self.pad_id).to(pixel_values.device),
+                "ocr_to_word_map": torch.nn.utils.rnn.pad_sequence(
+                    pre_map, batch_first=True, padding_value=-1).to(pixel_values.device),
             }
+            if len(batch_patch_mask) > 0 and not bool(getattr(self, "pretrain_gen_only", True)):
+                res["target_patch_mask"] = torch.stack(batch_patch_mask, dim=0).to(pixel_values.device)
+            return res
 
         # =========================================================
         # NHÁNH FINETUNE / INFERENCE

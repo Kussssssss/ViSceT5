@@ -369,10 +369,17 @@ class OpenViVQAModel(PreTrainedModel):
             )
         self.vs_t5_guided = bool(getattr(self.config, "vs_t5_guided", True))
 
-        # Chiếu img_tokens (clip_hidden) -> d_model của ViT5 để fuse. CLIP-base: 768==768 -> Identity
-        # (không thêm tham số, giữ nguyên hành vi cũ). CLIP-L/14-336: 1024 -> 768 qua Linear.
-        self.img_proj = (nn.Linear(self.clip_hidden, self.d_model)
-                         if self.clip_hidden != self.d_model else nn.Identity())
+        # Chiếu img_tokens (clip_hidden) -> d_model của ViT5 để fuse.
+        # Khi clip_hidden != d_model hoặc learnable_img_proj=True: dùng nn.Linear.
+        # Khởi tạo Identity khi clip_hidden == d_model để giữ nguyên biểu diễn CLIP ban đầu.
+        self.learnable_img_proj = bool(getattr(self.config, "learnable_img_proj", True))
+        if self.clip_hidden != self.d_model or self.learnable_img_proj:
+            self.img_proj = nn.Linear(self.clip_hidden, self.d_model)
+            if self.clip_hidden == self.d_model:
+                nn.init.eye_(self.img_proj.weight)
+                nn.init.zeros_(self.img_proj.bias)
+        else:
+            self.img_proj = nn.Identity()
 
         # ── MRA: Mixture-of-Resolution Adaptation ──────────────────────────────
         # Nhanh CAO: ConvNeXt @ mra_high_res (mac dinh 1024) tren ANH GOC -> ĐẶC TRƯNG CUỐI.
@@ -442,6 +449,14 @@ class OpenViVQAModel(PreTrainedModel):
                 for _ in _layer_ids
             ])
 
+            # MultiPathAlignModule: kết hợp fast stream (ViT) và slow stream (ConvNeXt) ở chặng cuối
+            # (Feast Your Eyes / LLaVA-HR, Eq. 2: + F_vh) trước khi đưa vào projector / ViT5.
+            self.mra_align = MultiPathAlignModule(
+                fast_vision_dim=self.clip_hidden,
+                slow_vision_dim=_final_dim,
+                zero_init=True,
+            )
+
             # Normalization statistics (tu dong trich xuat tu timm model cfg hoac mac dinh OpenAI CLIP stats)
             m_mean = [0.48145466, 0.4578275, 0.40821073]
             m_std = [0.26862954, 0.26130258, 0.27577711]
@@ -462,6 +477,12 @@ class OpenViVQAModel(PreTrainedModel):
         if hasattr(self.vit5, "tie_weights"): self.vit5.tie_weights()
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
         self.post_init()
+        # Bảo toàn khởi tạo Identity / Zero sau khi post_init() gọi _init_weights:
+        if self.learnable_img_proj and isinstance(self.img_proj, nn.Linear) and self.clip_hidden == self.d_model:
+            nn.init.eye_(self.img_proj.weight)
+            nn.init.zeros_(self.img_proj.bias)
+        if hasattr(self, "mra_align") and isinstance(self.mra_align, MultiPathAlignModule):
+            self.mra_align.init_weights(zero_init=True)
 
     # --- Các hàm đồng bộ cơ bản ---
     def sync_tokenizer_ids(self, tokenizer, persist_dir: Optional[str] = None):
@@ -536,6 +557,7 @@ class OpenViVQAModel(PreTrainedModel):
         txt_emb: Optional[torch.Tensor] = None, txt_mask: Optional[torch.Tensor] = None,
         fuse_with_text: bool = True, return_attn: bool = False,
         need_attn_map: bool = True,
+        mra_hi_feat: Optional[torch.Tensor] = None,
     ):
         # need_attn_map=False khi AVF tắt: patch_scores chỉ phục vụ việc chọn vùng crop.
         # Xin output_attentions buộc HF bỏ CLIPSdpaAttention để quay về attention thủ công
@@ -591,7 +613,10 @@ class OpenViVQAModel(PreTrainedModel):
                 img_hs = torch.nan_to_num(img_hs, nan=0.0, posinf=1e4, neginf=-1e4).clamp(-1e4, 1e4)
 
         img_tokens = img_hs[:, 1:, :].to(self.target_dtype)
-        # Chiếu clip_hidden -> d_model (Identity nếu bằng nhau, vd CLIP-base).
+        # MRA Final Stage Fusion (Feast Your Eyes / LLaVA-HR, Eq. 2):
+        if getattr(self, "use_mra", False) and hasattr(self, "mra_align") and mra_hi_feat is not None:
+            img_tokens = self.mra_align(img_tokens, mra_hi_feat)
+        # Chiếu clip_hidden -> d_model (Learnable projector hoặc Identity).
         img_tokens = self.img_proj(img_tokens)
         img_attn_mask = torch.ones(B, img_tokens.size(1), dtype=torch.long, device=device)
         out = {"img_tokens": img_tokens, "img_attn_mask": img_attn_mask}
@@ -710,7 +735,11 @@ class OpenViVQAModel(PreTrainedModel):
             info_i = ocr_info[i]
             # --- XỬ LÝ BOXES ---
             boxes_word_all = info_i.get("boxes_word_all")
-            if not torch.is_tensor(boxes_word_all):
+            if boxes_word_all is None:
+                boxes_word_all = info_i.get("boxes")
+            if boxes_word_all is None:
+                boxes_word_all = torch.zeros(N_word, 4, device=device, dtype=self.target_dtype)
+            elif not torch.is_tensor(boxes_word_all):
                 boxes_word_all = torch.tensor(boxes_word_all, device=device, dtype=self.target_dtype)
             else:
                 boxes_word_all = boxes_word_all.to(device=device, dtype=self.target_dtype)
@@ -799,8 +828,8 @@ class OpenViVQAModel(PreTrainedModel):
 
             # Bổ sung det và rec đã ở token level vào dictionary để đẩy qua hàm Semantic
             sal_info_tok = {
-                "width": info_i["width"],
-                "height": info_i["height"],
+                "width": info_i.get("width", 224),
+                "height": info_i.get("height", 224),
                 "boxes": boxes_tok_i,
                 "det": det_tok_i,
                 "rec": rec_tok_i
@@ -960,8 +989,9 @@ class OpenViVQAModel(PreTrainedModel):
         # MRA: tính đặc trưng ConvNeXt @high-res từ ẢNH GỐC rồi gắn vào encoder ViT để
         # MRAdapter bơm vào 3 tầng cuối. Phải gắn TRƯỚC khi gọi qa_clip, xoá ngay sau.
         _mra_enc = self.qa_clip.vision_model.encoder if getattr(self, "use_mra", False) else None
+        _mra_hi = self._encode_mra_highres(pil_images, device) if getattr(self, "use_mra", False) else None
         if _mra_enc is not None:
-            _mra_enc._mra_hi = self._encode_mra_highres(pil_images, device)
+            _mra_enc._mra_hi = _mra_hi
 
         img_pack = self._encode_image(
             pixel_values=pixel_values_dev,
@@ -971,6 +1001,7 @@ class OpenViVQAModel(PreTrainedModel):
             fuse_with_text=use_qaclip,  # Tắt True/False ở đây
             return_attn=return_visual_search_debug,
             need_attn_map=(use_vs and not run_t5_guided_vs), # chỉ early AVF cần patch_scores từ CLIP
+            mra_hi_feat=_mra_hi,
         )
         if _mra_enc is not None:
             _mra_enc._mra_hi = None
@@ -1001,14 +1032,20 @@ class OpenViVQAModel(PreTrainedModel):
             vs_out = {}
 
         # ----------------------------------------------------
-        # 3. ABLATION MODULE: OCR CONSFORMER (Only used in Finetune when OCR features provided)
+        # 3. ABLATION MODULE: OCR CONSFORMER (Dùng cho cả Finetune lẫn Pretrain khi có đặc trưng OCR)
         # ----------------------------------------------------
-        # Vị trí slot mask-box CHỈ được gán ở nhánh pretrain (bbox head). Khởi tạo None
-        # TRƯỚC nhánh để FINETUNE (không có bbox) không bị UnboundLocalError khi khối bbox
-        # phía dưới tham chiếu mask_box_start.
+        # Vị trí slot mask-box CHỈ được gán ở nhánh pretrain (bbox head).
         mask_box_start = None
         mask_box_end = None
-        if not self.pretrain and twa_word_ids is not None and ocr_info is not None:
+        mask_box_mask = None
+        txt_len = txt_emb_for_enc.size(1)
+        img_start = txt_len
+        img_len = img_pack["img_tokens"].size(1)
+        img_end = img_start + img_len
+
+        ocr_fused_feat = None
+        token_mask_for_ocr = None
+        if twa_word_ids is not None and ocr_info is not None:
             word_ids_for_ocr = twa_word_ids.to(device)
             pad_id = self.vit5.config.pad_token_id
             token_mask_for_ocr = (word_ids_for_ocr != pad_id).long()
@@ -1048,33 +1085,36 @@ class OpenViVQAModel(PreTrainedModel):
             if token_mask_for_ocr.size(1) != L_tok:
                 token_mask_for_ocr = _pad_or_crop_lastdim_int(token_mask_for_ocr, L_tok, pad_value=0)
 
-            _blocks = [
-                (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
-                (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
-                (ocr_fused_feat,           token_mask_for_ocr.long()),
-            ]
-        else:
-            # PRESTU DUAL-TARGET PRE-TRAINING:
-            # Fuses Image Pixels (ViT + VS), Text Prompt (with OCR prefix), Prefix BBoxes, and Target BBox Queries
-            txt_len = txt_emb_for_enc.size(1)
-            img_start = txt_len
-            img_len = img_pack["img_tokens"].size(1)
-            img_end = img_start + img_len
+        # Chuỗi hợp nhất thống nhất cho CẢ HAI giai đoạn:
+        #   finetune : [Câu hỏi ; 196 patch ảnh ; Đặc trưng OCR Consformer]
+        #   pretrain : [Prompt (chứa CHỮ OCR prefix) ; 196 patch ảnh ;
+        #               Đặc trưng OCR của RIENG PREFIX ; Target mask queries (nếu có)]
+        _blocks = [
+            (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
+            (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
+        ]
+        if ocr_fused_feat is not None:
+            _blocks.append((ocr_fused_feat, token_mask_for_ocr.long()))
 
-            _blocks = [
-                (txt_emb_for_enc,          txt_attn_mask_for_enc.long()),
-                (img_pack["img_tokens"],   img_pack["img_attn_mask"].long()),
-            ]
-            if prefix_box_coords is not None and prefix_box_coords.size(1) > 0:
-                prefix_box_emb = self.ocr_lite_box_proj(prefix_box_coords.to(device).to(dtype=self.target_dtype))
+        if self.pretrain:
+            # Đường dự phòng khi collator KHÔNG cấp đặc trưng SceSpaVis (ví dụ chạy dữ liệu cũ): dùng ocr_lite box+det+rec.
+            if ocr_fused_feat is None and prefix_box_coords is not None and prefix_box_coords.size(1) > 0:
+                prefix_ocr_emb = self.ocr_lite_box_proj(
+                    prefix_box_coords.to(device).to(dtype=self.target_dtype))
+                _P = prefix_ocr_emb.size(1)
+                if prefix_det_feats is not None and prefix_det_feats.size(1) == _P:
+                    _det = self.ocr_lite_det_proj(prefix_det_feats.to(device).to(dtype=self.target_dtype))
+                    prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_det_ln(_det).to(self.target_dtype)
+                if prefix_rec_feats is not None and prefix_rec_feats.size(1) == _P:
+                    _rec = self.ocr_lite_rec_proj(prefix_rec_feats.to(device).to(dtype=self.target_dtype))
+                    prefix_ocr_emb = prefix_ocr_emb + self.ocr_lite_rec_ln(_rec).to(self.target_dtype)
                 if prefix_box_mask is not None:
                     p_mask = prefix_box_mask.to(device).long()
                 else:
-                    p_mask = torch.ones(B, prefix_box_emb.size(1), device=device, dtype=torch.long)
-                _blocks.append((prefix_box_emb, p_mask))
+                    p_mask = torch.ones(B, _P, device=device, dtype=torch.long)
+                prefix_ocr_emb = prefix_ocr_emb * p_mask.unsqueeze(-1).to(prefix_ocr_emb.dtype)
+                _blocks.append((prefix_ocr_emb, p_mask))
 
-            mask_box_start = None
-            mask_box_end = None
             if target_bbox_bins is not None and target_bbox_bins.size(1) > 0:
                 K = target_bbox_bins.size(1)
                 mask_box_tokens = self.mask_box_embed.expand(B, K, -1).to(dtype=self.target_dtype)

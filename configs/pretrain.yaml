@@ -5,17 +5,21 @@ viet_vocab_path: "configs/data/viet_vocab.txt"
 
 loss_ablation_mode: "prestu"
 ablation_use_qaclip: true
-ablation_use_vs: true
-ablation_use_ocr: false
+ablation_use_vs: false
+ablation_use_mra: true
+ablation_use_ocr: true
 use_ocr_aug_pretrain: false
+max_target_words: 5
+learnable_img_proj: true
 num_bbox_bins: 1000
 lambda_bbox_ce: 0.3
 vision_unfreeze_last_n: -1 # -1 hoặc 12 = unfreeze FULL ViT (tất cả 12 layers + embeddings + layernorms)
 clip_vision_name: "openai/clip-vit-base-patch16"
 clip_image_size: 336
 vs_backbone: "facebook/convnextv2-base-22k-384"
-pretrain_use_vs: true
-vs_t5_guided: true
+mra_high_res: 1024
+pretrain_use_vs: false
+vs_t5_guided: false
 
 output_dir: "./output/pretrain"
 logging_dir: "./output/pretrain/logs"

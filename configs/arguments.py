@@ -127,6 +127,19 @@ class ModelArguments:
         default=False,
         metadata={"help": "Whether to apply OCR augmentation in pretrain (default False)."}
     )
+    max_target_words: int = field(
+        default=5,
+        metadata={"help": "Cap on how many OCR words the PreSTU target cluster may hold. "
+                          "Uncapped, k ~ U(1, N-1) makes targets tens of words long while "
+                          "finetune emits short answers, so the decoder carries a "
+                          "long-output habit across. Capping also tightens the cluster "
+                          "spatially, which sharpens the grounding label. 0 = no cap."}
+    )
+    learnable_img_proj: bool = field(
+        default=True,
+        metadata={"help": "Whether to use a learnable projection layer between fused visual tokens "
+                          "and ViT5 embeddings (initialized near identity when clip_hidden == d_model)."}
+    )
 
 @dataclass
 class DataArguments:
