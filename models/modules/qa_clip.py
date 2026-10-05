@@ -144,22 +144,52 @@ class MultiPathAlignModule(nn.Module):
     """Features combination module at the final stage of ViT (LLaVA-HR / MRA).
     Combines fast (ViT) and slow (ConvNeXt) features before feeding to projector/LLM.
     """
-    def __init__(self, fast_vision_dim: int, slow_vision_dim: int):
+    def __init__(self, fast_vision_dim: int, slow_vision_dim: int, zero_init: bool = True):
         super().__init__()
-        self.fast_proj = nn.Linear(fast_vision_dim, fast_vision_dim)
-        self.slow_proj = nn.Linear(slow_vision_dim, fast_vision_dim)
+        self.fast_vision_dim = int(fast_vision_dim)
+        self.slow_vision_dim = int(slow_vision_dim)
+        self.fast_proj = nn.Linear(self.fast_vision_dim, self.fast_vision_dim)
+        self.slow_proj = nn.Linear(self.slow_vision_dim, self.fast_vision_dim)
+        self.init_weights(zero_init=zero_init)
+
+    def init_weights(self, zero_init: bool = True):
+        if zero_init:
+            nn.init.eye_(self.fast_proj.weight)
+            nn.init.zeros_(self.fast_proj.bias)
+            nn.init.zeros_(self.slow_proj.weight)
+            nn.init.zeros_(self.slow_proj.bias)
+        else:
+            nn.init.xavier_uniform_(self.fast_proj.weight)
+            nn.init.zeros_(self.fast_proj.bias)
+            nn.init.xavier_uniform_(self.slow_proj.weight)
+            nn.init.zeros_(self.slow_proj.bias)
 
     def forward(self, fast_feat: torch.Tensor, slow_feat: torch.Tensor) -> torch.Tensor:
+        # Align device and dtype
+        slow_feat = slow_feat.to(device=fast_feat.device, dtype=fast_feat.dtype)
+
+        # 4D input handling: [B, C, H, W] or [B, H, W, C]
         if slow_feat.ndim == 4:
-            b, c, h, w = slow_feat.shape
-            slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
+            if slow_feat.shape[1] == self.slow_vision_dim:
+                b, c, h, w = slow_feat.shape
+                slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
+            elif slow_feat.shape[-1] == self.slow_vision_dim:
+                b, h, w, c = slow_feat.shape
+                slow_feat = slow_feat.view(b, -1, c)
+            else:
+                b, c, h, w = slow_feat.shape
+                slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
+        elif slow_feat.ndim == 3 and slow_feat.shape[-1] != self.slow_vision_dim and slow_feat.shape[1] == self.slow_vision_dim:
+            slow_feat = slow_feat.transpose(1, 2)
+
+        # Spatial alignment between slow_feat and fast_feat sequence lengths
         if slow_feat.shape[1] < fast_feat.shape[1]:
             b, l, c = slow_feat.shape
             src_size = int(math.isqrt(l))
             dst_size = int(math.isqrt(fast_feat.shape[1]))
             slow_feat = slow_feat.transpose(1, 2).view(b, c, src_size, src_size)
             slow_feat = F.interpolate(slow_feat.float(), size=(dst_size, dst_size), mode='bilinear',
-                                      align_corners=True).to(dtype=slow_feat.dtype)
+                                      align_corners=True).to(dtype=fast_feat.dtype)
             slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
         elif slow_feat.shape[1] > fast_feat.shape[1]:
             b, l, c = slow_feat.shape
@@ -172,6 +202,7 @@ class MultiPathAlignModule(nn.Module):
             else:
                 slow_feat = F.adaptive_avg_pool2d(slow_feat, (dst_size, dst_size))
             slow_feat = slow_feat.view(b, c, -1).transpose(1, 2)
+
         return self.fast_proj(fast_feat) + self.slow_proj(slow_feat)
 
 
