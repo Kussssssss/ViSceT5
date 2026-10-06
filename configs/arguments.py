@@ -22,8 +22,9 @@ class ModelArguments:
         metadata={"help": "CLIP/ViT vision backbone name or path (default: openai/clip-vit-base-patch16)."}
     )
     clip_image_size: int = field(
-        default=336,
-        metadata={"help": "Resolution for ViT input (336 for ViT-B/16 @ 336)."}
+        default=224,
+        metadata={"help": "Resolution for ViT input. 224 = native CLIP-B/16 (no position-embedding "
+                          "interpolation, 14x14 grid); high-res detail comes from the MRA CNN branch."}
     )
     vs_backbone: str = field(
         default="facebook/convnextv2-base-22k-384",

@@ -430,6 +430,25 @@ def _union_box(boxes_norm: torch.Tensor) -> Optional[torch.Tensor]:
     ]).clamp(0.0, 1.0)
 
 
+
+def _prefix_keep_mask(p_boxes: torch.Tensor, t_boxes_norm: torch.Tensor, thr: float = 0.5) -> List[bool]:
+    """Chống RÒ RỈ ở mức detection: bỏ một từ PREFIX nếu box của nó chồng lấn một box TARGET
+    (giao / diện tích box NHỎ hơn >= thr). Trường hợp điển hình: spotter gộp 2 từ GT thành 1 box
+    ("giá rẻ"), box đó khớp IoU với từ prefix "giá" nhưng CHỨA luôn chữ target "rẻ" → nếu giữ,
+    chữ target lọt vào đầu vào. Cũng bắt detection trùng/lấn của cùng một chữ ở hai phía."""
+    n = int(p_boxes.size(0)) if p_boxes is not None else 0
+    if n == 0 or t_boxes_norm is None or t_boxes_norm.numel() == 0:
+        return [True] * n
+    a = p_boxes.float()[:, None, :]
+    b = t_boxes_norm.float()[None, :, :]
+    iw = (torch.minimum(a[..., 2], b[..., 2]) - torch.maximum(a[..., 0], b[..., 0])).clamp(min=0)
+    ih = (torch.minimum(a[..., 3], b[..., 3]) - torch.maximum(a[..., 1], b[..., 1])).clamp(min=0)
+    inter = iw * ih
+    area_a = ((a[..., 2] - a[..., 0]).clamp(min=0) * (a[..., 3] - a[..., 1]).clamp(min=0))
+    area_b = ((b[..., 2] - b[..., 0]).clamp(min=0) * (b[..., 3] - b[..., 1]).clamp(min=0))
+    ioa = inter / torch.minimum(area_a, area_b).clamp(min=1e-8)
+    return (ioa.max(dim=1).values < thr).tolist()
+
 class ViT5VQADataCollator:
     def __init__(
         self,
@@ -1025,9 +1044,17 @@ class ViT5VQADataCollator:
         toks = ocr_tokens[:ocr_max_num]
         N = min(len(toks), ocr_max_num)
         related, padded = [], []
+        pad_tok = self.tokenizer.pad_token or "<pad>"
+        # Caller thường truyền list ĐÃ pad sẵn (_prepare_ocr nối "<pad>" tới L). Slot đặc biệt phải
+        # giữ NGUYÊN ở nửa related: nếu đem "sửa chính tả", "<pad>" → "ipad" (edit-distance) thành
+        # một TỪ MA không phải pad_id → ConsFormer attend vào nó.
+        _specials = {pad_tok, "<pad>", "</s>", "<unk>", getattr(self.tokenizer, "eos_token", None) or "</s>"}
         for i in range(N):
             tok = toks[i].lower().strip()
             padded.append(tok)
+            if tok in _specials:
+                related.append(tok)
+                continue
             is_special = bool(self.regex_special.search(tok))
             in_vocab = tok in self.global_vocab
             is_number = tok.isdigit()
@@ -1040,7 +1067,6 @@ class ViT5VQADataCollator:
                         rel = found if found else tok
                     else: rel = tok
             related.append(rel)
-        pad_tok = self.tokenizer.pad_token or "<pad>"
         while len(padded) < ocr_max_num:
             padded.append(pad_tok); related.append(pad_tok)
         return padded, related
@@ -1240,15 +1266,18 @@ class ViT5VQADataCollator:
 
                 _use_b1 = len(_gt_texts) > 0
                 if _use_b1:
-                    # spotter GỐC (aligned texts↔boxes) để khớp IoU với GT
-                    _sp_boxes = ocr_raw_list[i].get("boxes", torch.zeros((0, 4)))
-                    _sp_texts = list(ocr_raw_list[i].get("texts", []))
+                    # Spotter ĐÃ LỌC (cùng tập OCR mà finetune thấy sau _prepare_ocr/_filter_texts),
+                    # căn hàng texts↔boxes↔det/rec qua valid_idx. Khớp IoU với GT trên tập này,
+                    # rồi đổi chỉ số về hàng của info → det/rec lấy từ det_all như nhánh spotter.
+                    _sp_boxes = valid_boxes
+                    _sp_texts = [raw_texts[k] for k in valid_idx]
                     _gt_texts, _gt_boxes, _ = _sort_ocr_reading_order(_gt_texts, _gt_boxes)
                     _fop = float(getattr(self, "pretrain_full_ocr_prob", 0.2))
                     (prefix_words, p_boxes, p_rows,
                      target_words, t_boxes, _t_idx, is_full) = _splitocr_b1_gt(
                         _gt_texts, _gt_boxes, _sp_boxes, _sp_texts,
                         full_ocr_prob=_fop, max_target_words=max_tgt_words)
+                    p_rows = [valid_idx[j] for j in p_rows]
                 else:
                     N_words = len(norm_tokens)
                     if N_words == 0:
@@ -1270,6 +1299,22 @@ class ViT5VQADataCollator:
                                 norm_tokens, valid_boxes, full_ocr_prob=_fop, max_target_words=max_tgt_words)
                         p_rows = [valid_idx[sort_perm[j]] for j in p_idx]
 
+                # Target chuẩn hoá Y HỆT đầu vào OCR (_normalize_text, lowercase theo cfg) → một
+                # từ có CÙNG chuỗi sub-word token ở input (SceSpaVis) và output (labels).
+                # (Nhánh spotter đã chuẩn hoá sẵn; B1 lấy GT thô nên phải chuẩn hoá ở đây.)
+                target_words = [w for w in (_normalize_text(t, lowercase=self.lowercase)
+                                            for t in target_words) if w]
+                # Chống rò rỉ mức detection: bỏ từ prefix có box lấn box target.
+                if t_boxes.numel() > 0:
+                    _t_norm = (t_boxes.float() / 1000.0).clamp(0.0, 1.0)
+                else:
+                    _t_norm = torch.zeros((0, 4), dtype=torch.float)
+                _keep = _prefix_keep_mask(p_boxes, _t_norm)
+                if not all(_keep):
+                    _ki = [k for k, ok in enumerate(_keep) if ok]
+                    prefix_words = [prefix_words[k] for k in _ki]
+                    p_rows = [p_rows[k] for k in _ki]
+                    p_boxes = p_boxes[_ki] if len(_ki) > 0 else torch.zeros((0, 4), dtype=torch.float)
                 prefix_str = " ".join(prefix_words).strip()
                 target_str = " ".join(target_words).strip()
                 # Mặc định prefix CHỈ đi qua SceSpaVis (đúng đường OCR của finetune: ở finetune
@@ -1286,15 +1331,9 @@ class ViT5VQADataCollator:
                 batch_prefix_boxes.append(p_boxes)
                 batch_target_boxes.append(t_boxes)
 
-                # det/rec của PREFIX theo ĐÚNG mảng mà p_rows trỏ vào:
-                #   B1  : p_rows = chỉ số vào spotter GỐC (ocr_raw_list[i], CHƯA lọc) — cùng mảng
-                #         với _sp_boxes/_sp_texts dùng để khớp IoU;
-                #   khác: p_rows = chỉ số vào info (đã qua _prepare_ocr/_filter_texts).
-                if _use_b1:
-                    src_det = ocr_raw_list[i].get("det_features")
-                    src_rec = ocr_raw_list[i].get("rec_features")
-                else:
-                    src_det, src_rec = det_all, rec_all
+                # det/rec của PREFIX: ở CẢ HAI nhánh p_rows là chỉ số hàng của info (_prepare_ocr),
+                # cùng mảng với boxes/texts đã dùng để tách → từ k ↔ box k ↔ det/rec k.
+                src_det, src_rec = det_all, rec_all
                 p_det = torch.zeros((len(p_rows), d_det), dtype=torch.float)
                 p_rec = torch.zeros((len(p_rows), d_rec), dtype=torch.float)
                 for k, r in enumerate(p_rows):

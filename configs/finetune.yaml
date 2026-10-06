@@ -14,7 +14,7 @@ ablation_use_ocr: true       # (3) OCR Consformer
 ablation_use_ocr_aug: true   # (4) OCR augmentation (correct/noise/keep → nối bản OCR augment cạnh OCR gốc)
 vision_unfreeze_last_n: 0      # Mở băng ViT trong finetune: 0 = giữ đóng băng, 4 = top-4 layers, -1 = full ViT
 clip_vision_name: "openai/clip-vit-base-patch16"
-clip_image_size: 336
+clip_image_size: 224
 vs_backbone: "facebook/convnextv2-base-22k-384"
 
 output_dir: "./output/finetune"
