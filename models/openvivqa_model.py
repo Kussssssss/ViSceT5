@@ -966,13 +966,22 @@ class OpenViVQAModel(PreTrainedModel):
 
         txt_emb_for_enc, txt_attn_mask_for_enc = self._encode_text(q_ids_for_enc, enc_attention_mask, device)
 
-        # Encoded question for QACLIP
-        txt_outputs = self.vit5.encoder(
-            input_ids=q_ids_for_enc,
-            attention_mask=txt_attn_mask_for_enc,
-            return_dict=True
-        )
-        txt_hidden_states = txt_outputs.last_hidden_state.to(dtype=self.target_dtype)
+        # QA-CLIP nhận text làm instruction chỉ khi qaclip_use_text=True (finetune: câu hỏi).
+        # Pretrain PreSTU đặt False → QA-CLIP là bộ trích xuất đặc trưng ảnh thường (CLIP
+        # gốc + MR-Adapter), và bỏ luôn lượt encoder ViT5 chỉ phục vụ instruction đó.
+        qaclip_text = use_qaclip and bool(getattr(self.config, "qaclip_use_text", True))
+        _need_txt_hidden = qaclip_text or getattr(self, "_itc_text_pool", "embed") == "encoder"
+
+        if _need_txt_hidden:
+            # Encoded question for QACLIP
+            txt_outputs = self.vit5.encoder(
+                input_ids=q_ids_for_enc,
+                attention_mask=txt_attn_mask_for_enc,
+                return_dict=True
+            )
+            txt_hidden_states = txt_outputs.last_hidden_state.to(dtype=self.target_dtype)
+        else:
+            txt_hidden_states = txt_emb_for_enc   # không dùng cho QA-CLIP (fuse_with_text=False)
 
         if input_ids is not None:
             txt_emb_for_clip = txt_hidden_states
@@ -1000,7 +1009,7 @@ class OpenViVQAModel(PreTrainedModel):
             device=device,
             txt_emb=txt_emb_for_clip,
             txt_mask=txt_attn_mask_for_clip,
-            fuse_with_text=use_qaclip,  # Tắt True/False ở đây
+            fuse_with_text=qaclip_text,  # False: QA-CLIP = CLIP thường (không instruction)
             return_attn=return_visual_search_debug,
             need_attn_map=(use_vs and not run_t5_guided_vs), # chỉ early AVF cần patch_scores từ CLIP
             mra_hi_feat=_mra_hi,

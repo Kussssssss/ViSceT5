@@ -632,6 +632,8 @@ def main(args_list=None):
     # không khai báo sẵn các cờ này nên getattr mặc định True, càng phải set tường minh.
     config.pretrain_ablation_mode = model_args.loss_ablation_mode
     config.ablation_use_qaclip = bool(model_args.ablation_use_qaclip)
+    # Finetune: QA-CLIP luôn nhận CÂU HỎI làm instruction (ckpt pretrain lưu qaclip_use_text=False).
+    config.qaclip_use_text = True
     config.ablation_use_vs = bool(model_args.ablation_use_vs)
     config.ablation_use_ocr = bool(model_args.ablation_use_ocr)
     config.ablation_use_ocr_input = bool(getattr(model_args, "ablation_use_ocr_input", True))

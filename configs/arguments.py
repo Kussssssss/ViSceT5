@@ -138,6 +138,12 @@ class ModelArguments:
                           "PreSTU: split point uniform). WARNING: with sequential/B1 split a cap "
                           "forces s >= N-cap, i.e. targets are ALWAYS the last lines of the image."}
     )
+    pretrain_qaclip_use_text: bool = field(
+        default=False,
+        metadata={"help": "Pretrain: feed the prompt into QA-CLIP as instruction. Default False: the "
+                          "pretext is OCR reading, so QA-CLIP runs as a plain image feature extractor "
+                          "(CLIP + MR-Adapter). Finetune always feeds the question."}
+    )
     pretrain_prefix_in_prompt: bool = field(
         default=True,
         metadata={"help": "Put the OCR PREFIX text into the pretrain prompt (PreSTU), in addition to the "
