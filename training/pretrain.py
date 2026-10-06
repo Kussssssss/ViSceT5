@@ -905,7 +905,7 @@ def main(args_list=None):
     # Cùng xác suất sửa OCR như finetune (adv_probability_finetune) để nửa OCR-Aug ở pretrain
     # có ĐÚNG phân phối mà SceSpaVis sẽ gặp ở finetune. (TWC_ADV_PROB bên dưới vẫn ghi đè được.)
     data_collator.adv_probability_pretrain = float(getattr(model.config, "adv_probability_finetune", 1.0))
-    data_collator.pretrain_prefix_in_prompt = bool(getattr(model_args, "pretrain_prefix_in_prompt", False))
+    data_collator.pretrain_prefix_in_prompt = bool(getattr(model_args, "pretrain_prefix_in_prompt", True))
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
 
