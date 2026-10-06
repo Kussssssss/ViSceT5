@@ -936,6 +936,8 @@ class OpenViVQAModel(PreTrainedModel):
         target_bbox_bins: Optional[torch.LongTensor] = None,
         prefix_box_coords: Optional[torch.FloatTensor] = None,
         prefix_box_mask: Optional[torch.LongTensor] = None,
+        prefix_det_feats: Optional[torch.FloatTensor] = None,
+        prefix_rec_feats: Optional[torch.FloatTensor] = None,
         return_visual_search_debug: bool = False,
         **kwargs,
     ) -> Dict[str, Any]:
