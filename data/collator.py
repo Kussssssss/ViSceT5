@@ -1422,11 +1422,14 @@ class ViT5VQADataCollator:
                 truncation=False,
                 return_tensors="pt"
             )
+            # KHÔNG cắt target: cắt ở tgt_max_len sẽ chèn </s> giữa chừng → dạy model DỪNG đọc
+            # sớm (nhất là mẫu full-read nhiều chữ). Số từ OCR đã bị chặn bởi seq_max nên độ dài
+            # target có giới hạn trên. Eval pretrain chỉ gom accuracy vô hướng → độ dài labels
+            # thay đổi theo batch là an toàn.
             target_tok = self.tokenizer(
                 split_targets,
-                padding="max_length",
-                truncation=True,
-                max_length=self.tgt_max_len,
+                padding="longest",
+                truncation=False,
                 return_tensors="pt"
             )
             labels = target_tok.input_ids
