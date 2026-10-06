@@ -84,7 +84,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocrseq_use_spatial: bool = True,
         ocrseq_dropout: float = 0.1,
         num_bbox_bins: int = 1000,
-        max_target_words: int = 5,
+        max_target_words: int = 0,
         learnable_img_proj: bool = True,
         ablation_use_mra: bool = False,
         ablation_use_ocr: bool = True,

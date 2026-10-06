@@ -8,8 +8,9 @@ ablation_use_qaclip: true
 ablation_use_vs: false
 ablation_use_mra: true
 ablation_use_ocr: true
-use_ocr_aug_pretrain: false
-max_target_words: 5
+use_ocr_aug_pretrain: true      # OCR-Aug trên các từ PREFIX (cùng hàm với finetune)
+pretrain_prefix_in_prompt: false # prefix chỉ vào model qua SceSpaVis (giống finetune)
+max_target_words: 0             # 0 = PreSTU (điểm cắt đều); >0 với sequential luôn chọn các dòng CUỐI
 learnable_img_proj: true
 num_bbox_bins: 1000
 lambda_bbox_ce: 0.3

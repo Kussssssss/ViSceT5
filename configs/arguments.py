@@ -128,12 +128,20 @@ class ModelArguments:
         metadata={"help": "Whether to apply OCR augmentation in pretrain (default False)."}
     )
     max_target_words: int = field(
-        default=5,
+        default=0,
         metadata={"help": "Cap on how many OCR words the PreSTU target cluster may hold. "
                           "Uncapped, k ~ U(1, N-1) makes targets tens of words long while "
                           "finetune emits short answers, so the decoder carries a "
                           "long-output habit across. Capping also tightens the cluster "
-                          "spatially, which sharpens the grounding label. 0 = no cap."}
+                          "spatially, which sharpens the grounding label. 0 = no cap (default, "
+                          "PreSTU: split point uniform). WARNING: with sequential/B1 split a cap "
+                          "forces s >= N-cap, i.e. targets are ALWAYS the last lines of the image."}
+    )
+    pretrain_prefix_in_prompt: bool = field(
+        default=False,
+        metadata={"help": "Also put the OCR PREFIX text into the pretrain prompt. Default False: the "
+                          "prefix reaches the model only through the SceSpaVis OCR block, exactly like "
+                          "OCR does in finetune (whose input_ids are just the question)."}
     )
     learnable_img_proj: bool = field(
         default=True,

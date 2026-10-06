@@ -382,6 +382,10 @@ def _debug_split_ocr(model, data_collator, dataset, device, n_show=5):
         all_golds.append(gold)
         s_f1, s_em = compute_f1_em([prd], [gold])
         print(f"  [sample {i}] Prompt: {prompt[:90]}")
+        _oi = batch.get("ocr_info")
+        if isinstance(_oi, list) and i < len(_oi) and "word_mask" in _oi[i]:
+            _np = int(_oi[i]["word_mask"].sum())
+            print(f"              Prefix→SceSpaVis: {' '.join(_oi[i]['texts'][:_np])[:90] or '(full read)'}")
         print(f"              Target: {gold[:80]}")
         print(f"              Pred  : {prd[:80]}  (EM={s_em:.2f}, F1={s_f1:.2f})")
         if "bbox_logits" in out and "target_bbox_bins" in batch:
@@ -771,7 +775,7 @@ def main(args_list=None):
     if hasattr(model_args, "mra_kernel_size") and model_args.mra_kernel_size is not None:
         config.mra_kernel_size = int(model_args.mra_kernel_size)
     config.pretrain_gen_only = bool(getattr(model_args, "pretrain_gen_only", True))
-    config.max_target_words = int(getattr(model_args, "max_target_words", 5))
+    config.max_target_words = int(getattr(model_args, "max_target_words", 0))
     if hasattr(model_args, "learnable_img_proj"):
         config.learnable_img_proj = bool(model_args.learnable_img_proj)
     if hasattr(model_args, "clip_vision_name") and model_args.clip_vision_name:
@@ -805,11 +809,12 @@ def main(args_list=None):
 
     # Apply config overrides
     mode = model_args.loss_ablation_mode
-    # PRESTU DUAL-TARGET PRETRAINING:
-    # Character embeddings and OCR-augmentation (noise/correction) are completely omitted from pretrain
-    # to focus purely on Pixel-to-Text and Spatial BBox learning. They are reserved for finetune.
+    # PRESTU SPLITOCR PRETRAINING: các TỪ PREFIX đi qua đúng khối SceSpaVis của finetune
+    # (ConsFormer + char-embedding + box/det/rec) và — nếu bật — cùng OCR-Aug
+    # (_findRelatedOCR_plain) → mọi module OCR được huấn luyện ở pretrain và chuyển giao 1-1.
+    # TWC (loss tương phản của TWA) vẫn KHÔNG dùng trong PreSTU.
     use_twc = False
-    use_ocr_aug = False
+    use_ocr_aug = bool(getattr(model_args, "use_ocr_aug_pretrain", False))
     
     model.pretrain = True
     model._pretrain_stage = True
@@ -818,6 +823,7 @@ def main(args_list=None):
     model.config.pretrain_ablation_mode = mode
     model.config.use_twc = False
     model.config.use_ocr_aug_finetune = False
+    model.config.ablation_use_ocr_aug = use_ocr_aug
     _lam = float(getattr(model_args, "lambda_bbox_ce", 0.3))
     model.lambda_bbox_ce = _lam
     model.config.lambda_bbox_ce = _lam
@@ -896,6 +902,10 @@ def main(args_list=None):
     data_collator.pretrain_split_mode = str(getattr(model_args, "pretrain_split_mode", "sequential"))
     data_collator.pretrain_full_ocr_prob = float(getattr(model_args, "pretrain_full_ocr_prob", 0.2))
     data_collator.use_ocr_aug_pretrain = use_ocr_aug
+    # Cùng xác suất sửa OCR như finetune (adv_probability_finetune) để nửa OCR-Aug ở pretrain
+    # có ĐÚNG phân phối mà SceSpaVis sẽ gặp ở finetune. (TWC_ADV_PROB bên dưới vẫn ghi đè được.)
+    data_collator.adv_probability_pretrain = float(getattr(model.config, "adv_probability_finetune", 1.0))
+    data_collator.pretrain_prefix_in_prompt = bool(getattr(model_args, "pretrain_prefix_in_prompt", False))
     data_collator.mlm_mask_mode = str(getattr(model_args, "mlm_mask_mode", "wholeword")).lower().strip()
     data_collator.mlm_ocr_in_text = bool(getattr(model_args, "mlm_ocr_in_text", False))
 
@@ -938,6 +948,12 @@ def main(args_list=None):
     if str(mode).lower().strip() in ("prestu", "split_ocr", "dual_target"):
         print(f">>> [pretrain] PreSTU SplitOCR Mode: Pure Dual-Target Pretraining (OCR Text CE Loss + Spatial BBox CE Loss)")
         print(f">>> [pretrain] Configuration: num_bbox_bins={getattr(model_args, 'num_bbox_bins', 1000)}, lambda_bbox_ce={getattr(model_args, 'lambda_bbox_ce', 1.0)} | No TWC/MLM/ITC/ITM")
+        print(f">>> [pretrain] OCR modules: SceSpaVis(prefix)={'ON' if model.config.ablation_use_ocr else 'baseline'} | "
+              f"OCR-Aug(prefix)={use_ocr_aug} (adv_prob={data_collator.adv_probability_pretrain}) | "
+              f"prefix_in_prompt={data_collator.pretrain_prefix_in_prompt} | "
+              f"max_target_words={getattr(model.config, 'max_target_words', 0)} | "
+              f"MRA={getattr(model, 'use_mra', False)} (final fusion={'yes' if hasattr(model, 'mra_align') else 'no'}) | "
+              f"img_proj={type(model.img_proj).__name__}")
     else:
         print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
               f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
