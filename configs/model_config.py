@@ -90,6 +90,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ablation_use_ocr: bool = True,
         ablation_use_vs: bool = True,
         ablation_use_qaclip: bool = True,
+        qaclip_use_text: bool = True,
         mra_high_res: int = 1024,
         mra_kernel_size: Optional[int] = None,
         lambda_bbox_ce: float = 1.0,
@@ -184,6 +185,8 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ablation_use_ocr = bool(ablation_use_ocr)
         self.ablation_use_vs = bool(ablation_use_vs)
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
+        # False: QA-CLIP không nhận text (instruction) → trích xuất đặc trưng ảnh thường.
+        self.qaclip_use_text = bool(qaclip_use_text)
         self.mra_high_res = int(mra_high_res)
         self.mra_kernel_size = int(mra_kernel_size) if mra_kernel_size is not None else None
         self.lambda_bbox_ce = float(lambda_bbox_ce)

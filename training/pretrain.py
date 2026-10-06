@@ -768,6 +768,8 @@ def main(args_list=None):
     # truyền cờ này nên --ablation_use_vs False bị bỏ qua → visual_search vẫn được dựng
     # (và khi bật MRA thì mra_cnn/visual_search.cnn đụng nhau lúc save).
     config.ablation_use_qaclip = bool(getattr(model_args, "ablation_use_qaclip", True))
+    # Pretrain học ĐỌC OCR → QA-CLIP không nhận prompt làm instruction (trích xuất ảnh thường).
+    config.qaclip_use_text = bool(getattr(model_args, "pretrain_qaclip_use_text", False))
     config.ablation_use_vs = bool(getattr(model_args, "ablation_use_vs", True))
     config.ablation_use_ocr = bool(getattr(model_args, "ablation_use_ocr", True))
     config.ablation_use_mra = bool(getattr(model_args, "ablation_use_mra", False))
@@ -953,7 +955,8 @@ def main(args_list=None):
               f"prefix_in_prompt={data_collator.pretrain_prefix_in_prompt} | "
               f"max_target_words={getattr(model.config, 'max_target_words', 0)} | "
               f"MRA={getattr(model, 'use_mra', False)} (final fusion={'yes' if hasattr(model, 'mra_align') else 'no'}) | "
-              f"img_proj={type(model.img_proj).__name__}")
+              f"img_proj={type(model.img_proj).__name__} | QA-CLIP text={model.config.qaclip_use_text} | "
+              f"vision_unfreeze_last_n={getattr(model_args, 'vision_unfreeze_last_n', 0)}")
     else:
         print(f">>> [pretrain] hard-knobs: adv_prob={data_collator.adv_probability_pretrain} "
               f"twc_dup_box={getattr(data_collator,'twc_dup_box',True)} "
