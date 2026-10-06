@@ -139,10 +139,10 @@ class ModelArguments:
                           "forces s >= N-cap, i.e. targets are ALWAYS the last lines of the image."}
     )
     pretrain_prefix_in_prompt: bool = field(
-        default=False,
-        metadata={"help": "Also put the OCR PREFIX text into the pretrain prompt. Default False: the "
-                          "prefix reaches the model only through the SceSpaVis OCR block, exactly like "
-                          "OCR does in finetune (whose input_ids are just the question)."}
+        default=True,
+        metadata={"help": "Put the OCR PREFIX text into the pretrain prompt (PreSTU), in addition to the "
+                          "SceSpaVis OCR block. The prompt is never truncated, so the whole prefix is kept. "
+                          "False: the prefix reaches the model only through SceSpaVis (like finetune)."}
     )
     learnable_img_proj: bool = field(
         default=True,

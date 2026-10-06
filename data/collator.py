@@ -1315,14 +1315,15 @@ class ViT5VQADataCollator:
                     prefix_words = [prefix_words[k] for k in _ki]
                     p_rows = [p_rows[k] for k in _ki]
                     p_boxes = p_boxes[_ki] if len(_ki) > 0 else torch.zeros((0, 4), dtype=torch.float)
-                prefix_str = " ".join(prefix_words).strip()
+                # Prefix trong prompt = CÙNG các từ (đã lọc rò rỉ, cùng thứ tự đọc) đưa vào SceSpaVis,
+                # chuẩn hoá như target → một từ có cùng sub-word token ở prompt, SceSpaVis và labels.
+                prefix_str = " ".join(w for w in (_normalize_text(t, lowercase=self.lowercase)
+                                                  for t in prefix_words) if w)
                 target_str = " ".join(target_words).strip()
-                # Mặc định prefix CHỈ đi qua SceSpaVis (đúng đường OCR của finetune: ở finetune
-                # input_ids chỉ là câu hỏi, OCR vào model DUY NHẤT qua khối SceSpaVis). Nếu nhét
-                # thêm chữ prefix vào prompt, decoder đọc tắt từ prompt → SceSpaVis gần như không
-                # nhận gradient, và prompt còn bị cắt ở txt_max_len. Bật lại bằng
-                # --pretrain_prefix_in_prompt True (PreSTU nguyên bản: prefix nằm trong text input).
-                if prefix_str and bool(getattr(self, "pretrain_prefix_in_prompt", False)):
+                # pretrain_prefix_in_prompt=True (PreSTU: prefix nằm trong text input) → prefix đi vào
+                # model qua CẢ prompt (văn bản) LẪN SceSpaVis (box/det/rec/char/ConsFormer + OCR-Aug).
+                # False → chỉ qua SceSpaVis (giống finetune: input_ids chỉ là câu hỏi).
+                if prefix_str and bool(getattr(self, "pretrain_prefix_in_prompt", True)):
                     prompt_text = f"Generate ocr_text in vi: {prefix_str}"
                 else:
                     prompt_text = "Generate ocr_text in vi:"
@@ -1413,11 +1414,12 @@ class ViT5VQADataCollator:
                     target_bbox_bins[i, :tb.size(0)] = tb
 
             # Tokenize SplitOCR Inputs (Prompt + Prefix) và Labels (Suffix Target)
+            # KHÔNG cắt prompt: giữ TOÀN BỘ chữ OCR prefix (ViT5 dùng relative position bias,
+            # QA-CLIP không có position-embedding cho text → độ dài tuỳ ý). Pad tới mẫu dài nhất.
             prompt_tok = self.tokenizer(
                 split_prompts,
-                padding="max_length",
-                truncation=True,
-                max_length=self.txt_max_len,
+                padding="longest",
+                truncation=False,
                 return_tensors="pt"
             )
             target_tok = self.tokenizer(
