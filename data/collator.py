@@ -776,9 +776,17 @@ class ViT5VQADataCollator:
         toks = ocr_tokens[:ocr_max_num]
         N = min(len(toks), ocr_max_num)
         related, padded = [], []
+        pad_tok = self.tokenizer.pad_token or "<pad>"
+        # Caller truyền list ĐÃ pad sẵn (_prepare_ocr nối "<pad>" tới L). Slot đặc biệt phải giữ
+        # NGUYÊN ở nửa related (như _findRelatedOCR_adr đã làm): nếu đem "sửa chính tả",
+        # "<pad>" → "ipad" (edit-distance) thành TỪ MA không phải pad_id → ConsFormer attend vào nó.
+        _specials = {pad_tok, "<pad>", "</s>", "<unk>", getattr(self.tokenizer, "eos_token", None) or "</s>"}
         for i in range(N):
             tok = toks[i].lower().strip()
             padded.append(tok)
+            if tok in _specials:
+                related.append(tok)
+                continue
             is_special = bool(self.regex_special.search(tok))
             in_vocab = tok in self.global_vocab
             is_number = tok.isdigit()
