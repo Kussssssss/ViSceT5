@@ -138,6 +138,11 @@ class ModelArguments:
                           "PreSTU: split point uniform). WARNING: with sequential/B1 split a cap "
                           "forces s >= N-cap, i.e. targets are ALWAYS the last lines of the image."}
     )
+    finetune_qaclip_use_text: bool = field(
+        default=False,
+        metadata={"help": "Finetune: feed the QUESTION into QA-CLIP as instruction. Default False: CLIP runs "
+                          "as a plain image feature extractor in finetune too (no question)."}
+    )
     pretrain_qaclip_use_text: bool = field(
         default=False,
         metadata={"help": "Pretrain: feed the prompt into QA-CLIP as instruction. Default False: the "

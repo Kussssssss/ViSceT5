@@ -14,7 +14,7 @@ max_target_words: 0             # 0 = PreSTU (điểm cắt đều); >0 với se
 learnable_img_proj: true
 num_bbox_bins: 1000
 lambda_bbox_ce: 0.3
-vision_unfreeze_last_n: 0  # 0 = ĐÓNG BĂNG toàn bộ CLIP-ViT (MR-Adapter/fusion/projector vẫn học)
+vision_unfreeze_last_n: -1  # -1 = MỞ toàn bộ CLIP-ViT (học đọc OCR); LR ViT × VISION_LR_SCALE (0.2 trong notebook)
 pretrain_qaclip_use_text: false  # QA-CLIP = trích xuất ảnh thường (không nhận prompt)
 clip_vision_name: "openai/clip-vit-base-patch16"
 clip_image_size: 224

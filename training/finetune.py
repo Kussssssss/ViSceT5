@@ -632,8 +632,9 @@ def main(args_list=None):
     # không khai báo sẵn các cờ này nên getattr mặc định True, càng phải set tường minh.
     config.pretrain_ablation_mode = model_args.loss_ablation_mode
     config.ablation_use_qaclip = bool(model_args.ablation_use_qaclip)
-    # Finetune: QA-CLIP luôn nhận CÂU HỎI làm instruction (ckpt pretrain lưu qaclip_use_text=False).
-    config.qaclip_use_text = True
+    # QA-CLIP có nhận CÂU HỎI làm instruction không (mặc định KHÔNG: CLIP trích xuất ảnh thường).
+    # Gán tường minh vì ckpt pretrain lưu qaclip_use_text=False và scratch mặc định True.
+    config.qaclip_use_text = bool(getattr(model_args, "finetune_qaclip_use_text", False))
     config.ablation_use_vs = bool(model_args.ablation_use_vs)
     config.ablation_use_ocr = bool(model_args.ablation_use_ocr)
     config.ablation_use_ocr_input = bool(getattr(model_args, "ablation_use_ocr_input", True))
@@ -704,7 +705,10 @@ def main(args_list=None):
     print(f">>> [finetune] ABLATION: qaclip={model.config.ablation_use_qaclip} | "
           f"vs={model.config.ablation_use_vs} | ocr={model.config.ablation_use_ocr} | "
           f"mra={getattr(model.config, 'ablation_use_mra', False)} | "
-          f"ocr_aug={model.config.ablation_use_ocr_aug}")
+          f"ocr_aug={model.config.ablation_use_ocr_aug} | "
+          f"QA-CLIP nhận câu hỏi={model.config.qaclip_use_text} | "
+          f"vision_unfreeze_last_n={getattr(model_args, 'vision_unfreeze_last_n', 0)} | "
+          f"warm-start={'pretrain: ' + str(ckpt_to_load) if ckpt_to_load else 'KHÔNG (scratch)'}")
     print(f">>> [finetune] visual_search (ConvNeXt) "
           f"{'CÓ dựng' if hasattr(model, 'visual_search') else 'ĐÃ GỠ (AVF tắt)'} | "
           f"tổng tham số {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
