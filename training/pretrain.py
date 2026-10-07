@@ -948,7 +948,10 @@ def main(args_list=None):
         model._itc_text_source = _its
 
     if str(mode).lower().strip() in ("prestu", "split_ocr", "dual_target"):
-        print(f">>> [pretrain] PreSTU SplitOCR Mode: Pure Dual-Target Pretraining (OCR Text CE Loss + Spatial BBox CE Loss)")
+        if bool(getattr(model_args, "pretrain_gen_only", True)):
+            print(f">>> [pretrain] PreSTU SplitOCR Mode: GEN-ONLY (chỉ sinh OCR text phần còn lại, không bbox)")
+        else:
+            print(f">>> [pretrain] PreSTU SplitOCR Mode: Dual-Target (OCR Text CE Loss + Spatial BBox CE Loss)")
         print(f">>> [pretrain] Configuration: num_bbox_bins={getattr(model_args, 'num_bbox_bins', 1000)}, lambda_bbox_ce={getattr(model_args, 'lambda_bbox_ce', 1.0)} | No TWC/MLM/ITC/ITM")
         print(f">>> [pretrain] OCR modules: SceSpaVis(prefix)={'ON' if model.config.ablation_use_ocr else 'baseline'} | "
               f"OCR-Aug(prefix)={use_ocr_aug} (adv_prob={data_collator.adv_probability_pretrain}) | "
@@ -992,6 +995,39 @@ def main(args_list=None):
         pretrain_loss_fn=pretrain_loss_fn,
         pretrain_acc_fn=pretrain_acc_fn,
     )
+
+    # EVAL CỐ ĐỊNH: SplitOCR (điểm cắt, full-read) và OCR-Aug lấy từ `random` → nếu để
+    # nguyên, mỗi lần eval tập val bị tách KHÁC nhau, eval_pretrain_acc (chọn best model)
+    # dao động ngẫu nhiên. Khi eval: seed `random` theo nội dung batch (ảnh) → cùng một mẫu
+    # luôn cùng prefix/target qua mọi epoch; khôi phục trạng thái RNG ngay sau đó nên
+    # train không bị ảnh hưởng.
+    import zlib as _zlib
+
+    class _SeededEvalCollator:
+        def __init__(self, col, seed):
+            self.col, self.seed = col, int(seed)
+
+        def __call__(self, batch):
+            _key = "|".join(str(b.get("image_path", "")) for b in batch).encode("utf-8")
+            _state = random.getstate()
+            random.seed((self.seed + _zlib.crc32(_key)) & 0x7FFFFFFF)
+            try:
+                return self.col(batch)
+            finally:
+                random.setstate(_state)
+
+    _eval_collator = _SeededEvalCollator(data_collator, getattr(training_args, "seed", 42))
+    _orig_get_eval_dl = trainer.get_eval_dataloader
+
+    def _get_eval_dataloader(eval_dataset=None):
+        _train_col = trainer.data_collator
+        trainer.data_collator = _eval_collator
+        try:
+            return _orig_get_eval_dl(eval_dataset)
+        finally:
+            trainer.data_collator = _train_col
+
+    trainer.get_eval_dataloader = _get_eval_dataloader
 
     # Clean console output: keep only the TRAIN progress bar + eval results.
     # Swap HF's default tqdm ProgressCallback (which also draws an eval bar and
