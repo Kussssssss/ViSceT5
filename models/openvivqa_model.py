@@ -150,12 +150,16 @@ class OpenViVQAModel(PreTrainedModel):
             output_attentions=True,
             return_dict=True,
         )
+        visual_length = outputs.last_hidden_state.shape[1]  # CLS + image patches
         tokens = outputs.last_hidden_state[:, 1:].to(self.target_dtype)
         attention = outputs.attentions[-1]
         if instruction.shape[1]:
-            scores = attention[:, :, 1:, : instruction.shape[1]].mean(dim=(1, 3))
+            # QAClip keys are [visual, question]; skip CLS query and visual keys.
+            scores = attention[
+                :, :, 1:, visual_length : visual_length + instruction.shape[1]
+            ].mean(dim=(1, 3))
         else:
-            scores = attention[:, :, 0, 1:].mean(dim=1)
+            scores = attention[:, :, 0, 1:visual_length].mean(dim=1)
         mask = torch.ones(
             batch_size, tokens.shape[1], dtype=torch.long, device=tokens.device
         )

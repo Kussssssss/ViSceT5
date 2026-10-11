@@ -343,6 +343,34 @@ def test_all_ablations_forward_backward_generate(
         assert "boxes" in outputs["vs_debug"]
 
 
+@pytest.mark.parametrize("use_question", [False, True])
+def test_visual_search_reads_correct_attention_columns(model, use_question):
+    from types import SimpleNamespace
+
+    model.config.ablation_use_qaclip = use_question
+    hidden = torch.randn(2, 5, 32)  # CLS + four patches
+    attention = torch.zeros(2, 4, 5, 8 if use_question else 5)
+    expected_scores = torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]])
+    if use_question:
+        attention[:, :, 1:, :5] = 0.8  # Decoy visual keys
+        attention[:, :, 1:, 5:] = expected_scores[:, None, :, None]
+    else:
+        attention[:, :, 0, 1:5] = expected_scores[:, None, :]
+    with patch.object(
+        model.qa_clip,
+        "forward",
+        return_value=SimpleNamespace(last_hidden_state=hidden, attentions=(attention,)),
+    ):
+        tokens, mask, scores = model._encode_image(
+            torch.randn(2, 3, 32, 32),
+            torch.randn(2, 3, 32),
+            torch.ones(2, 3, dtype=torch.long),
+        )
+    torch.testing.assert_close(tokens, hidden[:, 1:])
+    torch.testing.assert_close(scores, expected_scores)
+    assert mask.shape == (2, 4)
+
+
 def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
     model.eval()
     batch = build_collator(model, tokenizer)(samples)
