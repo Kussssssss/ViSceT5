@@ -104,7 +104,6 @@ class OpenViVQAModel(PreTrainedModel):
             decoder_start_token_id=config.decoder_start_token_id,
             do_sample=False,
         )
-        self.qa_clip.init_qavit_comps()
         self.post_init()
 
     @property
