@@ -111,9 +111,15 @@ class Vision_Encode_Ocr_Feature(nn.Module):
             except:
                 return torch.zeros(shape_fallback, dtype=torch.float32)
 
-        det = to_t(feat.get("det_features"), (0, self.d_det))
-        rec = to_t(feat.get("rec_features"), (0, self.d_rec))
-        boxes = to_t(feat.get("boxes"), (0, 4))
+        texts: List[str] = list(feat.get("texts", []))
+        count = len(texts)
+        det = to_t(feat.get("det_features"), (count, self.d_det))
+        rec = to_t(feat.get("rec_features"), (count, self.d_rec))
+        boxes = to_t(feat.get("boxes"), (count, 4))
+        for name, tensor, dimension in (("det_features", det, self.d_det),
+                                        ("rec_features", rec, self.d_rec), ("boxes", boxes, 4)):
+            if tensor.shape != (count, dimension):
+                raise ValueError(f"{ocr_path}: {name} must have shape {(count, dimension)}, got {tuple(tensor.shape)}.")
 
         scores = feat.get("scores", [])
         if len(scores) > 0:
@@ -121,7 +127,8 @@ class Vision_Encode_Ocr_Feature(nn.Module):
         else:
             scores = torch.ones(boxes.size(0), dtype=torch.float32)
 
-        texts: List[str] = list(feat.get("texts", []))
+        if scores.shape != (count,):
+            raise ValueError(f"{ocr_path}: OCR scores must align with the {count} text entries.")
 
         keep_indices = []
         for i in range(len(scores)):

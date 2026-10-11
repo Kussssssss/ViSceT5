@@ -1,53 +1,29 @@
 #!/bin/bash
-# run_all.sh — Vast.ai / generic Linux launcher for ViSceT5
-#
-# Usage:
-#   bash run_all.sh                 # full pretrain (default)
-#   bash run_all.sh mock            # quick MOCK/SMOKE pretrain (fast sanity test)
-#   bash run_all.sh finetune        # full finetune
-#   bash run_all.sh finetune mock   # mock finetune
-#
-# Args are order-independent. Environment overrides are also respected and take
-# precedence if already exported: STAGE, MOCK_TEST, HF_TOKEN, HF_REPO,
-# VAST_CONTAINERLABEL, CONTAINER_API_KEY (see run_pipeline.py).
-set -e
-
-# ---- resolve STAGE / MOCK_TEST from args (env wins if already set) ----
-STAGE="${STAGE:-pretrain}"
+# Direct VQA training. Usage: bash run_all.sh [mock|full]
+set -euo pipefail
 MOCK_TEST="${MOCK_TEST:-false}"
-for a in "$@"; do
-  case "$(echo "$a" | tr '[:upper:]' '[:lower:]')" in
-    pretrain|finetune)            STAGE="$a" ;;
-    mock|mocktest|smoke|smoke_test) MOCK_TEST="true" ;;
-    full)                          MOCK_TEST="false" ;;
-    *) echo "⚠️  Unknown arg '$a' (ignored). Use: [pretrain|finetune] [mock]";;
-  esac
+for argument in "$@"; do
+    case "$argument" in
+        mock|smoke) MOCK_TEST="true" ;;
+        full) MOCK_TEST="false" ;;
+        finetune) ;; # Accepted for existing VQA launch commands.
+        *) echo "Unknown argument: $argument. Use mock or full." >&2; exit 2 ;;
+    esac
 done
-export STAGE MOCK_TEST
-echo "▶ [Vast.ai] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST"
-
-# ---- environment bootstrap ----
+export MOCK_TEST
 apt-get update && apt-get install -y python3-venv git
 cd /workspace
-
-if [ -d "/workspace/ViSceT5" ]; then
+if [ -d /workspace/ViSceT5 ]; then
     cd /workspace/ViSceT5
     git pull
 else
     git clone https://github.com/Kussssssss/ViSceT5.git
     cd /workspace/ViSceT5
 fi
-
-if [ ! -d "/workspace/myenv" ]; then
+if [ ! -d /workspace/myenv ]; then
     python3 -m venv --system-site-packages /workspace/myenv
 fi
-
 source /workspace/myenv/bin/activate
-
-chmod +x setup.sh
-./setup.sh
-
-# ---- launch (background so the run survives SSH disconnects) ----
+bash setup.sh
 nohup python3 run_pipeline.py > train_execution.log 2>&1 &
-echo "✅ Launched in background (STAGE=$STAGE, MOCK_TEST=$MOCK_TEST)."
-echo "   Tail logs:  tail -f /workspace/ViSceT5/train_execution.log"
+echo "Launched VQA training. Tail train_execution.log for progress."
