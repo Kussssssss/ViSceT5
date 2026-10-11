@@ -43,6 +43,19 @@ def main():
     print("🚀 Initializing OpenViVQAModel...")
 
     config = OpenViVQAConfig()
+    # Dựng đúng cấu hình sẽ huấn luyện (cùng biến môi trường mà run_pipeline chuyển cho
+    # finetune) để bảng tham số chỉ đếm các module thực sự dùng.
+    _stage = os.environ.get("STAGE", "finetune").strip().lower()
+    config.pretrain = _stage == "pretrain"
+    if not config.pretrain:
+        config.use_twc = False
+    for _env, _attr in [("ABLATION_USE_QACLIP", "ablation_use_qaclip"),
+                        ("ABLATION_USE_VS", "ablation_use_vs"),
+                        ("ABLATION_USE_OCR", "ablation_use_ocr"),
+                        ("ABLATION_USE_OCR_INPUT", "ablation_use_ocr_input"),
+                        ("ABLATION_USE_IMAGE", "ablation_use_image")]:
+        _v = os.environ.get(_env, "").strip().lower()
+        setattr(config, _attr, _v not in ("false", "0", "no") if _v else True)
 
     try:
         model = OpenViVQAModel(config)
