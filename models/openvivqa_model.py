@@ -272,12 +272,61 @@ class OpenViVQAModel(PreTrainedModel):
         if hasattr(self.qa_clip, "init_qavit_comps"): self.qa_clip.init_qavit_comps()
         self.post_init()
 
-        # avf_fusion là THÀNH PHẦN CỦA AVF (chỉ dùng cùng visual_search). Khi tắt AVF thì gỡ
-        # luôn, giống visual_search ở trên → mô hình không-AVF thực sự không còn tham số AVF
-        # (2.95M), và đúng giao thức ablation "module tắt thì không khởi tạo tham số".
-        # Gỡ SAU post_init để luồng RNG lúc khởi tạo giữ y hệt → kết quả KHÔNG đổi.
-        if not bool(getattr(self.config, "ablation_use_vs", True)):
-            del self.avf_fusion
+        # Gỡ mọi module mà cấu hình hiện tại KHÔNG gọi tới trong forward → không nằm trong
+        # số tham số, state_dict hay optimizer. Gỡ SAU post_init để luồng RNG lúc khởi tạo
+        # giữ y hệt → trọng số các module còn lại và kết quả huấn luyện KHÔNG đổi.
+        self._drop_unused_modules()
+
+    def _drop_unused_modules(self):
+        cfg = self.config
+        use_image = bool(getattr(cfg, "ablation_use_image", True))
+        use_qaclip = bool(getattr(cfg, "ablation_use_qaclip", True)) and use_image
+        use_vs = bool(getattr(cfg, "ablation_use_vs", True)) and use_image
+        use_ocr_input = bool(getattr(cfg, "ablation_use_ocr_input", True))
+        use_ocr = bool(getattr(cfg, "ablation_use_ocr", True)) and use_ocr_input
+        use_ocr_lite = (not bool(getattr(cfg, "ablation_use_ocr", True))) and use_ocr_input
+        pretrain = bool(getattr(self, "pretrain", False))
+
+        def _drop(*names):
+            for n in names:
+                if hasattr(self, n):
+                    delattr(self, n)
+
+        # AVF: avf_fusion chỉ dùng cùng visual_search (đã gỡ ở trên nếu tắt).
+        if not use_vs:
+            _drop("visual_search", "avf_fusion")
+
+        # Không ảnh → không chạy CLIP.
+        if not use_image:
+            _drop("qa_clip")
+        elif not use_qaclip:
+            # CLIP không nhận câu hỏi: mm_len=0 → MMCLIPAttention đi đúng nhánh CLIP thuần,
+            # không chạm instruction_out_proj/gate; instruct_dim_reduce=None thì câu hỏi rỗng
+            # (B,0,D) được chuyển thẳng (FeedForward không có dropout → RNG không đổi).
+            for layer in self.qa_clip.vision_model.encoder.layers:
+                if hasattr(layer, "instruct_dim_reduce"):
+                    layer.instruct_dim_reduce = None
+                sa = getattr(layer, "self_attn", None)
+                for n in ("instruction_out_proj", "instruction_proj_gate"):
+                    if sa is not None and hasattr(sa, n):
+                        delattr(sa, n)
+
+        # SceSpaVis (ConsFormer + char + box/det/rec) chỉ dùng khi bật OCR module.
+        if not use_ocr:
+            _drop("ocr_encoder", "semantic_ocr_embedding",
+                  "char_position_embedding", "char_embedding", "ocr_char_layernorm")
+        # Baseline OCR text-only chỉ dùng ocr_lite_text_ln/proj.
+        if not use_ocr_lite:
+            _drop("ocr_lite_text_ln", "ocr_lite_text_proj")
+        # box/det/rec của baseline không còn được gọi ở bất kỳ cấu hình nào.
+        _drop("ocr_lite_box_proj", "ocr_lite_det_proj", "ocr_lite_rec_proj",
+              "ocr_lite_det_ln", "ocr_lite_rec_ln")
+
+        # Đầu pollute (ITM) và nhiệt độ TWC chỉ thuộc pretrain.
+        if not pretrain:
+            _drop("pollute_head")
+        if not (pretrain and bool(getattr(self, "use_twc", True))):
+            _drop("logit_scale")
 
     # --- Các hàm đồng bộ cơ bản ---
     def sync_tokenizer_ids(self, tokenizer, persist_dir: Optional[str] = None):
@@ -819,7 +868,7 @@ class OpenViVQAModel(PreTrainedModel):
         if getattr(self, "_pretrain_stage", False) or os.environ.get("FWD_DIAG") == "1":
             # pixel_values / txt_hidden_states = ĐẦU VÀO THỰC của QA-CLIP (txt_emb ở dưới
             # là txt_emb_for_enc — tensor KHÁC, nên trước đây không lộ ra thủ phạm).
-            if os.environ.get("FWD_DIAG") == "1":
+            if os.environ.get("FWD_DIAG") == "1" and hasattr(self, "qa_clip"):
                 _bad_w = [n for n, p in self.qa_clip.named_parameters() if not torch.isfinite(p).all()]
                 if _bad_w:
                     print(f"🚨 [FWD_DIAG] qa_clip có {len(_bad_w)} TRỌNG SỐ non-finite, vd: {_bad_w[:3]}")
