@@ -4,6 +4,24 @@ import numpy as np
 import torch
 
 
+def print_parameter_summary(model):
+    """Count shared parameters once; learnable means requires_grad=True."""
+    total = learnable = 0
+    for parameter in model.parameters():
+        total += parameter.numel()
+        if parameter.requires_grad:
+            learnable += parameter.numel()
+    frozen = total - learnable
+    percentage = 100 * learnable / total if total else 0.0
+    print(
+        "Model parameters:\n"
+        f"  Total:     {total:,}\n"
+        f"  Frozen:    {frozen:,}\n"
+        f"  Learnable: {learnable:,} ({percentage:.2f}%)",
+        flush=True,
+    )
+
+
 def inspect_batch(batch, tokenizer):
     for name, value in batch.items():
         if torch.is_tensor(value):

@@ -18,6 +18,7 @@ from training.common import (
 )
 from training.metrics import build_compute_metrics
 from training.trainer import VQATrainer
+from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
 
 
@@ -57,6 +58,8 @@ def main(args_list=None):
     model, tokenizer = load_model_and_tokenizer(checkpoint)
     for name in ("ablation_use_qaclip", "ablation_use_vs", "ablation_use_ocr"):
         setattr(model.config, name, getattr(model_args, name))
+    if training_args.should_log:
+        print_parameter_summary(model)
 
     trainer = VQATrainer(
         model=model,
