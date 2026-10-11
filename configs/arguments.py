@@ -28,6 +28,13 @@ class ModelArguments:
                           "Spatial 2D Box + Visual Det/Rec Spotting + Char-level embeddings). "
                           "If False, uses clean Text-Only OCR baseline."}
     )
+    ablation_use_image: bool = field(
+        default=True,
+        metadata={"help": "If False, DROP all image features: CLIP is not run and no image token enters "
+                          "the fused sequence, which becomes [question, OCR] only (Visual Search is "
+                          "disabled too). Used to measure how much of the accuracy the OCR stream "
+                          "carries without any visual input."}
+    )
     ablation_use_ocr_input: bool = field(
         default=True,
         metadata={"help": "If False, DROP all OCR features entirely (text/box/det/rec/char) so the "

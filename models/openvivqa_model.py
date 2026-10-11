@@ -674,6 +674,10 @@ class OpenViVQAModel(PreTrainedModel):
         # để tách xem QA-CLIP có giúp khi KHÔNG có OCR — nếu có mà khi thêm OCR lại không,
         # tức OCR đã bao trùm đóng góp của QA-CLIP. Chuỗi khi đó = [question, image] thôi.
         use_ocr_input = bool(getattr(self.config, "ablation_use_ocr_input", True))
+        # ablation_use_image=False → BỎ HẲN ảnh: không chạy CLIP, không token ảnh nào vào
+        # chuỗi (fused = [question, OCR]); Visual Search cũng tắt theo.
+        use_image = bool(getattr(self.config, "ablation_use_image", True))
+        use_vs = use_vs and use_image
 
         if self.pretrain:
             assert mlm_input_ids is not None, "mlm_input_ids required in pretrain"
@@ -713,15 +717,22 @@ class OpenViVQAModel(PreTrainedModel):
         # ----------------------------------------------------
         # 1. ABLATION MODULE: QACLIP
         # ----------------------------------------------------
-        img_pack = self._encode_image(
-            pixel_values=pixel_values_dev,
-            device=device,
-            txt_emb=txt_emb_for_clip,
-            txt_mask=txt_attn_mask_for_clip,
-            fuse_with_text=use_qaclip,  # Tắt True/False ở đây
-            return_attn=return_visual_search_debug,
-            need_attn_map=use_vs,       # chỉ AVF cần patch_scores
-        )
+        if use_image:
+            img_pack = self._encode_image(
+                pixel_values=pixel_values_dev,
+                device=device,
+                txt_emb=txt_emb_for_clip,
+                txt_mask=txt_attn_mask_for_clip,
+                fuse_with_text=use_qaclip,  # Tắt True/False ở đây
+                return_attn=return_visual_search_debug,
+                need_attn_map=use_vs,       # chỉ AVF cần patch_scores
+            )
+        else:
+            img_pack = {
+                "img_tokens": torch.zeros(B, 0, D, device=device, dtype=self.target_dtype),
+                "img_attn_mask": torch.zeros(B, 0, device=device, dtype=torch.long),
+                "patch_scores": None,
+            }
 
         # ----------------------------------------------------
         # 2. ABLATION MODULE: VISUAL SEARCH (AVF)
