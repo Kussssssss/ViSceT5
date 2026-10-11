@@ -129,7 +129,10 @@ class ViT5VQADataCollator:
         images = []
         for path in paths:
             with Image.open(path) as image:
-                images.append(ImageOps.exif_transpose(image).convert("RGB"))
+                image = ImageOps.exif_transpose(image)
+                if image.mode == "P" and "transparency" in image.info:
+                    image = image.convert("RGBA")
+                images.append(image.convert("RGB"))
         questions = self.tokenizer(
             [sample["question"] for sample in batch],
             padding="max_length",

@@ -2,6 +2,7 @@
 
 import itertools
 import sys
+import warnings
 from unittest.mock import patch
 
 import numpy as np
@@ -16,6 +17,7 @@ from tokenizers.processors import TemplateProcessing
 from transformers import (
     CLIPImageProcessor,
     CLIPVisionConfig,
+    CLIPVisionModel,
     ConvNextV2Config,
     ConvNextV2Model,
     HfArgumentParser,
@@ -39,6 +41,7 @@ from training.common import (
 from training.metrics import compute_f1_em
 from training.trainer import VQATrainer
 from transformers.models.t5.modeling_t5 import T5LayerNorm
+import transformers.modeling_utils as hf_modeling_utils
 
 
 @pytest.fixture(autouse=True)
@@ -213,6 +216,97 @@ def test_ocr_limits_and_padding_mapping(model, tokenizer, samples):
     assert batch["ocr_info"][0]["texts"] == ["cà phê", "123"]
     assert batch["ocr_to_word_map"][1].tolist() == [0, -1, -1]
     assert batch["ocr_attention_mask"][1].tolist() == [1, 0, 0]
+
+
+def test_palette_transparency_converts_without_warning(
+    model, tokenizer, samples, tmp_path
+):
+    image = Image.new("P", (40, 32), color=1)
+    image.putpalette([0, 0, 0, 80, 120, 180] + [0] * (256 * 3 - 6))
+    image.info["transparency"] = bytes([0, 255] + [255] * 254)
+    path = tmp_path / "palette.png"
+    image.save(path)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        batch = build_collator(model, tokenizer)(
+            [{**samples[0], "image_path": str(path)}]
+        )
+    assert batch["pil_images"][0].mode == "RGB"
+    assert batch["pil_images"][0].getpixel((0, 0)) == (80, 120, 180)
+    assert not any("Palette images" in str(warning.message) for warning in caught)
+
+
+def test_qaclip_load_initializes_new_instruction_weights(tmp_path, monkeypatch):
+    config = CLIPVisionConfig(
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        image_size=32,
+        patch_size=16,
+        instruction_dim=32,
+    )
+    backbone = CLIPVisionModel(config)
+    checkpoint = tmp_path / "clip"
+    backbone.save_pretrained(checkpoint)
+    # Use the real loader, rather than the random-backbone fixture's replacement.
+    monkeypatch.delattr(QACLIPEncoder, "from_pretrained")
+    original_init = torch.nn.Linear.__init__
+
+    def poison_skipped_linear(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if not hf_modeling_utils._init_weights:
+            with torch.no_grad():
+                self.weight.fill_(float("nan"))
+
+    with patch.object(torch.nn.Linear, "__init__", poison_skipped_linear):
+        loaded = QACLIPEncoder.from_pretrained(
+            checkpoint,
+            local_files_only=True,
+            attn_implementation="eager",
+        )
+    loaded.config.freeze_clip = True
+    loaded._apply_freeze()
+    loaded.init_qavit_comps()
+    assert all(torch.isfinite(parameter).all() for parameter in loaded.parameters())
+    torch.testing.assert_close(
+        loaded.vision_model.embeddings.patch_embedding.weight,
+        backbone.vision_model.embeddings.patch_embedding.weight,
+        rtol=0,
+        atol=0,
+    )
+    loaded.eval()
+    outputs = loaded(
+        pixel_values=torch.randn(2, 3, 32, 32),
+        text_emb=torch.randn(2, 3, 32),
+        text_mask=torch.ones(2, 3, dtype=torch.long),
+        output_attentions=True,
+    )
+    assert torch.isfinite(outputs.last_hidden_state).all()
+    outputs.last_hidden_state.square().mean().backward()
+    instruction_weights = [
+        parameter
+        for name, parameter in loaded.named_parameters()
+        if "instruct_dim_reduce" in name
+    ]
+    assert all(
+        parameter.requires_grad and parameter.grad is not None
+        for parameter in instruction_weights
+    )
+    assert all(
+        torch.isfinite(parameter.grad).all() for parameter in instruction_weights
+    )
+    reloaded_checkpoint = tmp_path / "qaclip"
+    loaded.save_pretrained(reloaded_checkpoint)
+    restored = QACLIPEncoder.from_pretrained(
+        reloaded_checkpoint,
+        local_files_only=True,
+        attn_implementation="eager",
+    )
+    for name, parameter in loaded.named_parameters():
+        torch.testing.assert_close(
+            parameter, dict(restored.named_parameters())[name], rtol=0, atol=0
+        )
 
 
 @pytest.mark.parametrize(

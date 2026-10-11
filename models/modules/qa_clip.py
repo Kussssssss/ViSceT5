@@ -14,15 +14,16 @@ from transformers.models.clip.modeling_clip import (
     CLIPEncoderLayer, CLIPAttention, CLIPMLP, CLIPVisionEmbeddings, CLIPPreTrainedModel
 )
 
-def FeedForward(in_dim, out_dim, inner_dim=None):
-    if inner_dim is None:
-        inner_dim = out_dim
-    return nn.Sequential(
-        nn.LayerNorm(in_dim),
-        nn.Linear(in_dim, inner_dim, bias=False),
-        nn.GELU(),
-        nn.Linear(inner_dim, out_dim, bias=False),
-    )
+class FeedForward(nn.Sequential):
+    def __init__(self, in_dim, out_dim, inner_dim=None):
+        if inner_dim is None:
+            inner_dim = out_dim
+        super().__init__(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, inner_dim, bias=False),
+            nn.GELU(),
+            nn.Linear(inner_dim, out_dim, bias=False),
+        )
 
 class MMCLIPAttention(CLIPAttention):
     def __init__(self, config):
@@ -296,6 +297,15 @@ class CLIPVisionTransformer(nn.Module):
 class QACLIPEncoder(CLIPPreTrainedModel):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        # CLIP's initializer does not cover our instruction MLP. from_pretrained
+        # skips Linear.reset_parameters during construction, so initialize it here.
+        if isinstance(module, FeedForward):
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    layer.reset_parameters()
 
     def __init__(self, config: CLIPVisionConfig, instruction_dim: int = 768, freeze_clip: bool = False):
         super().__init__(config)

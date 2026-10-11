@@ -43,6 +43,7 @@ class OpenViVQAModel(PreTrainedModel):
             instruction_dim=config.qa_clip_d_text or self.d_model,
             integration_point="late",
             freeze_clip=True,
+            attn_implementation="eager",
         )
         image_size = config.vs_target_size or self.qa_clip.config.image_size
         self.image_processor = CLIPImageProcessor(
