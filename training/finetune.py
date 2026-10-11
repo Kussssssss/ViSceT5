@@ -283,6 +283,7 @@ def main(args_list=None):
     config.ablation_use_vs = bool(model_args.ablation_use_vs)
     config.ablation_use_ocr = bool(model_args.ablation_use_ocr)
     config.ablation_use_ocr_input = bool(getattr(model_args, "ablation_use_ocr_input", True))
+    config.ablation_use_image = bool(getattr(model_args, "ablation_use_image", True))
     config.ablation_use_ocr_aug = bool(model_args.ablation_use_ocr_aug)
     config.use_twc = False  # TWC is disabled during finetuning
     config.use_ocr_aug_finetune = bool(model_args.ablation_use_ocr_aug)
@@ -334,7 +335,8 @@ def main(args_list=None):
     model.config.pretrain = False
     print(f">>> [finetune] ABLATION: qaclip={model.config.ablation_use_qaclip} | "
           f"vs={model.config.ablation_use_vs} | ocr={model.config.ablation_use_ocr} | "
-          f"ocr_aug={model.config.ablation_use_ocr_aug}")
+          f"ocr_aug={model.config.ablation_use_ocr_aug} | "
+          f"image={getattr(model.config, 'ablation_use_image', True)}")
     print(f">>> [finetune] visual_search (ConvNeXt) "
           f"{'CÓ dựng' if hasattr(model, 'visual_search') else 'ĐÃ GỠ (AVF tắt)'} | "
           f"tổng tham số {sum(p.numel() for p in model.parameters())/1e6:.2f}M")
