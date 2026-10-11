@@ -1,180 +1,70 @@
-import sys
-import os
-import argparse
-import subprocess
-import importlib
+"""Run VQA training with optional Hub upload and Vast.ai shutdown."""
 
-# Đảm bảo dự án nằm trong PYTHONPATH
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+import os
+import re
+import subprocess
+import sys
+
+
+def training_arguments():
+    arguments = [os.environ.get("TRAIN_CONFIG", "configs/finetune.yaml")]
+    overrides = {
+        "NUM_TRAIN_EPOCHS": "num_train_epochs",
+        "MODEL_NAME_OR_PATH": "model_name_or_path",
+        "RESUME_FROM_CHECKPOINT": "resume_from_checkpoint",
+        "RESUME_CHECKPOINT_ID": "resume_checkpoint_id",
+        "SMOKE_TRAIN_SAMPLES": "smoke_train_samples",
+        "SMOKE_EVAL_SAMPLES": "smoke_eval_samples",
+        "SMOKE_MAX_STEPS": "smoke_max_steps",
+    }
+    for variable, flag in overrides.items():
+        value = os.environ.get(variable, "").strip()
+        if value:
+            arguments.extend([f"--{flag}", value])
+    if os.environ.get("MOCK_TEST", "").lower() == "true":
+        arguments.extend(["--smoke_test", "True"])
+    return arguments
+
+
+def upload_model(output_dir):
+    token, repository = os.environ.get("HF_TOKEN"), os.environ.get("HF_REPO")
+    if not (token and repository):
+        return
+    from huggingface_hub import HfApi
+
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repository, repo_type="model", exist_ok=True)
+    api.upload_folder(folder_path=output_dir, repo_id=repository, repo_type="model")
+    print(f"Uploaded VQA checkpoint to {repository}.")
+
+
+def stop_vast_instance():
+    label = os.environ.get("VAST_CONTAINERLABEL", "")
+    api_key = os.environ.get("CONTAINER_API_KEY", "")
+    if not (label and api_key):
+        return
+    match = re.search(r"(\d+)(?:\D*)$", label)
+    if not match:
+        raise ValueError(f"Cannot determine Vast.ai instance ID from {label!r}.")
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vastai"], check=True)
+    subprocess.run(
+        ["vastai", "stop", "instance", match.group(1), "--api-key", api_key], check=True
+    )
+
 
 def run():
     try:
-        print(">>> [Step 1] Preparing Dataset...")
-        try:
-            from scripts import prepare_dataset
-            args = argparse.Namespace(
-                config="configs/data/ViTextVQA.yaml",
-                data_dir="./datasets"
-            )
-            prepare_dataset.main(args)
-            print(">>> Dataset preparation successful.")
-        except Exception as e:
-            print(f"❌ Error preparing dataset: {e}")
-            raise e
+        from training.finetune import main
 
-        print("\n>>> [Step 2] Initializing Model & Downloading Pretrained Weights...")
-        try:
-            sys.argv = ["init_model.py"]
-            from scripts import init_model
-            init_model.main()
-            print(">>> Model initialization successful.")
-        except Exception as e:
-            print(f"❌ Error initializing model: {e}")
-            raise e
-
-        stage = os.environ.get("STAGE", "finetune").lower()
-        if stage == "pretrain":
-            print("\n>>> [Step 3] Starting Pretrain Training...")
-            try:
-                sys.argv = ["pretrain.py", "configs/pretrain.yaml"]
-
-                # Cho phép chỉnh số epoch qua env NUM_TRAIN_EPOCHS (dùng cho full run;
-                # mock bỏ qua epoch vì max_steps được ưu tiên).
-                _ep = os.environ.get("NUM_TRAIN_EPOCHS", "").strip()
-                if _ep:
-                    sys.argv.extend(["--num_train_epochs", _ep])
-                    print(f">>> [pretrain] num_train_epochs = {_ep}")
-
-                # Tiếp tục train:
-                #  RESUME_FROM_CHECKPOINT = đường dẫn LOCAL tới thư mục checkpoint-XXXX đầy đủ
-                #        (có optimizer/scheduler/trainer_state) -> resume ĐÚNG bước/epoch/LR.
-                #  RESUME_CHECKPOINT_ID   = Drive id của zip checkpoint đầy đủ -> tải rồi resume đúng.
-                #  MODEL_NAME_OR_PATH     = thư mục chỉ có trọng số (vd model tải từ HF) -> WARM-START
-                #        (optimizer/LR khởi tạo lại).
-                for _rk, _rflag in [("RESUME_FROM_CHECKPOINT", "--resume_from_checkpoint"),
-                                    ("RESUME_CHECKPOINT_ID", "--resume_checkpoint_id"),
-                                    ("MODEL_NAME_OR_PATH", "--model_name_or_path")]:
-                    _rv = os.environ.get(_rk, "").strip()
-                    if _rv:
-                        sys.argv.extend([_rflag, _rv])
-                        print(f">>> [pretrain] {_rflag} = {_rv}")
-
-                # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
-                if os.environ.get("MOCK_TEST", "").lower() == "true":
-                    print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
-                    sys.argv.extend(["--smoke_test", "True"])
-                    # Cho phép chỉnh số sample/steps qua env: SMOKE_TRAIN_SAMPLES, SMOKE_EVAL_SAMPLES, SMOKE_MAX_STEPS
-                    for _env_key, _flag in [("SMOKE_TRAIN_SAMPLES", "--smoke_train_samples"),
-                                            ("SMOKE_EVAL_SAMPLES", "--smoke_eval_samples"),
-                                            ("SMOKE_MAX_STEPS", "--smoke_max_steps")]:
-                        _v = os.environ.get(_env_key, "").strip()
-                        if _v:
-                            sys.argv.extend([_flag, _v])
-                            print(f"   [MOCK_TEST] {_flag} = {_v}")
-
-                from training import pretrain
-                importlib.reload(pretrain)
-                pretrain.main()
-                print(">>> Pretrain finished successfully.")
-            except Exception as e:
-                print(f"❌ Error during pretraining: {e}")
-                raise e
-        else:
-            print("\n>>> [Step 3] Starting Finetune Training...")
-            try:
-                sys.argv = ["finetune.py", "configs/finetune.yaml"]
-
-                _fep = os.environ.get("NUM_TRAIN_EPOCHS", "").strip()
-                if _fep:
-                    sys.argv.extend(["--num_train_epochs", _fep])
-                    print(f">>> [finetune] num_train_epochs = {_fep}")
-
-                # Nạp trọng số PRETRAIN để finetune (warm-start):
-                #  MODEL_NAME_OR_PATH = thư mục local chứa model.safetensors của pretrain
-                #                       (vd tải checkpoint pretrain từ HF về).
-                #  PRETRAIN_WEIGHTS_ID = Drive id zip checkpoint pretrain (tự tải + nạp).
-                # Resume một lần finetune đang dở: RESUME_FROM_CHECKPOINT / RESUME_CHECKPOINT_ID.
-                for _fk, _fflag in [("MODEL_NAME_OR_PATH", "--model_name_or_path"),
-                                    ("PRETRAIN_WEIGHTS_ID", "--pretrain_weights_id"),
-                                    ("RESUME_FROM_CHECKPOINT", "--resume_from_checkpoint"),
-                                    ("RESUME_CHECKPOINT_ID", "--resume_checkpoint_id")]:
-                    _fv = os.environ.get(_fk, "").strip()
-                    if _fv:
-                        sys.argv.extend([_fflag, _fv])
-                        print(f">>> [finetune] {_fflag} = {_fv}")
-
-                # Nếu bật MOCK_TEST, kích hoạt chế độ smoke_test để chạy test nhanh (dataset nhỏ, ít steps)
-                if os.environ.get("MOCK_TEST", "").lower() == "true":
-                    print("⚠️ [MOCK_TEST] Đang kích hoạt chế độ test nhanh! Sử dụng --smoke_test True.")
-                    sys.argv.extend(["--smoke_test", "True"])
-
-                from training import finetune
-                importlib.reload(finetune)
-                finetune.main()
-                print(">>> Training finished successfully.")
-            except Exception as e:
-                print(f"❌ Error during training: {e}")
-                raise e
-
-        # 3.5. Tự động upload checkpoint lên Hugging Face Hub (nếu được cấu hình)
-        try:
-            hf_token = os.environ.get("HF_TOKEN", "")
-            hf_repo = os.environ.get("HF_REPO", "")
-            
-            if hf_token and hf_repo:
-                print("\n>>> [Step 3.5] Uploading checkpoints to Hugging Face Hub...")
-                from huggingface_hub import HfApi
-                api = HfApi(token=hf_token)
-                print(f"Creating repository '{hf_repo}' if it doesn't exist...")
-                api.create_repo(repo_id=hf_repo, repo_type="model", exist_ok=True)
-                
-                output_dir = "./output/pretrain" if stage == "pretrain" else "./output/finetune"
-                os.makedirs(output_dir, exist_ok=True)
-                # Ghi thông tin meta chạy để thư mục không bao giờ rỗng khi upload test
-                with open(os.path.join(output_dir, "run_info.json"), "w", encoding="utf-8") as f:
-                    import json
-                    json.dump({
-                        "stage": stage,
-                        "mock_test": os.environ.get("MOCK_TEST", "").lower() == "true",
-                        "status": "completed"
-                    }, f, indent=4)
-                
-                print(f"Uploading directory '{output_dir}' to '{hf_repo}'...")
-                api.upload_folder(
-                    folder_path=output_dir,
-                    repo_id=hf_repo,
-                    repo_type="model",
-                )
-                print(">>> Hugging Face upload successful.")
-            else:
-                print("\nℹ️ HF_TOKEN or HF_REPO environment variables not found. Skipping Hugging Face upload.")
-        except Exception as e:
-            print(f"\n❌ Error uploading to Hugging Face: {e}")
-
+        trainer = main(training_arguments())
+        upload_model(trainer.args.output_dir)
+        return trainer
     finally:
-        # 4. Tự động dừng máy ảo Vast.ai để tránh tốn phí GPU
         try:
-            container_label = os.environ.get("VAST_CONTAINERLABEL", "")
-            container_api_key = os.environ.get("CONTAINER_API_KEY", "")
-            
-            if container_label and container_api_key:
-                print("\n>>> [Step 4] Auto-stopping Vast.ai instance...")
-                # Cài đặt CLI vastai
-                subprocess.run([sys.executable, "-m", "pip", "install", "-q", "vastai"], check=True)
-                
-                import re
-                match = re.search(r"(\d+)(?:\D*)$", container_label)
-                instance_id = match.group(1) if match else "".join(re.findall(r"\d+", container_label))
-                
-                print(f"Stopping instance ID: {instance_id}...")
-                subprocess.run([
-                    "vastai", "stop", "instance", instance_id, 
-                    "--api-key", container_api_key
-                ], check=True)
-            else:
-                print("\nℹ️ Vast.ai environment variables not found. Skipping auto-stop (likely running locally).")
-        except Exception as e:
-            print(f"\n⚠️ Failed to stop instance automatically: {e}")
+            stop_vast_instance()
+        except Exception as error:
+            print(f"Could not automatically stop Vast.ai instance: {error}")
+
 
 if __name__ == "__main__":
     run()

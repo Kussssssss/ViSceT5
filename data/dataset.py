@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 from typing import Any, Dict
 import pandas as pd
 
+
 class ViT5VQADataset(Dataset):
     def __init__(
         self,
@@ -39,7 +40,7 @@ class ViT5VQADataset(Dataset):
             "question": str(row[self.q_key]),
             "answer": (
                 ""
-                if self.a_key not in row or row[self.a_key] is None
+                if self.a_key not in row or pd.isna(row[self.a_key])
                 else str(row[self.a_key])
             ),
             "uid": img_path,
