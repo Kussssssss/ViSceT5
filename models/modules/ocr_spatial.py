@@ -4,10 +4,9 @@ SpatialCirclePosition, SemanticOCREmbedding.
 """
 
 import math
-import copy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from transformers.models.t5.modeling_t5 import T5LayerNorm
 
 class ScaledDotProductAttention_Embedding(nn.Module):
     def __init__(self, config):
@@ -138,17 +137,19 @@ class SpatialCirclePosition(ScaledDotProductAttention_Embedding):
 class SemanticOCREmbedding(nn.Module):
     def __init__(self, ns):
         super().__init__()
+        # Each modality learns an independent RMSNorm initialized with unit scale.
+        norm_eps = getattr(ns, "layer_norm_epsilon", 1e-6)
         self.linear_boxes = nn.Linear(4, ns.d_model)
-        self.layer_norm_bboxes = nn.LayerNorm(ns.d_model)
+        self.layer_norm_bboxes = T5LayerNorm(ns.d_model, eps=norm_eps)
 
         self.linear_det = nn.Linear(ns.d_det, ns.d_model)
-        self.layer_norm_det = nn.LayerNorm(ns.d_model)
+        self.layer_norm_det = T5LayerNorm(ns.d_model, eps=norm_eps)
 
         self.linear_rec = nn.Linear(ns.d_rec, ns.d_model)
-        self.layer_norm_rec = nn.LayerNorm(ns.d_model)
+        self.layer_norm_rec = T5LayerNorm(ns.d_model, eps=norm_eps)
 
-        self.layer_norm_tok = nn.LayerNorm(ns.d_model)
-        self.layer_norm_char = nn.LayerNorm(ns.d_model)
+        self.layer_norm_tok = T5LayerNorm(ns.d_model, eps=norm_eps)
+        self.layer_norm_char = T5LayerNorm(ns.d_model, eps=norm_eps)
 
     def forward(self, ocr_info, ocr_tok_features, ocr_char_features):
         W = self.linear_boxes.weight

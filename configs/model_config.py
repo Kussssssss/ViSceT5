@@ -14,9 +14,7 @@ VIET_ALPHA = list(
     "aáàảãạăắằẳẵặâấầẩẫậbcdđeéèẻẽẹêếềểễệfghijklmnopqrstuvwxyz"
     "AÁÀẢÃẠĂẮẰẲẴẶÂẤẦẨẪẬBCDĐEÉÈẺẼẸÊẾỀỂỄỆFGHIJKLMNOPQRSTUVWXYZ"
 )
-DIGITS_PUNC = list(
-    "0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~–—''""•…€£¥₹©®™°"
-)
+DIGITS_PUNC = list("0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~–—''•…€£¥₹©®™°")
 
 COMBINED_CHARS = CHAR_SPECIAL_TOKENS + list(dict.fromkeys(VIET_ALPHA + DIGITS_PUNC))
 DEFAULT_CHAR_NUM = len(COMBINED_CHARS)
@@ -30,17 +28,13 @@ class OpenViVQAConfig(PretrainedConfig):
         vit5_name: str = "VietAI/vit5-base",
         clip_vision_name: str = "openai/clip-vit-base-patch16",
         vs_backbone: str = "facebook/convnextv2-tiny-22k-224",
-        bootstrap_from_pretrained: bool = True,
-        local_submodule_dir: Optional[str] = None,
-        pretrain: bool = True,
-        pretrain_mask_prob: float = 0.15,
-        pretrain_mask_seed: int = 42,
+        ablation_use_qaclip: bool = True,
+        ablation_use_vs: bool = True,
+        ablation_use_ocr: bool = True,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
         decoder_start_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
-        mlm_ignore_index: int = -100,
-        contrastive_ignore_value: float = -1.0,
         ocr_d_det: int = 256,
         ocr_d_rec: int = 256,
         ocr_max_scene_text: int = 180,
@@ -55,12 +49,6 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_jaccard_dupe: float = 0.78,
         char_max_num: int = 50,
         char_num: int = DEFAULT_CHAR_NUM,
-        adv_probability: float = 1.0,
-        contrastive_label_list: List[float] = [0.9, 0.9],
-        editlen: int = 2,
-        term_vocab_path: str = "/kaggle/input/term-vietnamese-vocab/words.txt",
-        adv_probability_pretrain: float = 0.35,
-        adv_probability_finetune: float = 1.0,
         generation_max_new_tokens: int = 56,
         generation_num_beams: int = 4,
         vs_percentile: int = 99,
@@ -85,20 +73,14 @@ class OpenViVQAConfig(PretrainedConfig):
         self.vit5_name = vit5_name
         self.clip_vision_name = clip_vision_name
         self.vs_backbone = vs_backbone
-        self.bootstrap_from_pretrained = bool(bootstrap_from_pretrained)
-        self.local_submodule_dir = local_submodule_dir
-
-        self.pretrain = bool(pretrain)
-        self.pretrain_mask_prob = float(pretrain_mask_prob)
-        self.pretrain_mask_seed = int(pretrain_mask_seed)
+        self.ablation_use_qaclip = bool(ablation_use_qaclip)
+        self.ablation_use_vs = bool(ablation_use_vs)
+        self.ablation_use_ocr = bool(ablation_use_ocr)
 
         self.qa_clip_d_text = qa_clip_d_text
         self.pad_token_id = pad_token_id
         self.decoder_start_token_id = decoder_start_token_id
         self.eos_token_id = eos_token_id
-
-        self.mlm_ignore_index = int(mlm_ignore_index)
-        self.contrastive_ignore_value = float(contrastive_ignore_value)
 
         self.ocr_d_det = int(ocr_d_det)
         self.ocr_d_rec = int(ocr_d_rec)
@@ -117,17 +99,6 @@ class OpenViVQAConfig(PretrainedConfig):
 
         self.char_max_num = int(char_max_num)
         self.char_num = int(char_num)
-        self.adv_probability = float(adv_probability)
-        self.contrastive_label_list = (
-            list(contrastive_label_list)
-            if contrastive_label_list is not None
-            else [0.9, 0.9]
-        )
-        self.editlen = int(editlen)
-        self.term_vocab_path = str(term_vocab_path)
-
-        self.adv_probability_pretrain = float(adv_probability_pretrain)
-        self.adv_probability_finetune = float(adv_probability_finetune)
 
         self.generation_max_new_tokens = int(generation_max_new_tokens)
         self.generation_num_beams = int(generation_num_beams)
@@ -145,9 +116,7 @@ class OpenViVQAConfig(PretrainedConfig):
             else [0.48145466, 0.4578275, 0.40821073]
         )
         self.image_std = list(
-            image_std
-            if image_std is not None
-            else [0.26862954, 0.26130258, 0.27577711]
+            image_std if image_std is not None else [0.26862954, 0.26130258, 0.27577711]
         )
 
         self.do_resize = bool(do_resize)
