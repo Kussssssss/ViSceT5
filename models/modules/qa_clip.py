@@ -52,7 +52,11 @@ def _valid_tokens(mask, batch_size, length, device, name):
 
 
 class MMCLIPAttention(CLIPAttention):
-    """Visual queries attend jointly to projected instruction and visual keys."""
+    """Visual queries attend to [visual, question] keys, following paper Eq. (3).
+
+    Returned attention columns contain all visual tokens (including CLS), then
+    instruction tokens. Rows contain only visual queries.
+    """
 
     def __init__(self, config):
         super().__init__(config)
@@ -89,8 +93,8 @@ class MMCLIPAttention(CLIPAttention):
         instruction_mask = _valid_tokens(
             kv_masks, batch_size, instruction_length, hidden_states.device, "kv_masks"
         )
-        key_mask = torch.cat((instruction_mask, visual_mask), dim=1)[:, None, None, :]
-        joint_states = torch.cat((kv_states, hidden_states), dim=1)
+        key_mask = torch.cat((visual_mask, instruction_mask), dim=1)[:, None, None, :]
+        joint_states = torch.cat((hidden_states, kv_states), dim=1)
 
         # Upstream projects all queries, then discards the instruction rows.
         # Project only visual queries: the retained attention is mathematically identical.

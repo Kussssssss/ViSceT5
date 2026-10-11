@@ -169,7 +169,7 @@ def test_padding_is_invariant_and_attention_keeps_gradients(vision_config, input
     )
     attention = outputs.attentions[-1]
     padding = ~inputs["text_mask"].bool()[:, None, None, :]
-    assert torch.count_nonzero(attention[..., :3].masked_select(padding)) == 0
+    assert torch.count_nonzero(attention[..., 5:].masked_select(padding)) == 0
     torch.testing.assert_close(
         attention.sum(dim=-1), torch.ones_like(attention[..., 0])
     )
@@ -178,6 +178,61 @@ def test_padding_is_invariant_and_attention_keeps_gradients(vision_config, input
     assert torch.count_nonzero(question.grad[inputs["text_mask"] == 0]) == 0
     with pytest.raises(ValueError, match="text_mask must have shape"):
         model(**{**inputs, "text_mask": inputs["text_mask"][:, :2]})
+
+
+def test_visual_first_matches_legacy_outputs_and_gradients(vision_config):
+    model = QACLIPEncoder(vision_config, instruction_dim=24, freeze_clip=True).eval()
+    attention = model.vision_model.encoder.layers[-1].self_attn
+    with torch.no_grad():
+        attention.instruction_proj_gate.fill_(0.3)
+    visual = torch.randn(2, 5, 32, requires_grad=True)
+    question = torch.randn(2, 3, 32, requires_grad=True)
+    question_mask = torch.tensor([[1, 1, 0], [1, 0, 0]])
+    output, weights = attention(
+        visual, kv_states=question, kv_masks=question_mask, output_attentions=True
+    )
+
+    # Reference before this change: [question, visual], all queries projected,
+    # then the question rows discarded. Test both column layout and gradients.
+    joint = torch.cat((question, visual), dim=1)
+    queries = attention._shape(attention.q_proj(joint) * attention.scale, 8, 2)
+    keys = attention._shape(attention.k_proj(joint), 8, 2)
+    values = attention._shape(attention.v_proj(joint), 8, 2)
+    key_mask = torch.cat(
+        (question_mask.bool(), torch.ones(2, 5, dtype=torch.bool)), dim=1
+    )
+    scores = torch.matmul(queries, keys.transpose(-1, -2))[:, :, 3:, :]
+    scores = scores.masked_fill(
+        ~key_mask[:, None, None, :], torch.finfo(scores.dtype).min
+    )
+    legacy_weights = scores.softmax(dim=-1)
+    attended = torch.matmul(legacy_weights, values).transpose(1, 2).reshape(2, 5, 32)
+    legacy_output = attention.out_proj(
+        attended
+    ) + attention.instruction_proj_gate.tanh() * attention.instruction_out_proj(
+        attended
+    )
+    reordered_weights = torch.cat(
+        (legacy_weights[..., 3:], legacy_weights[..., :3]), dim=-1
+    )
+    torch.testing.assert_close(output, legacy_output)
+    torch.testing.assert_close(weights, reordered_weights)
+
+    target = torch.randn_like(output)
+    question_target = torch.randn_like(weights[..., 5:])
+    variables = (visual, question) + tuple(
+        p for p in attention.parameters() if p.requires_grad
+    )
+    gradients = torch.autograd.grad(
+        (output * target).sum() + (weights[..., 5:] * question_target).sum(), variables
+    )
+    legacy_gradients = torch.autograd.grad(
+        (legacy_output * target).sum()
+        + (legacy_weights[..., :3] * question_target).sum(),
+        variables,
+    )
+    for actual, expected in zip(gradients, legacy_gradients):
+        torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize("reentrant", [False, True])

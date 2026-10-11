@@ -18,6 +18,12 @@ Adapter đưa instruction về chiều CLIP. Ảnh đi qua LayerNorm của block
 ghép với instruction để làm keys/values. Visual queries attend chung tới hai nhóm
 keys qua một softmax. Question queries không được trả về.
 
+Joint keys/values dùng thứ tự `[visual, question]` như Eq. (3) của paper. Các hàng
+attention là visual queries; cột đầu là CLS và patches, cột sau là question tokens.
+Visual Search lấy cột câu hỏi từ index `N_visual` (bao gồm CLS), bỏ hàng CLS.
+Việc đổi thứ tự không đổi parameter/checkpoint layout. Code bên ngoài đọc attention
+cần dùng offset này thay vì coi các cột đầu là câu hỏi như trước đây.
+
 Output attention đi qua:
 
 ```text
@@ -104,6 +110,43 @@ gradients, CPU BF16 autocast và đối chiếu CLIP khi không có instruction/
 forward/backward/generation, train/evaluate/resume và checkpoint model tổng.
 Những kiểm tra này dùng backbone nhỏ offline; hiệu quả VQA và bộ nhớ/thời gian GPU
 cần được đo bằng thí nghiệm trên backbone và dataset thực tế.
+
+## Kiểm tra tham số khi VRAM thay đổi
+
+Với CLIP-B/16, instruction chiều 768, integration `late`, freeze CLIP:
+
+| QAClip | Trước refactor (`d642998`) | Sau refactor (`b5f62ea`) |
+| --- | ---: | ---: |
+| Tổng tham số | 96,430,086 | 96,430,086 |
+| Có thể học | 10,630,662 | 10,630,662 |
+| Instruction FFN | 7,087,104 | 7,087,104 |
+| Projection bổ sung | 3,543,552 | 3,543,552 |
+| Gate | 6 | 6 |
+
+Tên, shape và cờ `requires_grad` của toàn bộ parameter khớp giữa hai bản. Đổi sang
+`[visual, question]` cũng giữ các số này. Gradient checkpointing không tự bật;
+encoder vẫn có mặc định `gradient_checkpointing=False`. Refactor model tổng ở
+`b5f62ea` chỉ bỏ lời gọi copy projection vì loader đã thực hiện việc đó.
+
+Tính visual queries thay vì joint queries đổi shape score từ `(M+K) × (M+K)`
+sang `M × (M+K)`. Với M=197 và K=32, số phần tử score giảm khoảng 14%, chỉ tại
+các block QA-ViT. Đây không phải phép đo mức giảm VRAM của toàn hệ thống.
+
+Một probe CPU FP32, cùng shape và trọng số, B=4, M=197, K=32, D=64, 4 block
+(2 block QA), dùng saved-tensor hooks và đếm storage không trùng, bỏ storage
+parameter: `d642998` lưu 10.36 MiB, `b5f62ea` lưu 15.59 MiB cho backward.
+Các adapter vẫn nhận gradient ở cả hai bản. Probe này không đo peak CUDA hay
+bộ nhớ GPU của pipeline đầy đủ, nhưng không hỗ trợ kết luận rằng graph bị cắt
+hoặc rằng riêng tối ưu query giải thích mức giảm từ 32 GB xuống 12 GB.
+
+Để xác định nguyên nhân trên A100, cần đo trong chính process training, cùng một
+batch đã collate, sau warm-up và qua optimizer step; so sánh từng bản bằng process
+mới. Phân biệt `torch.cuda.memory_allocated()`, `memory_reserved()` và
+`max_memory_allocated()`. Reset peak trước đoạn forward/backward/optimizer cần đo.
+Nếu training chạy bằng subprocess trong Colab, chạy các phép đo trong subprocess,
+không chạy ở process notebook cha. Chỉ số từ nvidia-smi/Colab có thể bao gồm cache
+allocator và bộ nhớ của process khác; chưa có các số đo CUDA này để quy nguyên nhân.
+Tham khảo [PyTorch memory management](https://docs.pytorch.org/docs/2.14/notes/cuda.html#memory-management).
 
 ## Attribution
 
