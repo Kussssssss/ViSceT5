@@ -1,6 +1,6 @@
 """
 data/eda.py
-EDA tools: VQA_EDA_Analyzer, TWA_UpperBound_Analyzer, Threshold_Sensitivity_Analyzer.
+EDA tools: VQA_EDA_Analyzer, OCR_Coverage_Analyzer, Threshold_Sensitivity_Analyzer.
 """
 
 import os
@@ -239,12 +239,12 @@ warnings.filterwarnings("ignore")
 sns.set(style="whitegrid")
 plt.rcParams['figure.figsize'] = (10, 6)
 
-class TWA_UpperBound_Analyzer:
+class OCR_Coverage_Analyzer:
     def __init__(self, df, img_root_col='image_path', ocr_root_col='ocr_path'):
         self.df = df
         self.img_col = img_root_col
         self.ocr_col = ocr_root_col
-        print(f"🚀 Initialized TWA Upper Bound Check on {len(df)} samples...")
+        print(f"🚀 Initialized OCR Coverage Check on {len(df)} samples...")
 
     def _normalize_token(self, text):
         if not isinstance(text, str): return str(text)
@@ -348,7 +348,7 @@ class TWA_UpperBound_Analyzer:
         plt.show()
 
 if EDA:
-    analyzer = TWA_UpperBound_Analyzer(final_train_df, img_root_col='image_path', ocr_root_col='ocr_path')
+    analyzer = OCR_Coverage_Analyzer(final_train_df, img_root_col='image_path', ocr_root_col='ocr_path')
     analyzer.calculate_strict_ub()
 
 import pandas as pd
