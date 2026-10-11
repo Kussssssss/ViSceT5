@@ -1,6 +1,7 @@
 """Exercise the real multimodal modules with tiny, offline random backbones."""
 
 import itertools
+import json
 import sys
 import warnings
 from unittest.mock import patch
@@ -42,6 +43,47 @@ from training.metrics import compute_f1_em
 from training.trainer import VQATrainer
 from transformers.models.t5.modeling_t5 import T5LayerNorm
 import transformers.modeling_utils as hf_modeling_utils
+
+
+def test_memory_audit_uses_same_batch_and_real_optimizer(model, tokenizer, samples, tmp_path, monkeypatch):
+    from scripts import profile_training_memory as audit
+
+    monkeypatch.setattr(audit, "load_model_and_tokenizer", lambda checkpoint: (model, tokenizer))
+    monkeypatch.setattr(audit, "load_dataframes", lambda *args: {"train": pd.DataFrame(samples)})
+    batch_path = tmp_path / "audit-batch.pt"
+    output = tmp_path / "memory-audit"
+    arguments = [
+        "--output_dir", str(output),
+        "--audit_batch_file", str(batch_path),
+        "--per_device_train_batch_size", "2",
+        "--gradient_accumulation_steps", "2",
+        "--remove_unused_columns", "false",
+        "--audit_steps", "3",
+    ]
+    audit.main(arguments)
+    manifest = json.loads((output / "manifest.json").read_text())
+    events = json.loads((output / "memory_trace.json").read_text())
+    report = json.loads((output / "parameters_after_optimizer.json").read_text())
+    assert batch_path.is_file()
+    assert len([e for e in events if e["phase"] == "after_forward"]) == 6
+    assert len([e for e in events if e["phase"] == "after_optimizer"]) == 3
+    assert all(group["trainable"] == group["in_optimizer"] for group in report["groups"].values())
+    assert report["groups"]["vit5"]["with_gradient"] > 0
+    assert report["groups"]["ocr_encoder"]["with_gradient"] > 0
+    assert report["groups"]["qa_clip"]["with_gradient"] > 0
+    assert report["groups"]["visual_search"]["optimizer_state_bytes"] > 0
+    missing = [n for n, p in report["parameters"].items() if p["requires_grad"] and not p["has_gradient"]]
+    assert all(n.startswith("ocr_lite_") or n.startswith("visual_search.cnn.layernorm.") for n in missing)
+    shape = next(e for e in events if e["phase"] == "after_forward")["shapes"]["vit5.encoder"]
+    assert len(shape) == 2
+    assert shape[1]["shape"] == [2, 18, 32]
+
+    def unexpected_data_load(*args):
+        raise AssertionError("A saved audit batch must bypass the dataset/collator.")
+    monkeypatch.setattr(audit, "load_dataframes", unexpected_data_load)
+    audit.main(arguments)
+    repeated = json.loads((output / "manifest.json").read_text())
+    assert manifest["batch_sha256"] == repeated["batch_sha256"]
 
 
 @pytest.fixture(autouse=True)
