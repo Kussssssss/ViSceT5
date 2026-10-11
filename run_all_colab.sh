@@ -29,6 +29,9 @@ done
 export STAGE MOCK_TEST
 # Colab: show only the trainer's tqdm progress bar, suppress per-step debug logs.
 export VISCET5_PROGRESS_ONLY=1
+# stdout đi qua `tee` (pipe) nên Python mặc định đệm theo khối ~8KB → print (vd tiến độ
+# predict, vốn không có tqdm) chỉ hiện từng cục. Tắt đệm để log hiện ngay.
+export PYTHONUNBUFFERED=1
 echo "▶ [Colab] STAGE=$STAGE | MOCK_TEST=$MOCK_TEST | progress-bar only"
 
 # ---- environment bootstrap ----
