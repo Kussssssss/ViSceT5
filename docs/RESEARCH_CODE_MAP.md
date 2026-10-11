@@ -43,6 +43,9 @@ Câu hỏi được encode bởi ViT5 để làm instruction cho QACLIP. CLIP tr
 tokens và attention từ patch sang câu hỏi. Visual Search dùng attention chọn ROI,
 crop qua grid sampling rồi trích xuất ConvNeXtV2 features.
 
+Chi tiết đối chiếu QAClip với repo QA-ViT gốc, khởi tạo adapter và các điều chỉnh
+được ghi tại [QA_VIT_REFACTOR.md](QA_VIT_REFACTOR.md).
+
 OCR Consformer encode chuỗi subword qua GroupAttention. Mapping subword→entry
 gắn box, det/rec và character features với từng subword. SemanticOCREmbedding
 hợp nhất các feature đó. Mọi nhánh đưa vào ViT5 phải có cùng chiều d_model.
