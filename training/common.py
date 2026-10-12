@@ -83,7 +83,6 @@ def load_model_and_tokenizer(checkpoint=None):
         processor_dir = Path(checkpoint) / "image_processor"
         if processor_dir.is_dir():
             model.image_processor = model.image_processor.from_pretrained(processor_dir)
-            model.visual_search.vit_processor = model.image_processor
     else:
         config = OpenViVQAConfig()
         tokenizer = AutoTokenizer.from_pretrained(config.vit5_name)

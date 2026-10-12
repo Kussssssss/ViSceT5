@@ -1,5 +1,11 @@
 # Đối chiếu toàn model khi VRAM giảm từ 32 GB xuống 12 GB
 
+> Báo cáo lịch sử cho kiến trúc có Visual Search. Kiến trúc hiện tại đã gỡ toàn bộ
+> ConvNeXt/ROI/crop tokens, giảm 27,866,496 parameter. Với backbone mặc định:
+> total = 345,432,198; frozen = 85,799,424; learnable = 259,632,774.
+> Chuỗi encoder hiện tại dài `229 + L_ocr`. Công cụ profile đã được cập nhật cho
+> kiến trúc mới; để tái hiện phép đo lịch sử dưới đây, dùng script ở commit `722f9fe`.
+
 Baseline được kiểm tra là `d642998`, ngay trước commit refactor QAClip `b5f62ea`.
 Bản đối chiếu là `aaa8a75`, đã chuyển attention sang `[visual, question]`.
 Nếu lần chạy 32 GB dùng commit khác, cần đối chiếu đúng commit đó; kết quả dưới

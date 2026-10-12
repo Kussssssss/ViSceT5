@@ -20,9 +20,6 @@ class ModelArguments:
     ablation_use_qaclip: bool = field(
         default=True, metadata={"help": "Whether to use Late Fusion QACLIP"}
     )
-    ablation_use_vs: bool = field(
-        default=True, metadata={"help": "Whether to use Visual Search (crop)"}
-    )
     ablation_use_ocr: bool = field(
         default=True, metadata={"help": "Whether to use OCR Consformer"}
     )

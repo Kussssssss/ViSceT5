@@ -16,11 +16,8 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import TemplateProcessing
 from transformers import (
-    CLIPImageProcessor,
     CLIPVisionConfig,
     CLIPVisionModel,
-    ConvNextV2Config,
-    ConvNextV2Model,
     HfArgumentParser,
     PreTrainedTokenizerFast,
     Seq2SeqTrainingArguments,
@@ -45,20 +42,32 @@ from transformers.models.t5.modeling_t5 import T5LayerNorm
 import transformers.modeling_utils as hf_modeling_utils
 
 
-def test_memory_audit_uses_same_batch_and_real_optimizer(model, tokenizer, samples, tmp_path, monkeypatch):
+def test_memory_audit_uses_same_batch_and_real_optimizer(
+    model, tokenizer, samples, tmp_path, monkeypatch
+):
     from scripts import profile_training_memory as audit
 
-    monkeypatch.setattr(audit, "load_model_and_tokenizer", lambda checkpoint: (model, tokenizer))
-    monkeypatch.setattr(audit, "load_dataframes", lambda *args: {"train": pd.DataFrame(samples)})
+    monkeypatch.setattr(
+        audit, "load_model_and_tokenizer", lambda checkpoint: (model, tokenizer)
+    )
+    monkeypatch.setattr(
+        audit, "load_dataframes", lambda *args: {"train": pd.DataFrame(samples)}
+    )
     batch_path = tmp_path / "audit-batch.pt"
     output = tmp_path / "memory-audit"
     arguments = [
-        "--output_dir", str(output),
-        "--audit_batch_file", str(batch_path),
-        "--per_device_train_batch_size", "2",
-        "--gradient_accumulation_steps", "2",
-        "--remove_unused_columns", "false",
-        "--audit_steps", "3",
+        "--output_dir",
+        str(output),
+        "--audit_batch_file",
+        str(batch_path),
+        "--per_device_train_batch_size",
+        "2",
+        "--gradient_accumulation_steps",
+        "2",
+        "--remove_unused_columns",
+        "false",
+        "--audit_steps",
+        "3",
     ]
     audit.main(arguments)
     manifest = json.loads((output / "manifest.json").read_text())
@@ -67,19 +76,29 @@ def test_memory_audit_uses_same_batch_and_real_optimizer(model, tokenizer, sampl
     assert batch_path.is_file()
     assert len([e for e in events if e["phase"] == "after_forward"]) == 6
     assert len([e for e in events if e["phase"] == "after_optimizer"]) == 3
-    assert all(group["trainable"] == group["in_optimizer"] for group in report["groups"].values())
+    assert all(
+        group["trainable"] == group["in_optimizer"]
+        for group in report["groups"].values()
+    )
     assert report["groups"]["vit5"]["with_gradient"] > 0
     assert report["groups"]["ocr_encoder"]["with_gradient"] > 0
     assert report["groups"]["qa_clip"]["with_gradient"] > 0
-    assert report["groups"]["visual_search"]["optimizer_state_bytes"] > 0
-    missing = [n for n, p in report["parameters"].items() if p["requires_grad"] and not p["has_gradient"]]
-    assert all(n.startswith("ocr_lite_") or n.startswith("visual_search.cnn.layernorm.") for n in missing)
-    shape = next(e for e in events if e["phase"] == "after_forward")["shapes"]["vit5.encoder"]
+    assert "visual_search" not in report["groups"]
+    missing = [
+        n
+        for n, p in report["parameters"].items()
+        if p["requires_grad"] and not p["has_gradient"]
+    ]
+    assert all(n.startswith("ocr_lite_") for n in missing)
+    shape = next(e for e in events if e["phase"] == "after_forward")["shapes"][
+        "vit5.encoder"
+    ]
     assert len(shape) == 2
-    assert shape[1]["shape"] == [2, 18, 32]
+    assert shape[1]["shape"] == [2, 17, 32]
 
     def unexpected_data_load(*args):
         raise AssertionError("A saved audit batch must bypass the dataset/collator.")
+
     monkeypatch.setattr(audit, "load_dataframes", unexpected_data_load)
     audit.main(arguments)
     repeated = json.loads((output / "manifest.json").read_text())
@@ -114,7 +133,6 @@ def offline_backbones(monkeypatch):
         integration_point="late",
         freeze_clip=True,
     )
-    cnn_config = ConvNextV2Config(hidden_sizes=[4, 8, 16, 32], depths=[1, 1, 1, 1])
     monkeypatch.setattr(
         T5ForConditionalGeneration,
         "from_pretrained",
@@ -122,13 +140,6 @@ def offline_backbones(monkeypatch):
     )
     monkeypatch.setattr(
         QACLIPEncoder, "from_pretrained", lambda *a, **k: QACLIPEncoder(vision_config)
-    )
-    monkeypatch.setattr(
-        ConvNextV2Model, "from_pretrained", lambda *a, **k: ConvNextV2Model(cnn_config)
-    )
-    monkeypatch.setattr(
-        "models.modules.visual_search.AutoImageProcessor.from_pretrained",
-        lambda *a, **k: CLIPImageProcessor(size=32, crop_size=32),
     )
 
 
@@ -164,7 +175,7 @@ def tokenizer():
 def model():
     return OpenViVQAModel(
         OpenViVQAConfig(
-            vs_target_size=32,
+            image_size=32,
             ocr_d_det=4,
             ocr_d_rec=4,
             ocr_max_scene_text=9,
@@ -273,8 +284,12 @@ def test_palette_transparency_converts_without_warning(
         batch = build_collator(model, tokenizer)(
             [{**samples[0], "image_path": str(path)}]
         )
-    assert batch["pil_images"][0].mode == "RGB"
-    assert batch["pil_images"][0].getpixel((0, 0)) == (80, 120, 180)
+    expected_image = Image.new("RGB", (40, 32), color=(80, 120, 180))
+    expected_pixels = model.image_processor(
+        images=[expected_image], return_tensors="pt"
+    )["pixel_values"]
+    torch.testing.assert_close(batch["pixel_values"], expected_pixels)
+    assert "pil_images" not in batch
     assert not any("Palette images" in str(warning.message) for warning in caught)
 
 
@@ -351,17 +366,14 @@ def test_qaclip_load_initializes_new_instruction_weights(tmp_path, monkeypatch):
         )
 
 
-@pytest.mark.parametrize(
-    "qaclip,vs,ocr", list(itertools.product([False, True], repeat=3))
-)
+@pytest.mark.parametrize("qaclip,ocr", list(itertools.product([False, True], repeat=2)))
 def test_all_ablations_forward_backward_generate(
-    model, tokenizer, samples, qaclip, vs, ocr
+    model, tokenizer, samples, qaclip, ocr
 ):
     model.config.ablation_use_qaclip = qaclip
-    model.config.ablation_use_vs = vs
     model.config.ablation_use_ocr = ocr
     batch = build_collator(model, tokenizer)(samples)
-    outputs = model(**batch, return_visual_search_debug=True)
+    outputs = model(**batch)
     assert outputs["logits"].shape == (2, 6, 32)
     assert torch.isfinite(outputs["loss"])
     assert (
@@ -371,46 +383,46 @@ def test_all_ablations_forward_backward_generate(
     outputs["loss"].backward()
     gradients = [p.grad for p in model.parameters() if p.grad is not None]
     assert gradients and all(torch.isfinite(grad).all() for grad in gradients)
-    assert model.visual_search.cnn.embeddings.patch_embeddings.weight.grad is not None
+    assert not hasattr(model, "visual_search")
+    assert not any(n.startswith("visual_search.") for n, _ in model.named_parameters())
+    ocr_length = (
+        batch["ocr_input_ids"].shape[1] if ocr else batch["ocr_word_mask"].shape[1]
+    )
+    expected_length = batch["input_ids"].shape[1] + 4 + ocr_length + 1
+    assert outputs["attention_mask"].shape == (2, expected_length)
     assert model.get_input_embeddings().weight.grad is not None
     model.eval()
     inputs = {key: value for key, value in batch.items() if key != "labels"}
     with torch.no_grad():
         direct = model.generate(**inputs)
-        encoded, mask, _ = model.encode(**inputs)
+        encoded, mask = model.encode(**inputs)
         cached = model.generate(encoder_outputs=encoded, attention_mask=mask)
     torch.testing.assert_close(direct, cached)
     assert cached.shape[0] == 2 and cached.shape[1] <= 4
-    if vs:
-        assert "boxes" in outputs["vs_debug"]
 
 
 @pytest.mark.parametrize("use_question", [False, True])
-def test_visual_search_reads_correct_attention_columns(model, use_question):
+def test_image_encoder_only_returns_patches_without_attention_export(
+    model, use_question
+):
     from types import SimpleNamespace
 
     model.config.ablation_use_qaclip = use_question
     hidden = torch.randn(2, 5, 32)  # CLS + four patches
-    attention = torch.zeros(2, 4, 5, 8 if use_question else 5)
-    expected_scores = torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.4, 0.3, 0.2, 0.1]])
-    if use_question:
-        attention[:, :, 1:, :5] = 0.8  # Decoy visual keys
-        attention[:, :, 1:, 5:] = expected_scores[:, None, :, None]
-    else:
-        attention[:, :, 0, 1:5] = expected_scores[:, None, :]
     with patch.object(
         model.qa_clip,
         "forward",
-        return_value=SimpleNamespace(last_hidden_state=hidden, attentions=(attention,)),
-    ):
-        tokens, mask, scores = model._encode_image(
+        return_value=SimpleNamespace(last_hidden_state=hidden, attentions=None),
+    ) as forward:
+        tokens, mask = model._encode_image(
             torch.randn(2, 3, 32, 32),
             torch.randn(2, 3, 32),
             torch.ones(2, 3, dtype=torch.long),
         )
     torch.testing.assert_close(tokens, hidden[:, 1:])
-    torch.testing.assert_close(scores, expected_scores)
     assert mask.shape == (2, 4)
+    assert forward.call_args.kwargs["output_attentions"] is False
+    assert forward.call_args.kwargs["text_emb"].shape[1] == (3 if use_question else 0)
 
 
 def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
@@ -434,6 +446,50 @@ def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
     )
 
 
+def test_legacy_checkpoint_drops_visual_search_and_preserves_remaining_weights(
+    model, tokenizer, samples, tmp_path
+):
+    model.eval()
+    state = model.state_dict()
+    legacy_keys = {
+        "visual_search.cnn.embeddings.patch_embeddings.weight": torch.randn(4, 3, 4, 4),
+        "visual_search.cnn.layernorm.weight": torch.randn(32),
+    }
+    model.save_pretrained(
+        tmp_path, safe_serialization=False, state_dict={**state, **legacy_keys}
+    )
+    config_path = tmp_path / "config.json"
+    legacy_config = json.loads(config_path.read_text())
+    legacy_config.pop("image_size")
+    legacy_config.update(
+        vs_target_size=32, vs_backbone="unused-convnext", ablation_use_vs=True
+    )
+    config_path.write_text(json.dumps(legacy_config), encoding="utf-8")
+    restored, info = OpenViVQAModel.from_pretrained(tmp_path, output_loading_info=True)
+    assert not info["missing_keys"]
+    assert set(info["unexpected_keys"]) == set(legacy_keys)
+    assert restored.config.image_size == 32
+    assert not any(
+        key.startswith("vs_") or key == "ablation_use_vs"
+        for key in restored.config.to_dict()
+    )
+    assert not hasattr(restored, "visual_search")
+    for name, value in state.items():
+        torch.testing.assert_close(value, restored.state_dict()[name], rtol=0, atol=0)
+    batch = build_collator(restored, tokenizer)(samples)
+    with torch.no_grad():
+        torch.testing.assert_close(
+            model(**batch)["logits"], restored(**batch)["logits"], rtol=0, atol=0
+        )
+
+
+def test_image_size_overrides_legacy_visual_search_size():
+    config = OpenViVQAConfig(image_size=32, vs_target_size=224, ablation_use_vs=False)
+    assert config.image_size == 32
+    assert "vs_target_size" not in config.to_dict()
+    assert "ablation_use_vs" not in config.to_dict()
+
+
 def test_ocr_norms_use_fresh_weights_and_vit5_config_epsilon():
     backbone = T5ForConditionalGeneration.from_pretrained("offline")
     source = backbone.encoder.final_layer_norm
@@ -444,9 +500,7 @@ def test_ocr_norms_use_fresh_weights_and_vit5_config_epsilon():
     with patch.object(
         T5ForConditionalGeneration, "from_pretrained", return_value=backbone
     ):
-        model = OpenViVQAModel(
-            OpenViVQAConfig(vs_target_size=32, ocr_d_det=4, ocr_d_rec=4)
-        )
+        model = OpenViVQAModel(OpenViVQAConfig(image_size=32, ocr_d_det=4, ocr_d_rec=4))
     norms = [model.ocr_lite_text_ln, model.ocr_char_layernorm] + [
         getattr(model.semantic_ocr_embedding, name)
         for name in (
@@ -542,14 +596,14 @@ def test_config_yaml_cli_overrides():
         parser,
         [
             str(PROJECT_ROOT / "configs" / "finetune.yaml"),
-            "--ablation_use_vs",
+            "--ablation_use_qaclip",
             "False",
             "--smoke_test=True",
             "--num_train_epochs",
             "2",
         ],
     )
-    assert not model_args.ablation_use_vs and train_args.smoke_test
+    assert not model_args.ablation_use_qaclip and train_args.smoke_test
     assert train_args.num_train_epochs == 2
 
 
