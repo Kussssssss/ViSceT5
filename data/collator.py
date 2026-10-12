@@ -668,8 +668,11 @@ class ViT5VQADataCollator:
             rank = self.global_vocab.get(cand)
             if rank is not None: candidates.append({"word": cand, "dist": 0, "type": 0, "source": rank, "tone": 0})
 
+        # Khoá phá hoà cuối cùng = chính từ đó. Thiếu nó, các ứng viên hoà nhau được chọn theo
+        # thứ tự duyệt của set chuỗi — thay đổi theo PYTHONHASHSEED của từng tiến trình (đo được:
+        # 18.7% từ bị sửa ra khác nhau giữa 2 lần chạy) → bản sửa lúc predict khác lúc train.
         if candidates:
-            candidates.sort(key=lambda x: (x["type"], x["source"], -x["tone"]))
+            candidates.sort(key=lambda x: (x["type"], x["source"], -x["tone"], x["word"]))
             best = candidates[0]["word"]
             self.correction_cache[token] = best
             return best
@@ -692,7 +695,7 @@ class ViT5VQADataCollator:
                     curr_type = 1 if len(w) == len(token) else 2
                     valid_cands.append({"word": w, "dist": d, "type": curr_type, "source": src_rank, "tone": get_word_tone_score(w)})
             if valid_cands:
-                valid_cands.sort(key=lambda x: (x["type"], x["source"], -x["tone"]))
+                valid_cands.sort(key=lambda x: (x["type"], x["source"], -x["tone"], x["word"]))
                 best = valid_cands[0]["word"]
                 self.correction_cache[token] = best
                 return best
@@ -1218,10 +1221,12 @@ class ViT5VQADataCollator:
         # =========================================================
         else:
             ocr_info_list, twa_char_list, twa_char_mask_list, twa_word_ids_list, ocr_to_word_map_list, ocr_mask_list = [], [], [], [], [], []
+            ocr_words_list = []
 
             for i in range(len(batch)):
                 info, raw_texts = self._prepare_ocr(ocr_raw_list[i], max_len_in_batch=current_max_len)
                 norm_tokens = [_normalize_text(t, lowercase=True) for t in raw_texts]
+                rel_ocr = None
 
                 if use_ocr_aug:
                     pad_ocr, rel_ocr = self._findRelatedOCR_plain(norm_tokens, current_max_len, adv_pro, self.editlen)
@@ -1258,8 +1263,9 @@ class ViT5VQADataCollator:
                 info["boxes_word_all"] = boxes_all; info["word_mask_all"] = mask_all
                 ocr_info_list.append(info)
                 ocr_mask_list.append(mask_all.clone())
+                ocr_words_list.append({"orig": list(pad_ocr), "rel": list(rel_ocr) if rel_ocr is not None else None})
 
-            return {
+            out = {
                 "input_ids": q_tok.input_ids.to(pixel_values.device),
                 "attention_mask": q_tok.attention_mask.to(pixel_values.device),
                 "labels": lab.to(pixel_values.device) if lab is not None else None,
@@ -1272,3 +1278,8 @@ class ViT5VQADataCollator:
                 "twa_word_ids": torch.nn.utils.rnn.pad_sequence(twa_word_ids_list, batch_first=True, padding_value=self.pad_id).to(pixel_values.device),
                 "ocr_to_word_map": torch.nn.utils.rnn.pad_sequence(ocr_to_word_map_list, batch_first=True, padding_value=-1).to(pixel_values.device)
             }
+            # Chỉ dùng cho trực quan hoá (scripts/visualize_attention.py): danh sách từ OCR
+            # gốc / đã sửa theo đúng thứ tự word index. Mặc định TẮT → batch train/eval không đổi.
+            if getattr(self, "return_ocr_words", False):
+                out["ocr_words"] = ocr_words_list
+            return out

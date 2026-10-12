@@ -242,6 +242,43 @@ def _em_f1(preds, labels):
     return sum(f1s) / k, sum(ems) / k
 
 
+def build_collator(model, tokenizer, vision_ocr, dataset, dfs_hub=None):
+    """Collator inference giống lúc finetune (dùng chung cho predict và visualize_attention)."""
+    # Collator dựng từ điển của kênh sửa OCR từ câu hỏi/đáp án TẬP TRAIN của ĐÚNG dataset,
+    # y như lúc finetune (cache merged_train_<dataset>.csv). merged_train.csv không hậu tố
+    # luôn là ViTextVQA (run_pipeline Step 1) → chỉ dùng cho ViTextVQA, không thì predict
+    # ViOCRVQA/OpenViVQA sẽ sửa OCR theo từ điển khác lúc train.
+    _cands = [os.path.join(OUTPUT_PATH, f"merged_train_{dataset}.csv")]
+    if dataset == "ViTextVQA":
+        _cands.append(os.path.join(OUTPUT_PATH, "merged_train.csv"))
+    ref_df, _ref_src = None, ""
+    for _c in _cands:
+        if os.path.exists(_c):
+            ref_df, _ref_src = pd.read_csv(_c), _c
+            break
+    if ref_df is None and dfs_hub is not None and len(dfs_hub.get("train", [])) > 0:
+        ref_df, _ref_src = dfs_hub["train"], "Hub train split"
+    if ref_df is None:
+        ref_df, _ref_src = pd.DataFrame(columns=["question", "answer", "image_path", "ocr_path"]), "RỖNG"
+        print("⚠️  Không tìm thấy tập train → từ điển sửa OCR thiếu câu hỏi/đáp án train (khác lúc finetune).")
+    print(f">>> [predict] từ điển sửa OCR: {_ref_src} ({len(ref_df)} dòng)")
+
+    collator = ViT5VQADataCollator(
+        tokenizer=tokenizer,
+        image_processor=model.image_processor,
+        ocr_encoder=vision_ocr,
+        config=model.config,
+        term_vocab_path="configs/data/term_vocab.txt",
+        viet_vocab_path="configs/data/viet_vocab.txt",
+        eng_vocab_path="",
+        dataframe=ref_df,
+        pretrain=False,
+    )
+    if hasattr(collator, "set_mode"):
+        collator.set_mode(pretrain=False, mask_prob=0.0)
+    return collator
+
+
 @torch.inference_mode()
 def run_split(model, tokenizer, collator, df, split, out_csv,
               batch_size, num_beams, max_new_tokens, report_em, use_pil_images=False):
@@ -457,25 +494,6 @@ def main():
     model.generation_config = GenerationConfig(**_gen_kwargs)
     max_new = args.max_new_tokens if args.max_new_tokens > 0 else mnt
 
-    # dataframe cho collator (build vocab) — dùng train cache nếu có
-    train_csv = os.path.join(OUTPUT_PATH, "merged_train.csv")
-    ref_df = pd.read_csv(train_csv) if os.path.exists(train_csv) else pd.DataFrame(
-        columns=["question", "answer", "image_path", "ocr_path"])
-
-    collator = ViT5VQADataCollator(
-        tokenizer=tokenizer,
-        image_processor=model.image_processor,
-        ocr_encoder=vision_ocr,
-        config=model.config,
-        term_vocab_path="configs/data/term_vocab.txt",
-        viet_vocab_path="configs/data/viet_vocab.txt",
-        eng_vocab_path="",
-        dataframe=ref_df,
-        pretrain=False,
-    )
-    if hasattr(collator, "set_mode"):
-        collator.set_mode(pretrain=False, mask_prob=0.0)
-
     # Nguồn dữ liệu chính: DatasetHubLoader (tự tải/giải nén, df có sẵn `id`).
     # Bỏ qua nếu người dùng ép offline bằng --no_hub (dùng JSON + merged CSV local).
     dfs_hub = None
@@ -494,6 +512,8 @@ def main():
         except Exception as e:
             print(f"⚠️  Chuẩn bị dataset qua Hub thất bại ({e}); fallback JSON/CSV local.")
             dfs_hub = None
+
+    collator = build_collator(model, tokenizer, vision_ocr, args.dataset, dfs_hub)
 
     outs = []
     for sp in splits:
