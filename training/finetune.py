@@ -377,9 +377,9 @@ def main(args_list=None):
     compute_metrics_fn = build_compute_metrics_finetune(tokenizer)
 
     # ── CHỌN CHECKPOINT TỐT NHẤT theo metric ĐÚNG VỚI TỪNG DATASET ──
-    # ViTextVQA/ViOCRVQA: đáp án là scene-text ngắn → EM là thước đo mục tiêu.
+    # ViTextVQA/ViOCRVQA: đáp án là scene-text ngắn → trung bình EM và F1 (em_f1).
     # OpenViVQA: đáp án tự do, EM rất thấp và không phản ánh chất lượng → dùng CIDEr.
-    # Cả EM và CIDEr đều "càng cao càng tốt" (greater_is_better=True), khác với loss cũ.
+    # Đều "càng cao càng tốt" (greater_is_better=True); KHÔNG chọn theo loss.
     # LƯU Ý: CIDEr chỉ được compute_metrics trả về khi có 'java' (PTBTokenizer). Nếu
     # OpenViVQA mà thiếu java → 'eval_cider' vắng → load_best_model_at_end sẽ lỗi; khi đó
     # tự lùi về 'loss' và cảnh báo. Env METRIC_FOR_BEST_MODEL ghi đè nếu cần.
@@ -400,7 +400,9 @@ def main(args_list=None):
             print("⚠️ [best-metric] OpenViVQA cần CIDEr nhưng KHÔNG thấy 'java' → "
                   "tạm chọn best theo 'loss'. Cài java (openjdk) để dùng đúng CIDEr.")
     else:  # ViTextVQA, ViOCRVQA và mặc định
-        training_args.metric_for_best_model = "em"
+        # Trung bình EM và F1 trên val (metrics.py trả "em_f1"): chọn checkpoint đọc đúng
+        # nguyên văn (EM) mà vẫn trả lời gần đúng nhiều nhất (F1), không chọn theo loss.
+        training_args.metric_for_best_model = "em_f1"
         training_args.greater_is_better = True
     print(f">>> [best-metric] dataset={data_args.dataset_name} → "
           f"metric_for_best_model='{training_args.metric_for_best_model}' "

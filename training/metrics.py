@@ -258,7 +258,9 @@ def build_compute_metrics_finetune(tokenizer_for_metrics):
 
         # EM/F1 theo ViTextVQA (KHÔNG cần java — luôn tính được)
         f1, em = compute_f1_em(pred_texts, label_texts)
-        res = {"em": float(em), "f1": float(f1)}
+        # em_f1 = trung bình EM và F1: tiêu chí chọn checkpoint tốt nhất cho ViTextVQA /
+        # ViOCRVQA (xem training/finetune.py) — không chọn theo loss.
+        res = {"em": float(em), "f1": float(f1), "em_f1": 0.5 * (float(em) + float(f1))}
 
         # BLEU/CIDEr chỉ khi có java (xem build_compute_metrics_finetune)
         if ptb_tokenizer is not None:
