@@ -55,8 +55,10 @@ def main(args_list=None):
             raise RuntimeError("Could not download the resume checkpoint.")
         training_args.resume_from_checkpoint = checkpoint
     checkpoint = model_args.model_name_or_path or training_args.resume_from_checkpoint
-    model, tokenizer = load_model_and_tokenizer(checkpoint)
-    for name in ("ablation_use_qaclip", "ablation_use_ocr"):
+    model, tokenizer = load_model_and_tokenizer(
+        checkpoint, use_visual_search=model_args.use_visual_search
+    )
+    for name in ("ablation_use_qaclip", "ablation_use_vs", "ablation_use_ocr"):
         setattr(model.config, name, getattr(model_args, name))
     if training_args.should_log:
         print_parameter_summary(model)

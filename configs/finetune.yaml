@@ -1,6 +1,8 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
 ablation_use_qaclip: true
+use_visual_search: false # Temporarily bypass the entire Visual Search/ConvNeXt branch.
+ablation_use_vs: true # When enabled: true uses ROI crops; false uses the full image.
 ablation_use_ocr: true
 
 output_dir: "./output/finetune"

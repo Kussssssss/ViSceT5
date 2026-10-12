@@ -2,8 +2,10 @@
 
 Luồng hiện hành huấn luyện trực tiếp VQA bằng cross-entropy trên câu trả lời.
 Các mục tiêu ITM, MLM, TWC và việc sinh OCR related/augmented đã được loại bỏ.
-Các trọng số backbone ViT5 và CLIP dùng để khởi tạo mô hình. Nhánh Visual Search
-và ConvNeXtV2 đã được loại bỏ khỏi kiến trúc.
+Các trọng số backbone ViT5, CLIP và ConvNeXtV2 vẫn dùng để khởi tạo mô hình.
+Visual Search được giữ trong source; `use_visual_search: false` tạm ngắt toàn bộ
+nhánh, không khởi tạo ConvNeXt và không ghép crop tokens. Đặt lại `true` trước
+khi khởi tạo model để bật lại. YAML hiện chọn `false` cho thí nghiệm này.
 
 ## Luồng dữ liệu
 
@@ -41,7 +43,8 @@ không có câu trả lời không tạo `labels`.
 3. `generate()` sinh câu trả lời; có thể nhận memory đã encode.
 
 Câu hỏi được encode bởi ViT5 để làm instruction cho QACLIP. CLIP trả về patch
-tokens; model tổng không yêu cầu xuất attention maps và không trích xuất ROI/CNN.
+tokens và attention từ patch sang câu hỏi. Visual Search dùng attention chọn ROI,
+crop qua grid sampling rồi trích xuất ConvNeXtV2 features.
 
 Chi tiết đối chiếu QAClip với repo QA-ViT gốc, khởi tạo adapter và các điều chỉnh
 được ghi tại [QA_VIT_REFACTOR.md](QA_VIT_REFACTOR.md).
@@ -51,19 +54,23 @@ gắn box, det/rec và character features với từng subword. SemanticOCREmbed
 hợp nhất các feature đó. Mọi nhánh đưa vào ViT5 phải có cùng chiều d_model.
 
 Encoder ViT5 nhận chuỗi ghép: question embeddings, CLIP patch tokens, OCR features,
-một token trung bình patch. Attention mask được ghép
+ConvNeXt crop tokens và một token trung bình patch. Attention mask được ghép
 cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
+Khi tạm ngắt Visual Search, khối crop tokens rỗng và model tổng không yêu cầu
+xuất CLIP attention maps. API `encode()` vẫn giữ tuple ba phần như trước.
 
 ## Module và ablation
 
 | File | Vai trò |
 | --- | --- |
 | `models/modules/qa_clip.py` | CLIP với instruction ở nửa sau encoder; giữ cơ chế freeze CLIP gốc |
+| `models/modules/visual_search.py` | Chọn ROI, trích xuất ConvNeXtV2, ánh xạ box/heatmap về ảnh gốc |
 | `models/modules/ocr_consformer.py` | OCR encoder với GroupAttention |
 | `models/modules/ocr_spatial.py` | Semantic OCR embedding và spatial utilities |
 | `models/modules/ocr_encoder_feature.py` | Đọc OCR features và chuẩn hóa box |
 
-Tắt QACLIP nghĩa là bỏ instruction câu hỏi, vẫn chạy CLIP. Tắt OCR module nghĩa là dùng encoder lite
+Tắt QACLIP nghĩa là bỏ instruction câu hỏi, vẫn chạy CLIP. Tắt Visual Search
+nghĩa là chạy ConvNeXtV2 trên toàn ảnh. Tắt OCR module nghĩa là dùng encoder lite
 cho text/character/box, vẫn nhận thông tin OCR. Đây là các baseline ablation
 của repository, cần giữ ý nghĩa này khi thiết kế thí nghiệm tiếp theo.
 
@@ -79,10 +86,11 @@ và tạo collator. `training/finetune.py` cấu hình Trainer và lưu kết qu
 Checkpoint dùng định dạng Hugging Face thông thường, gồm config, model weights
 (có hỗ trợ sharding), tokenizer và image processor. Warm-start nạp model weights;
 resume từ `checkpoint-*` còn khôi phục optimizer, scheduler và Trainer state.
-Checkpoint có Visual Search có thể dùng để warm-start những trọng số còn lại;
-không resume optimizer của kiến trúc cũ vì danh sách parameter đã thay đổi.
 Các checkpoint cũ chứa head hoặc metadata của những mục tiêu đã bỏ không phải
 checkpoint chuẩn của luồng mới; các tensor batch cũ cũng đã đổi sang API OCR ở trên.
+`use_visual_search` được lưu trong config checkpoint và có thể override lúc
+khởi tạo training. Chuyển trạng thái nhánh thì warm-start model weights với
+optimizer mới, không resume optimizer có danh sách parameter khác.
 
 `run_pipeline.py`, các shell launcher và notebook Colab chỉ gọi luồng VQA.
 Các tiện ích chuẩn bị dữ liệu/vocabulary được giữ để phục vụ nghiên cứu tiếp.
@@ -90,7 +98,7 @@ Các tiện ích chuẩn bị dữ liệu/vocabulary được giữ để phục
 ## Phạm vi kiểm chứng
 
 `tests/test_vqa_pipeline.py` kiểm tra bằng ảnh/OCR tổng hợp và backbone ngẫu nhiên
-kích thước nhỏ: alignment, padding, OCR rỗng, dữ liệu không nhãn, 4 tổ hợp ablation,
+kích thước nhỏ: alignment, padding, OCR rỗng, dữ liệu không nhãn, 8 tổ hợp ablation,
 loss/backward, cached generation, checkpoint sharding và train/evaluate/resume.
 Việc này xác minh luồng mã; chất lượng nghiên cứu và tài nguyên GPU cần được đo
 qua thí nghiệm trên dataset và backbone thực tế.
