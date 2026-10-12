@@ -15,8 +15,8 @@ from transformers.models.t5.modeling_t5 import T5LayerNorm
 from configs.model_config import OpenViVQAConfig
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding
+from models.modules.projectors import ModalityProjector
 from models.modules.qa_clip import QACLIPEncoder
-from models.modules.visual_search import VisualSearch
 
 
 class OpenViVQAModel(PreTrainedModel):
@@ -45,7 +45,11 @@ class OpenViVQAModel(PreTrainedModel):
             freeze_clip=True,
             attn_implementation="eager",
         )
-        image_size = config.vs_target_size or self.qa_clip.config.image_size
+        self.image_projector = ModalityProjector(
+            self.qa_clip.config.hidden_size, self.d_model
+        )
+        self.ocr_projector = ModalityProjector(self.d_model, self.d_model)
+        image_size = config.image_size or self.qa_clip.config.image_size
         self.image_processor = CLIPImageProcessor(
             do_resize=config.do_resize,
             do_center_crop=config.do_center_crop,
@@ -53,11 +57,6 @@ class OpenViVQAModel(PreTrainedModel):
             crop_size={"width": image_size, "height": image_size},
             image_mean=config.image_mean,
             image_std=config.image_std,
-        )
-        self.visual_search = (
-            VisualSearch(self.image_processor, config, vit_dim=self.d_model)
-            if config.use_visual_search
-            else None
         )
         heads = self.vit5.config.num_heads
         self.ocr_encoder = OCREncoder(
@@ -108,6 +107,11 @@ class OpenViVQAModel(PreTrainedModel):
         )
         self.post_init()
 
+    def _init_weights(self, module):
+        # Pretrained ViT5/CLIP retain their own initialization and loaded weights.
+        if isinstance(module, ModalityProjector):
+            module.reset_parameters()
+
     @property
     def target_dtype(self):
         return self.get_input_embeddings().weight.dtype
@@ -149,25 +153,14 @@ class OpenViVQAModel(PreTrainedModel):
             pixel_values=pixel_values,
             text_emb=instruction,
             text_mask=instruction_mask,
-            output_attentions=self.visual_search is not None,
+            output_attentions=False,
             return_dict=True,
         )
-        visual_length = outputs.last_hidden_state.shape[1]  # CLS + image patches
         tokens = outputs.last_hidden_state[:, 1:].to(self.target_dtype)
-        scores = None
-        if self.visual_search is not None:
-            attention = outputs.attentions[-1]
-            if instruction.shape[1]:
-                # QAClip keys are [visual, question]; skip CLS query and visual keys.
-                scores = attention[
-                    :, :, 1:, visual_length : visual_length + instruction.shape[1]
-                ].mean(dim=(1, 3))
-            else:
-                scores = attention[:, :, 0, 1:visual_length].mean(dim=1)
         mask = torch.ones(
             batch_size, tokens.shape[1], dtype=torch.long, device=tokens.device
         )
-        return tokens, mask, scores
+        return tokens, mask
 
     def _char_features(self, ids, mask):
         positions = torch.arange(ids.shape[-1], device=ids.device)
@@ -233,8 +226,6 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_word_mask,
         attention_mask=None,
         ocr_attention_mask=None,
-        pil_images=None,
-        return_visual_search_debug=False,
     ):
         """Encode once; the same fused memory serves decoder loss and generation."""
         device = input_ids.device
@@ -248,35 +239,9 @@ class OpenViVQAModel(PreTrainedModel):
             attention_mask=attention_mask,
             return_dict=True,
         ).last_hidden_state
-        image_tokens, image_mask, patch_scores = self._encode_image(
+        image_tokens, image_mask = self._encode_image(
             pixel_values, question, attention_mask
         )
-        if self.visual_search is None:
-            # Keep the branch available in source, but contribute no CNN tokens.
-            crop_tokens = image_tokens[:, :0]
-            crop_mask = image_mask[:, :0]
-            visual = {}
-        elif self.config.ablation_use_vs:
-            visual = self.visual_search(
-                img_tokens=image_tokens,
-                patch_scores=patch_scores,
-                pixel_values=pixel_values,
-                pil_images=pil_images,
-                return_debug=return_visual_search_debug,
-            )
-            crop_tokens, crop_mask = visual["crop_tokens"], visual["crop_mask"]
-        else:
-            size = float(self.visual_search.image_size.item())
-            boxes = pixel_values.new_tensor([[0, 0, size, size]]).expand(
-                input_ids.shape[0], -1
-            )
-            crop_tokens, _ = self.visual_search._extract_roi_features(
-                pixel_values, boxes
-            )
-            crop_mask = torch.ones(
-                crop_tokens.shape[:2], device=device, dtype=torch.long
-            )
-            visual = {}
         ocr_features, ocr_mask = self._encode_ocr(
             ocr_info,
             ocr_input_ids,
@@ -286,24 +251,25 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_char_mask,
             ocr_word_mask,
         )
+        image_tokens = self.image_projector(image_tokens).to(self.target_dtype)
+        ocr_features = self.ocr_projector(ocr_features).to(self.target_dtype)
+        ocr_features = ocr_features * ocr_mask.unsqueeze(-1).to(ocr_features.dtype)
         summary = image_tokens.mean(dim=1, keepdim=True)
         sequences = [
             text_embeddings,
             image_tokens,
             ocr_features,
-            crop_tokens.to(self.target_dtype),
             summary,
         ]
         if any(sequence.shape[-1] != self.d_model for sequence in sequences):
             raise ValueError(
-                "All vision/OCR backbone output dimensions must match ViT5 d_model."
+                "All projected vision/OCR features must match ViT5 d_model."
             )
         fused_mask = torch.cat(
             [
                 attention_mask,
                 image_mask,
                 ocr_mask,
-                crop_mask,
                 torch.ones(input_ids.shape[0], 1, device=device, dtype=torch.long),
             ],
             dim=1,
@@ -313,7 +279,7 @@ class OpenViVQAModel(PreTrainedModel):
             attention_mask=fused_mask,
             return_dict=True,
         )
-        return encoded, fused_mask, visual
+        return encoded, fused_mask
 
     def forward(
         self,
@@ -327,13 +293,11 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_word_mask,
         attention_mask=None,
         ocr_attention_mask=None,
-        pil_images=None,
         labels=None,
         decoder_input_ids=None,
         decoder_attention_mask=None,
-        return_visual_search_debug=False,
     ):
-        encoded, mask, visual = self.encode(
+        encoded, mask = self.encode(
             input_ids,
             pixel_values,
             ocr_info,
@@ -344,8 +308,6 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_word_mask,
             attention_mask,
             ocr_attention_mask,
-            pil_images,
-            return_visual_search_debug,
         )
         result = {"encoder_outputs": encoded, "attention_mask": mask}
         if labels is not None or decoder_input_ids is not None:
@@ -359,8 +321,6 @@ class OpenViVQAModel(PreTrainedModel):
                 return_dict=True,
             )
             result.update(loss=decoded.loss, logits=decoded.logits)
-        if return_visual_search_debug:
-            result["vs_debug"] = visual
         return result
 
     @torch.no_grad()
@@ -376,13 +336,12 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_word_mask=None,
         attention_mask=None,
         ocr_attention_mask=None,
-        pil_images=None,
         encoder_outputs=None,
         generation_config=None,
         **generation_kwargs,
     ):
         if encoder_outputs is None:
-            encoder_outputs, attention_mask, _ = self.encode(
+            encoder_outputs, attention_mask = self.encode(
                 input_ids,
                 pixel_values,
                 ocr_info,
@@ -393,7 +352,6 @@ class OpenViVQAModel(PreTrainedModel):
                 ocr_word_mask,
                 attention_mask,
                 ocr_attention_mask,
-                pil_images,
             )
         return self.vit5.generate(
             encoder_outputs=encoder_outputs,

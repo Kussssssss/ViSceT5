@@ -3,4 +3,20 @@ from models.modules.ocr_encoder_feature import Vision_Encode_Ocr_Feature
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SpatialCirclePosition, SemanticOCREmbedding
 from models.modules.qa_clip import QACLIPEncoder
-from models.modules.visual_search import VisualSearch
+from models.modules.projectors import ModalityProjector
+
+__all__ = [
+    "LayerNorm",
+    "FC",
+    "MLP",
+    "AoA",
+    "SAoA",
+    "GAoA",
+    "SGAoA",
+    "Vision_Encode_Ocr_Feature",
+    "OCREncoder",
+    "SpatialCirclePosition",
+    "SemanticOCREmbedding",
+    "QACLIPEncoder",
+    "ModalityProjector",
+]

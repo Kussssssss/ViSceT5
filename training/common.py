@@ -75,26 +75,16 @@ def load_dataframes(dataset_name, data_dir):
     return {split: pd.read_csv(path) for split, path in paths.items()}
 
 
-def load_model_and_tokenizer(checkpoint=None, *, use_visual_search=None):
+def load_model_and_tokenizer(checkpoint=None):
     if checkpoint:
         config = OpenViVQAConfig.from_pretrained(checkpoint)
-        if use_visual_search is not None:
-            config.use_visual_search = use_visual_search
         model = OpenViVQAModel.from_pretrained(checkpoint, config=config)
         tokenizer = AutoTokenizer.from_pretrained(checkpoint)
         processor_dir = Path(checkpoint) / "image_processor"
         if processor_dir.is_dir():
             model.image_processor = model.image_processor.from_pretrained(processor_dir)
-            if model.visual_search is not None:
-                model.visual_search.vit_processor = model.image_processor
     else:
-        config = OpenViVQAConfig(
-            **(
-                {"use_visual_search": use_visual_search}
-                if use_visual_search is not None
-                else {}
-            )
-        )
+        config = OpenViVQAConfig()
         tokenizer = AutoTokenizer.from_pretrained(config.vit5_name)
         model = OpenViVQAModel(config)
     model.sync_tokenizer_ids(tokenizer)

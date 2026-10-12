@@ -27,10 +27,7 @@ class OpenViVQAConfig(PretrainedConfig):
         self,
         vit5_name: str = "VietAI/vit5-base",
         clip_vision_name: str = "openai/clip-vit-base-patch16",
-        vs_backbone: str = "facebook/convnextv2-tiny-22k-224",
-        use_visual_search: bool = True,
         ablation_use_qaclip: bool = True,
-        ablation_use_vs: bool = True,
         ablation_use_ocr: bool = True,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -52,31 +49,38 @@ class OpenViVQAConfig(PretrainedConfig):
         char_num: int = DEFAULT_CHAR_NUM,
         generation_max_new_tokens: int = 56,
         generation_num_beams: int = 4,
-        vs_percentile: int = 99,
-        vs_min_area: int = 1,
-        vs_dilate_half_patch: bool = True,
-        vs_patch_size: int = 16,
-        vs_max_cov: float = 1.0,
-        vs_margin: int = 0,
         image_mean: Optional[List[float]] = None,
         image_std: Optional[List[float]] = None,
         do_resize: bool = True,
         do_center_crop: bool = False,
-        vs_target_size: Optional[int] = 224,
+        image_size: Optional[int] = None,
         ocrseq_margin_frac: float = 0.14,
         ocrseq_pool_size: int = 3,
         ocrseq_use_spatial: bool = True,
         ocrseq_dropout: float = 0.1,
         **kwargs,
     ):
+        # Migrate image preprocessing from checkpoints that included Visual Search.
+        legacy_image_size = kwargs.pop("vs_target_size", None)
+        if image_size is None:
+            image_size = legacy_image_size
+        for name in (
+            "vs_backbone",
+            "use_visual_search",
+            "ablation_use_vs",
+            "vs_percentile",
+            "vs_min_area",
+            "vs_dilate_half_patch",
+            "vs_patch_size",
+            "vs_max_cov",
+            "vs_margin",
+        ):
+            kwargs.pop(name, None)
         super().__init__(**kwargs)
 
         self.vit5_name = vit5_name
         self.clip_vision_name = clip_vision_name
-        self.vs_backbone = vs_backbone
-        self.use_visual_search = bool(use_visual_search)
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
-        self.ablation_use_vs = bool(ablation_use_vs)
         self.ablation_use_ocr = bool(ablation_use_ocr)
 
         self.qa_clip_d_text = qa_clip_d_text
@@ -105,13 +109,6 @@ class OpenViVQAConfig(PretrainedConfig):
         self.generation_max_new_tokens = int(generation_max_new_tokens)
         self.generation_num_beams = int(generation_num_beams)
 
-        self.vs_percentile = int(vs_percentile)
-        self.vs_min_area = int(vs_min_area)
-        self.vs_dilate_half_patch = bool(vs_dilate_half_patch)
-        self.vs_patch_size = int(vs_patch_size)
-        self.vs_max_cov = float(vs_max_cov)
-        self.vs_margin = int(vs_margin)
-
         self.image_mean = list(
             image_mean
             if image_mean is not None
@@ -123,7 +120,7 @@ class OpenViVQAConfig(PretrainedConfig):
 
         self.do_resize = bool(do_resize)
         self.do_center_crop = bool(do_center_crop)
-        self.vs_target_size = None if vs_target_size is None else int(vs_target_size)
+        self.image_size = None if image_size is None else int(image_size)
 
         self.ocrseq_margin_frac = float(ocrseq_margin_frac)
         self.ocrseq_pool_size = int(ocrseq_pool_size)
