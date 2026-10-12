@@ -1,10 +1,9 @@
 # Đối chiếu toàn model khi VRAM giảm từ 32 GB xuống 12 GB
 
-> Báo cáo lịch sử cho kiến trúc có Visual Search. Kiến trúc hiện tại đã gỡ toàn bộ
-> ConvNeXt/ROI/crop tokens, giảm 27,866,496 parameter. Với backbone mặc định:
-> total = 345,432,198; frozen = 85,799,424; learnable = 259,632,774.
-> Chuỗi encoder hiện tại dài `229 + L_ocr`. Công cụ profile đã được cập nhật cho
-> kiến trúc mới; để tái hiện phép đo lịch sử dưới đây, dùng script ở commit `722f9fe`.
+> Báo cáo dưới đây dùng kiến trúc có Visual Search. Source của nhánh được giữ
+> nguyên; YAML hiện chọn `use_visual_search: false` để tạm bỏ nó khi thí nghiệm.
+> Khi tắt: total = 345,432,198; frozen = 85,799,424; learnable = 259,632,774.
+> Để đối chiếu lại baseline lịch sử, bật nhánh và dùng cùng batch size 4.
 
 Baseline được kiểm tra là `d642998`, ngay trước commit refactor QAClip `b5f62ea`.
 Bản đối chiếu là `aaa8a75`, đã chuyển attention sang `[visual, question]`.
@@ -102,6 +101,7 @@ Chạy bản hiện tại trong một process mới:
 
 ```bash
 python scripts/profile_training_memory.py configs/finetune.yaml \
+  --use_visual_search true --per_device_train_batch_size 4 \
   --audit_batch_file /content/vqa-audit-batch.pt \
   --output_dir /content/vqa-memory-current
 ```
@@ -115,7 +115,7 @@ Chỉ đọc batch `.pt` do chính phép đo này tạo.
 
 ```bash
 git worktree add --detach /content/ViSceT5-before d642998
-cp scripts/profile_training_memory.py /content/ViSceT5-before/scripts/
+git show 722f9fe:scripts/profile_training_memory.py > /content/ViSceT5-before/scripts/profile_training_memory.py
 cd /content/ViSceT5-before
 python scripts/profile_training_memory.py configs/finetune.yaml \
   --audit_batch_file /content/vqa-audit-batch.pt \

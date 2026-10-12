@@ -1,4 +1,4 @@
-"""Inspect VQA batches, generated answers and source images."""
+"""Inspect VQA batches, generated answers and visual-search crops."""
 
 import numpy as np
 import torch
@@ -41,7 +41,7 @@ def inspect_batch(batch, tokenizer):
 
 @torch.inference_mode()
 def visualize_samples(model, dataset, collator, tokenizer, num_samples=5, seed=42):
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageDraw
     import matplotlib.pyplot as plt
 
     device = next(model.parameters()).device
@@ -61,7 +61,7 @@ def visualize_samples(model, dataset, collator, tokenizer, num_samples=5, seed=4
                 for key, value in batch.items()
                 if key != "labels"
             }
-            output = model(**batch)
+            output = model(**batch, return_visual_search_debug=True)
             ids = model.generate(
                 encoder_outputs=output["encoder_outputs"],
                 attention_mask=output["attention_mask"],
@@ -71,12 +71,23 @@ def visualize_samples(model, dataset, collator, tokenizer, num_samples=5, seed=4
             print(
                 "Prediction:", tokenizer.batch_decode(ids, skip_special_tokens=True)[0]
             )
-            with Image.open(sample["image_path"]) as source:
-                image = ImageOps.exif_transpose(source).convert("RGB")
-            figure, axis = plt.subplots(figsize=(6, 6))
-            axis.imshow(image)
-            axis.set_title("Image")
-            axis.axis("off")
+            visual = output.get("vs_debug", {})
+            if "attn_grids" not in visual:
+                continue
+            image = batch["pil_images"][0]
+            heat = model.visual_search._heat_on_original(image, visual["attn_grids"][0])
+            overlay = Image.blend(image, heat, alpha=0.5)
+            box = model.visual_search._map_boxes_to_original(
+                visual["boxes_224"], [image]
+            )[0]
+            ImageDraw.Draw(overlay).rectangle(box, outline="lime", width=3)
+            figure, axes = plt.subplots(1, 2, figsize=(12, 6))
+            for axis, picture, title in zip(
+                axes, (image, overlay), ("Image", "Attention + crop")
+            ):
+                axis.imshow(picture)
+                axis.set_title(title)
+                axis.axis("off")
             figure.tight_layout()
             plt.show()
             plt.close(figure)

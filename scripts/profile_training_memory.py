@@ -141,6 +141,8 @@ class MemoryTrace:
                 output = output.last_hidden_state
             elif name == "ocr_encoder":
                 output = output[0]
+            elif name == "visual_search":
+                output = output["crop_tokens"]
             self.shapes.setdefault(name, []).append(tensor_metadata(output))
 
         return hook
@@ -206,14 +208,15 @@ def main(args_list=None):
             "Audit fresh optimizer states; use model_name_or_path to load model weights."
         )
     set_seed(train_args.seed)
-    model, tokenizer = load_model_and_tokenizer(model_args.model_name_or_path)
-    for name in ("ablation_use_qaclip", "ablation_use_ocr"):
+    model, tokenizer = load_model_and_tokenizer(
+        model_args.model_name_or_path, use_visual_search=model_args.use_visual_search
+    )
+    for name in ("ablation_use_qaclip", "ablation_use_vs", "ablation_use_ocr"):
         setattr(model.config, name, getattr(model_args, name))
     batch_file = Path(audit_args.audit_batch_file)
     if batch_file.is_file():
-        # This is the locally generated audit batch.
+        # This is the locally generated audit batch, including PIL images.
         batch = torch.load(batch_file, map_location="cpu", weights_only=False)
-        batch.pop("pil_images", None)  # Older audit batches included ROI debug input.
     else:
         frames = load_dataframes(data_args.dataset_name, data_args.data_dir)
         dataset = ViT5VQADataset(frames["train"])
@@ -274,6 +277,9 @@ def main(args_list=None):
         "backbone_configs": {
             "vit5": model.vit5.config.to_dict(),
             "qa_clip": model.qa_clip.config.to_dict(),
+            "convnext": model.visual_search.cnn.config.to_dict()
+            if model.visual_search is not None
+            else None,
         },
         "source_sha256": {
             name: hashlib.sha256(
@@ -284,6 +290,7 @@ def main(args_list=None):
                 "models/modules/qa_clip.py",
                 "models/modules/ocr_consformer.py",
                 "models/modules/ocr_spatial.py",
+                "models/modules/visual_search.py",
                 "data/collator.py",
                 "training/trainer.py",
             )
@@ -308,9 +315,11 @@ def main(args_list=None):
             "vit5.encoder",
             "vit5.decoder",
             "qa_clip",
+            "visual_search",
             "ocr_encoder",
             "semantic_ocr_embedding",
         )
+        if name != "visual_search" or model.visual_search is not None
     ]
     trace.record("model_loaded")
     try:
