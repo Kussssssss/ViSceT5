@@ -2,8 +2,7 @@
 
 > Báo cáo lịch sử cho kiến trúc có Visual Search. Kiến trúc hiện tại đã gỡ toàn bộ
 > ConvNeXt/ROI/crop tokens, giảm 27,866,496 parameter. Với backbone mặc định:
-> Hai Linear projector ảnh/OCR thêm 1,181,184 parameter trainable. Kiến trúc mới:
-> total = 346,613,382; frozen = 85,799,424; learnable = 260,813,958.
+> total = 345,432,198; frozen = 85,799,424; learnable = 259,632,774.
 > Chuỗi encoder hiện tại dài `229 + L_ocr`. Công cụ profile đã được cập nhật cho
 > kiến trúc mới; để tái hiện phép đo lịch sử dưới đây, dùng script ở commit `722f9fe`.
 

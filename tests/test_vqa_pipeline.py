@@ -83,9 +83,6 @@ def test_memory_audit_uses_same_batch_and_real_optimizer(
     assert report["groups"]["vit5"]["with_gradient"] > 0
     assert report["groups"]["ocr_encoder"]["with_gradient"] > 0
     assert report["groups"]["qa_clip"]["with_gradient"] > 0
-    for name in ("image_projector", "ocr_projector"):
-        assert report["groups"][name]["with_gradient"] > 0
-        assert report["groups"][name]["optimizer_state_bytes"] > 0
     assert "visual_search" not in report["groups"]
     missing = [
         n
@@ -387,6 +384,8 @@ def test_all_ablations_forward_backward_generate(
     gradients = [p.grad for p in model.parameters() if p.grad is not None]
     assert gradients and all(torch.isfinite(grad).all() for grad in gradients)
     assert not hasattr(model, "visual_search")
+    assert not hasattr(model, "image_projector")
+    assert not hasattr(model, "ocr_projector")
     assert not any(n.startswith("visual_search.") for n, _ in model.named_parameters())
     ocr_length = (
         batch["ocr_input_ids"].shape[1] if ocr else batch["ocr_word_mask"].shape[1]
@@ -394,14 +393,6 @@ def test_all_ablations_forward_backward_generate(
     expected_length = batch["input_ids"].shape[1] + 4 + ocr_length + 1
     assert outputs["attention_mask"].shape == (2, expected_length)
     assert model.get_input_embeddings().weight.grad is not None
-    for projector in (model.image_projector, model.ocr_projector):
-        assert all(
-            parameter.requires_grad
-            and parameter.grad is not None
-            and torch.isfinite(parameter.grad).all()
-            and parameter.grad.abs().sum() > 0
-            for parameter in projector.parameters()
-        )
     model.eval()
     inputs = {key: value for key, value in batch.items() if key != "labels"}
     with torch.no_grad():
@@ -451,29 +442,24 @@ def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
             "logits"
         ]
     torch.testing.assert_close(expected, actual, rtol=0, atol=0)
-    for name in ("image_projector", "ocr_projector"):
-        for key, value in getattr(model, name).state_dict().items():
-            torch.testing.assert_close(
-                value, getattr(restored, name).state_dict()[key], rtol=0, atol=0
-            )
     assert (
         restored.vit5.shared.weight.data_ptr()
         == restored.vit5.lm_head.weight.data_ptr()
     )
 
 
-def test_legacy_checkpoint_initializes_projectors_and_preserves_backbones(
+def test_legacy_checkpoint_drops_unused_branches_and_preserves_remaining_weights(
     model, tokenizer, samples, tmp_path
 ):
     model.eval()
-    state = {
-        name: value
-        for name, value in model.state_dict().items()
-        if not name.startswith(("image_projector.", "ocr_projector."))
-    }
+    state = model.state_dict()
     legacy_keys = {
         "visual_search.cnn.embeddings.patch_embeddings.weight": torch.randn(4, 3, 4, 4),
         "visual_search.cnn.layernorm.weight": torch.randn(32),
+        "image_projector.weight": torch.randn(32, 32),
+        "image_projector.bias": torch.randn(32),
+        "ocr_projector.weight": torch.randn(32, 32),
+        "ocr_projector.bias": torch.randn(32),
     }
     model.save_pretrained(
         tmp_path, safe_serialization=False, state_dict={**state, **legacy_keys}
@@ -488,26 +474,8 @@ def test_legacy_checkpoint_initializes_projectors_and_preserves_backbones(
         use_visual_search=True,
     )
     config_path.write_text(json.dumps(legacy_config), encoding="utf-8")
-    original_init = torch.nn.Linear.__init__
-
-    def poison_skipped_linear(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        if not hf_modeling_utils._init_weights:
-            with torch.no_grad():
-                self.weight.fill_(float("nan"))
-                if self.bias is not None:
-                    self.bias.fill_(float("nan"))
-
-    with patch.object(torch.nn.Linear, "__init__", poison_skipped_linear):
-        restored, info = OpenViVQAModel.from_pretrained(
-            tmp_path, output_loading_info=True
-        )
-    assert set(info["missing_keys"]) == {
-        f"{name}.{key}"
-        for name in ("image_projector", "ocr_projector")
-        for key in ("weight", "bias")
-    }
-    assert all(torch.isfinite(p).all() for p in restored.parameters())
+    restored, info = OpenViVQAModel.from_pretrained(tmp_path, output_loading_info=True)
+    assert not info["missing_keys"]
     assert set(info["unexpected_keys"]) == set(legacy_keys)
     assert restored.config.image_size == 32
     assert not any(
@@ -519,81 +487,9 @@ def test_legacy_checkpoint_initializes_projectors_and_preserves_backbones(
         torch.testing.assert_close(value, restored.state_dict()[name], rtol=0, atol=0)
     batch = build_collator(restored, tokenizer)(samples)
     with torch.no_grad():
-        assert torch.isfinite(restored(**batch)["logits"]).all()
-
-
-@pytest.mark.parametrize("ocr", [False, True])
-def test_projectors_bridge_different_dimensions_at_fusion(
-    model, tokenizer, samples, ocr
-):
-    clip = QACLIPEncoder(
-        CLIPVisionConfig(
-            hidden_size=48,
-            intermediate_size=96,
-            num_hidden_layers=2,
-            num_attention_heads=4,
-            image_size=32,
-            patch_size=16,
-        ),
-        instruction_dim=32,
-        freeze_clip=True,
-    )
-    with patch.object(QACLIPEncoder, "from_pretrained", return_value=clip):
-        model = OpenViVQAModel(model.config)
-    model.config.ablation_use_ocr = ocr
-    model.eval()
-    batch = build_collator(model, tokenizer)(samples)
-    captured = {}
-
-    def capture_image(module, inputs, output):
-        captured["image_input"] = inputs[0]
-        captured["image_output"] = output
-
-    def capture_ocr(module, inputs, output):
-        captured["ocr_input"] = inputs[0]
-        captured["ocr_output"] = output
-
-    def capture_fusion(module, args, kwargs):
-        if "inputs_embeds" in kwargs:
-            captured["fused"] = kwargs["inputs_embeds"]
-            captured["mask"] = kwargs["attention_mask"]
-
-    hooks = [
-        model.image_projector.register_forward_hook(capture_image),
-        model.ocr_projector.register_forward_hook(capture_ocr),
-        model.vit5.encoder.register_forward_pre_hook(capture_fusion, with_kwargs=True),
-    ]
-    try:
-        outputs = model(**batch)
-    finally:
-        for hook in hooks:
-            hook.remove()
-    question_length = batch["input_ids"].shape[1]
-    ocr_mask = batch["ocr_attention_mask"] if ocr else batch["ocr_word_mask"]
-    assert captured["image_input"].shape == (2, 4, 48)
-    assert captured["image_output"].shape == (2, 4, 32)
-    assert captured["ocr_input"].shape == (2, ocr_mask.shape[1], 32)
-    fused = captured["fused"]
-    torch.testing.assert_close(
-        fused[:, :question_length], model.get_input_embeddings()(batch["input_ids"])
-    )
-    torch.testing.assert_close(
-        fused[:, question_length : question_length + 4], captured["image_output"]
-    )
-    torch.testing.assert_close(
-        fused[:, question_length + 4 : -1],
-        captured["ocr_output"] * ocr_mask.unsqueeze(-1),
-    )
-    torch.testing.assert_close(
-        fused[:, -1:], captured["image_output"].mean(1, keepdim=True)
-    )
-    torch.testing.assert_close(captured["mask"][:, question_length + 4 : -1], ocr_mask)
-    assert model.image_projector.weight is not model.ocr_projector.weight
-    assert "pil_images" not in batch
-    assert torch.isfinite(outputs["loss"])
-    outputs["loss"].backward()
-    assert model.image_projector.weight.grad.abs().sum() > 0
-    assert model.ocr_projector.weight.grad.abs().sum() > 0
+        torch.testing.assert_close(
+            model(**batch)["logits"], restored(**batch)["logits"], rtol=0, atol=0
+        )
 
 
 def test_image_size_overrides_legacy_visual_search_size():

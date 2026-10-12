@@ -284,7 +284,6 @@ def main(args_list=None):
                 "models/modules/qa_clip.py",
                 "models/modules/ocr_consformer.py",
                 "models/modules/ocr_spatial.py",
-                "models/modules/projectors.py",
                 "data/collator.py",
                 "training/trainer.py",
             )
@@ -309,8 +308,6 @@ def main(args_list=None):
             "vit5.encoder",
             "vit5.decoder",
             "qa_clip",
-            "image_projector",
-            "ocr_projector",
             "ocr_encoder",
             "semantic_ocr_embedding",
         )

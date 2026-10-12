@@ -5,25 +5,6 @@
 > Các đoạn nói về Visual Search và kiểm chứng VRAM bên dưới mô tả phiên bản trước
 > khi bỏ nhánh này; xem [RESEARCH_CODE_MAP.md](RESEARCH_CODE_MAP.md) cho luồng hiện tại.
 
-## Projector trước encoder ViT5
-
-Mục 3.1 của [paper QA-ViT](https://arxiv.org/pdf/2402.05472) đặt projection module
-sau visual encoder, trước concat với text embeddings. Repo gốc dùng
-[`translation_mlp`](https://github.com/amazon-science/QA-ViT/blob/96faee6ef8bb0157fe366d8315f175e8c4dbe6b8/models/VisualT5.py)
-hai Linear với ReLU giữa chúng (config `hidden_translation_layers: 2`).
-ViSceT5 giữ vị trí này nhưng chọn một Linear cho mỗi modality để giảm chi phí:
-`image_projector: CLIP hidden_size → ViT5 d_model`,
-`ocr_projector: ViT5 d_model → ViT5 d_model`. Nhánh OCR projector là mở rộng riêng;
-paper gốc không đưa OCR tokens vào model. Projector không dùng gate, residual hay
-norm, khởi tạo random mặc định PyTorch và được train. Summary token là trung bình
-của ảnh sau projection. Mapping OCR và padding mask vẫn giữ nguyên.
-
-Với CLIP/ViT5 cùng chiều 768, tổng hai projector là 1,181,184 parameter, bằng một
-nửa hai MLP hai lớp tương ứng (2,362,368). Sự tương đương về vị trí projection không
-có nghĩa hai cấu trúc có hiệu suất ngang nhau; điều đó cần kết quả trên dataset.
-
-## Đối chiếu QAClip với repo gốc
-
 Source gốc được clone vào `output/code_review/QA-ViT` (không đưa vào Git).
 Commit được đối chiếu: `96faee6ef8bb0157fe366d8315f175e8c4dbe6b8`.
 
