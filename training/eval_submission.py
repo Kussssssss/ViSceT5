@@ -24,6 +24,9 @@ Cách dùng:
         --out  output/eval_<dataset>_test.json
 
 Ghi chú OpenViVQA/VLSP: trên leaderboard Codalab, cột "F1" THỰC CHẤT là CIDEr.
+
+SỐ LIỆU ĐƯA VÀO BÀI: dùng training/benchmark_eval.py (đúng giao thức benchmark — bỏ dấu
+câu, F1 token/char, BLEU-avg, BERTScore mBERT). Script này chỉ để khớp val eval lúc train.
 """
 import os
 import sys
