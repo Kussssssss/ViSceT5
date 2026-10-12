@@ -1,5 +1,10 @@
 # QAClip đối chiếu với QA-ViT
 
+> Cập nhật kiến trúc: Visual Search/ConvNeXt đã được gỡ khỏi model. QAClip vẫn
+> hỗ trợ kiểm tra attention trực tiếp, nhưng model tổng dùng `output_attentions=False`.
+> Các đoạn nói về Visual Search và kiểm chứng VRAM bên dưới mô tả phiên bản trước
+> khi bỏ nhánh này; xem [RESEARCH_CODE_MAP.md](RESEARCH_CODE_MAP.md) cho luồng hiện tại.
+
 Source gốc được clone vào `output/code_review/QA-ViT` (không đưa vào Git).
 Commit được đối chiếu: `96faee6ef8bb0157fe366d8315f175e8c4dbe6b8`.
 

@@ -141,8 +141,6 @@ class MemoryTrace:
                 output = output.last_hidden_state
             elif name == "ocr_encoder":
                 output = output[0]
-            elif name == "visual_search":
-                output = output["crop_tokens"]
             self.shapes.setdefault(name, []).append(tensor_metadata(output))
 
         return hook
@@ -209,12 +207,13 @@ def main(args_list=None):
         )
     set_seed(train_args.seed)
     model, tokenizer = load_model_and_tokenizer(model_args.model_name_or_path)
-    for name in ("ablation_use_qaclip", "ablation_use_vs", "ablation_use_ocr"):
+    for name in ("ablation_use_qaclip", "ablation_use_ocr"):
         setattr(model.config, name, getattr(model_args, name))
     batch_file = Path(audit_args.audit_batch_file)
     if batch_file.is_file():
-        # This is the locally generated audit batch, including PIL images.
+        # This is the locally generated audit batch.
         batch = torch.load(batch_file, map_location="cpu", weights_only=False)
+        batch.pop("pil_images", None)  # Older audit batches included ROI debug input.
     else:
         frames = load_dataframes(data_args.dataset_name, data_args.data_dir)
         dataset = ViT5VQADataset(frames["train"])
@@ -275,7 +274,6 @@ def main(args_list=None):
         "backbone_configs": {
             "vit5": model.vit5.config.to_dict(),
             "qa_clip": model.qa_clip.config.to_dict(),
-            "convnext": model.visual_search.cnn.config.to_dict(),
         },
         "source_sha256": {
             name: hashlib.sha256(
@@ -286,7 +284,6 @@ def main(args_list=None):
                 "models/modules/qa_clip.py",
                 "models/modules/ocr_consformer.py",
                 "models/modules/ocr_spatial.py",
-                "models/modules/visual_search.py",
                 "data/collator.py",
                 "training/trainer.py",
             )
@@ -311,7 +308,6 @@ def main(args_list=None):
             "vit5.encoder",
             "vit5.decoder",
             "qa_clip",
-            "visual_search",
             "ocr_encoder",
             "semantic_ocr_embedding",
         )

@@ -5,8 +5,8 @@ Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 Upstream is licensed under Apache-2.0; see docs/QA_VIT_LICENSE.txt.
 
 Keep upstream parameter names for checkpoint compatibility. ViSceT5 additionally
-masks question padding, returns visual-query attention, and accumulates attention
-in FP32 for Visual Search and mixed precision training.
+masks question padding, supports visual-query attention inspection, and
+accumulates attention in FP32 for mixed precision training.
 """
 
 from functools import partial

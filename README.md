@@ -1,7 +1,7 @@
 # ViSceT5
 
 Vietnamese scene-text visual question answering with ViT5, question-conditioned CLIP,
-Visual Search (ConvNeXtV2 crops), and OCR Consformer features.
+and OCR Consformer features.
 
 The training pipeline learns answer generation directly from image/question/answer
 pairs. The loss is the decoder's cross-entropy over answer tokens (padding is ignored).
@@ -20,10 +20,14 @@ dataset when its CSV cache is unavailable. Data preparation scripts, OCR feature
 and vocabulary utilities are retained; the VQA collator does not require auxiliary
 dictionary files.
 
-With `model_name_or_path: null`, the model initializes its ViT5, CLIP, and ConvNeXtV2
+With `model_name_or_path: null`, the model initializes its ViT5 and CLIP
 backbones from their configured weights. Use `--model_name_or_path PATH` to start
 from a VQA checkpoint with a fresh optimizer. Use `--resume_from_checkpoint PATH`
 to resume a complete Trainer checkpoint with optimizer/scheduler state.
+
+Weights from older checkpoints with Visual Search can be loaded with
+`--model_name_or_path PATH`; the removed ConvNeXt weights are unused. Start a fresh
+optimizer after this architecture change instead of resuming the old optimizer state.
 
 Model checkpoints and the tokenizer are saved together in `output/finetune`;
 the image processor is saved in its `image_processor/` subdirectory.
@@ -38,12 +42,11 @@ unlabelled split can be used for generation; answer-based metrics require refere
 
 ## Research modules
 
-The three flags in `configs/finetune.yaml` select the existing ablation baselines:
+The two flags in `configs/finetune.yaml` select the existing ablation baselines:
 
 | Flag set to `false` | Result |
 | --- | --- |
 | `ablation_use_qaclip` | CLIP without question instruction |
-| `ablation_use_vs` | ConvNeXtV2 features from the full image |
 | `ablation_use_ocr` | Lightweight OCR text/character/box features |
 
 The collator filters and normalizes the original OCR entries while retaining the
@@ -56,6 +59,11 @@ unlabelled.
 `OpenViVQAModel.encode()` builds the fused encoder memory. `forward()` computes the
 answer loss, and `generate()` can reuse that memory. `VQATrainer` performs evaluation
 generation from the same encoder result and writes `train_metrics.jsonl`.
+
+The fused sequence is `[question embeddings, CLIP patches, OCR features, mean patch token]`.
+Visual Search, ConvNeXt, ROI crops and crop tokens have been removed.
+`encode()` returns `(encoder_outputs, attention_mask)`. Image preprocessing follows
+the CLIP backbone's image size, or the `image_size` override in the model config.
 
 ## Cloud runners
 
