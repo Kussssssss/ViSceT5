@@ -170,7 +170,6 @@ class ViT5VQADataCollator:
             "pixel_values": self.image_processor(images=images, return_tensors="pt")[
                 "pixel_values"
             ],
-            "pil_images": images,
             "ocr_info": info,
             "ocr_input_ids": ids,
             "ocr_attention_mask": (ids != self.pad_id).long(),

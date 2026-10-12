@@ -17,17 +17,8 @@ class ModelArguments:
         },
     )
     # Ablation Flags
-    use_visual_search: Optional[bool] = field(
-        default=None,
-        metadata={
-            "help": "Enable the entire Visual Search/ConvNeXt branch; unset preserves checkpoint config."
-        },
-    )
     ablation_use_qaclip: bool = field(
         default=True, metadata={"help": "Whether to use Late Fusion QACLIP"}
-    )
-    ablation_use_vs: bool = field(
-        default=True, metadata={"help": "Whether to use Visual Search (crop)"}
     )
     ablation_use_ocr: bool = field(
         default=True, metadata={"help": "Whether to use OCR Consformer"}

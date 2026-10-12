@@ -1,7 +1,7 @@
 # ViSceT5
 
 Vietnamese scene-text visual question answering with ViT5, question-conditioned CLIP,
-Visual Search (ConvNeXtV2 crops), and OCR Consformer features.
+and OCR Consformer features.
 
 The training pipeline learns answer generation directly from image/question/answer
 pairs. The loss is the decoder's cross-entropy over answer tokens (padding is ignored).
@@ -20,10 +20,15 @@ dataset when its CSV cache is unavailable. Data preparation scripts, OCR feature
 and vocabulary utilities are retained; the VQA collator does not require auxiliary
 dictionary files.
 
-With `model_name_or_path: null`, the model initializes its ViT5, CLIP, and ConvNeXtV2
+With `model_name_or_path: null`, the model initializes its ViT5 and CLIP
 backbones from their configured weights. Use `--model_name_or_path PATH` to start
 from a VQA checkpoint with a fresh optimizer. Use `--resume_from_checkpoint PATH`
 to resume a complete Trainer checkpoint with optimizer/scheduler state.
+
+Weights from older checkpoints with Visual Search can be loaded with
+`--model_name_or_path PATH`; the removed ConvNeXt weights are unused and missing
+image/OCR projectors are initialized randomly. Start a fresh
+optimizer after this architecture change instead of resuming the old optimizer state.
 
 Model checkpoints and the tokenizer are saved together in `output/finetune`;
 the image processor is saved in its `image_processor/` subdirectory.
@@ -38,24 +43,12 @@ unlabelled split can be used for generation; answer-based metrics require refere
 
 ## Research modules
 
-Visual Search is retained in source and can be temporarily disconnected with
-`use_visual_search: false` in `configs/finetune.yaml` (the current experiment).
-This skips ConvNeXt initialization, ROI extraction, attention-map export and crop
-tokens. Set `use_visual_search: true` before starting a new run to restore the branch.
-The setting is applied before loading model weights and saved in the checkpoint,
-so evaluation uses the same architecture. Use a fresh optimizer when switching
-between experiments, with `--model_name_or_path PATH` for a weight warm-start.
-
-The three flags in `configs/finetune.yaml` select the existing ablation baselines:
+The two flags in `configs/finetune.yaml` select the existing ablation baselines:
 
 | Flag set to `false` | Result |
 | --- | --- |
 | `ablation_use_qaclip` | CLIP without question instruction |
-| `ablation_use_vs` | ConvNeXtV2 features from the full image |
 | `ablation_use_ocr` | Lightweight OCR text/character/box features |
-
-`ablation_use_vs` only chooses ROI crops versus the full-image CNN baseline when
-`use_visual_search` is enabled; it does not disconnect the entire CNN branch.
 
 The collator filters and normalizes the original OCR entries while retaining the
 alignment between text, boxes, detection features, and recognition features.
@@ -67,6 +60,21 @@ unlabelled.
 `OpenViVQAModel.encode()` builds the fused encoder memory. `forward()` computes the
 answer loss, and `generate()` can reuse that memory. `VQATrainer` performs evaluation
 generation from the same encoder result and writes `train_metrics.jsonl`.
+
+Two independent trainable Linear projectors map CLIP patch features
+(`CLIP hidden_size → ViT5 d_model`) and fused OCR features (`d_model → d_model`)
+immediately before concatenation. They use PyTorch's random initialization,
+preserve token counts/OCR alignment, and work in both OCR ablation modes. The mean
+patch token is computed from projected image features. With both dimensions 768,
+the projectors add 1,181,184 parameters. This follows QA-ViT's projection placement;
+its original two-layer ReLU MLP is simplified to one Linear per modality here.
+
+The fused sequence is `[question embeddings, projected CLIP patches, projected OCR features, mean projected patch token]`.
+Visual Search, ConvNeXt, ROI crops and crop tokens have been removed.
+`models/modules/visual_search.py` is retained only as reference source and is not
+imported by the active model or module package.
+`encode()` returns `(encoder_outputs, attention_mask)`. Image preprocessing follows
+the CLIP backbone's image size, or the `image_size` override in the model config.
 
 ## Cloud runners
 
