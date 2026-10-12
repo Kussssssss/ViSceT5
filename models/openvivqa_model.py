@@ -15,7 +15,6 @@ from transformers.models.t5.modeling_t5 import T5LayerNorm
 from configs.model_config import OpenViVQAConfig
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding
-from models.modules.projectors import ModalityProjector
 from models.modules.qa_clip import QACLIPEncoder
 
 
@@ -45,10 +44,6 @@ class OpenViVQAModel(PreTrainedModel):
             freeze_clip=True,
             attn_implementation="eager",
         )
-        self.image_projector = ModalityProjector(
-            self.qa_clip.config.hidden_size, self.d_model
-        )
-        self.ocr_projector = ModalityProjector(self.d_model, self.d_model)
         image_size = config.image_size or self.qa_clip.config.image_size
         self.image_processor = CLIPImageProcessor(
             do_resize=config.do_resize,
@@ -106,11 +101,6 @@ class OpenViVQAModel(PreTrainedModel):
             do_sample=False,
         )
         self.post_init()
-
-    def _init_weights(self, module):
-        # Pretrained ViT5/CLIP retain their own initialization and loaded weights.
-        if isinstance(module, ModalityProjector):
-            module.reset_parameters()
 
     @property
     def target_dtype(self):
@@ -251,9 +241,6 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_char_mask,
             ocr_word_mask,
         )
-        image_tokens = self.image_projector(image_tokens).to(self.target_dtype)
-        ocr_features = self.ocr_projector(ocr_features).to(self.target_dtype)
-        ocr_features = ocr_features * ocr_mask.unsqueeze(-1).to(ocr_features.dtype)
         summary = image_tokens.mean(dim=1, keepdim=True)
         sequences = [
             text_embeddings,
@@ -263,7 +250,7 @@ class OpenViVQAModel(PreTrainedModel):
         ]
         if any(sequence.shape[-1] != self.d_model for sequence in sequences):
             raise ValueError(
-                "All projected vision/OCR features must match ViT5 d_model."
+                "All vision/OCR backbone output dimensions must match ViT5 d_model."
             )
         fused_mask = torch.cat(
             [

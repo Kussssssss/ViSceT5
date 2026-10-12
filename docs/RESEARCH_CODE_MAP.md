@@ -4,8 +4,8 @@ Luồng hiện hành huấn luyện trực tiếp VQA bằng cross-entropy trên
 Các mục tiêu ITM, MLM, TWC và việc sinh OCR related/augmented đã được loại bỏ.
 Các trọng số backbone ViT5 và CLIP dùng để khởi tạo mô hình. Nhánh Visual Search
 và ConvNeXtV2 đã được loại bỏ khỏi kiến trúc.
-`models/modules/visual_search.py` được giữ làm source tham khảo, không export/import
-trong luồng hiện hành; các cờ bật/tắt nhánh cũng đã bỏ.
+`models/modules/visual_search.py` vẫn được giữ làm source tham khảo, không import
+trong luồng hiện hành. Feature ảnh/OCR vào concat trực tiếp, không qua projector.
 
 ## Luồng dữ liệu
 
@@ -50,18 +50,10 @@ Chi tiết đối chiếu QAClip với repo QA-ViT gốc, khởi tạo adapter v
 
 OCR Consformer encode chuỗi subword qua GroupAttention. Mapping subword→entry
 gắn box, det/rec và character features với từng subword. SemanticOCREmbedding
-hợp nhất các feature đó. Mapping token-level OCR không thay đổi.
+hợp nhất các feature đó. Mọi nhánh đưa vào ViT5 phải có cùng chiều d_model.
 
-Ngay trước concat, `image_projector` là Linear từ chiều hidden CLIP sang ViT5
-d_model; `ocr_projector` là Linear độc lập từ d_model sang d_model, sau Semantic
-OCR hoặc OCR-lite. Cả hai khởi tạo random mặc định PyTorch, được train và lưu trong
-checkpoint. Đây là cầu nối học được giữa các không gian feature, kể cả khi cùng
-chiều 768. Chúng không pool/đổi thứ tự token; OCR padding được mask lại sau projection.
-Projector một lớp là lựa chọn nhẹ hơn MLP hai lớp ReLU của QA-ViT; nhánh OCR là
-phần mở rộng của ViSceT5. Không dùng trọng số pretrained ViT5 cho projector.
-
-Encoder ViT5 nhận chuỗi ghép: question embeddings, projected CLIP patch tokens,
-projected OCR features, một token trung bình của các projected patches. Attention mask được ghép
+Encoder ViT5 nhận chuỗi ghép: question embeddings, CLIP patch tokens, OCR features,
+một token trung bình patch. Attention mask được ghép
 cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 
 ## Module và ablation
@@ -72,7 +64,6 @@ cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 | `models/modules/ocr_consformer.py` | OCR encoder với GroupAttention |
 | `models/modules/ocr_spatial.py` | Semantic OCR embedding và spatial utilities |
 | `models/modules/ocr_encoder_feature.py` | Đọc OCR features và chuẩn hóa box |
-| `models/modules/projectors.py` | Hai Linear projector riêng cho ảnh/OCR trước encoder ViT5 |
 
 Tắt QACLIP nghĩa là bỏ instruction câu hỏi, vẫn chạy CLIP. Tắt OCR module nghĩa là dùng encoder lite
 cho text/character/box, vẫn nhận thông tin OCR. Đây là các baseline ablation
@@ -91,8 +82,7 @@ Checkpoint dùng định dạng Hugging Face thông thường, gồm config, mod
 (có hỗ trợ sharding), tokenizer và image processor. Warm-start nạp model weights;
 resume từ `checkpoint-*` còn khôi phục optimizer, scheduler và Trainer state.
 Checkpoint có Visual Search có thể dùng để warm-start những trọng số còn lại;
-hai projector mới sẽ được khởi tạo nếu checkpoint chưa có. Không resume optimizer
-của kiến trúc cũ vì danh sách parameter đã thay đổi.
+không resume optimizer của kiến trúc cũ vì danh sách parameter đã thay đổi.
 Các checkpoint cũ chứa head hoặc metadata của những mục tiêu đã bỏ không phải
 checkpoint chuẩn của luồng mới; các tensor batch cũ cũng đã đổi sang API OCR ở trên.
 

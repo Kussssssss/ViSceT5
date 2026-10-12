@@ -26,8 +26,7 @@ from a VQA checkpoint with a fresh optimizer. Use `--resume_from_checkpoint PATH
 to resume a complete Trainer checkpoint with optimizer/scheduler state.
 
 Weights from older checkpoints with Visual Search can be loaded with
-`--model_name_or_path PATH`; the removed ConvNeXt weights are unused and missing
-image/OCR projectors are initialized randomly. Start a fresh
+`--model_name_or_path PATH`; the removed ConvNeXt weights are unused. Start a fresh
 optimizer after this architecture change instead of resuming the old optimizer state.
 
 Model checkpoints and the tokenizer are saved together in `output/finetune`;
@@ -61,18 +60,12 @@ unlabelled.
 answer loss, and `generate()` can reuse that memory. `VQATrainer` performs evaluation
 generation from the same encoder result and writes `train_metrics.jsonl`.
 
-Two independent trainable Linear projectors map CLIP patch features
-(`CLIP hidden_size → ViT5 d_model`) and fused OCR features (`d_model → d_model`)
-immediately before concatenation. They use PyTorch's random initialization,
-preserve token counts/OCR alignment, and work in both OCR ablation modes. The mean
-patch token is computed from projected image features. With both dimensions 768,
-the projectors add 1,181,184 parameters. This follows QA-ViT's projection placement;
-its original two-layer ReLU MLP is simplified to one Linear per modality here.
-
-The fused sequence is `[question embeddings, projected CLIP patches, projected OCR features, mean projected patch token]`.
+The fused sequence is `[question embeddings, CLIP patches, OCR features, mean patch token]`.
 Visual Search, ConvNeXt, ROI crops and crop tokens have been removed.
 `models/modules/visual_search.py` is retained only as reference source and is not
-imported by the active model or module package.
+imported by the active model or module package. Image and OCR features enter the
+ViT5 encoder directly without modality projectors; their dimensions must match
+ViT5 `d_model`.
 `encode()` returns `(encoder_outputs, attention_mask)`. Image preprocessing follows
 the CLIP backbone's image size, or the `image_size` override in the model config.
 
