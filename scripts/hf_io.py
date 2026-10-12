@@ -36,12 +36,16 @@ def main():
     model_path = os.path.join(a.dir, "model.safetensors")
 
     if a.action == "download_best":
+        # predictions/* (file nộp + log + điểm của lần predict trước, nếu đã upload) rất nhẹ
+        # → luôn lấy về, để notebook bỏ qua predict khi chỉ cần chấm lại điểm.
         if os.path.exists(model_path):
             print(f"✅ Đã có model trong {a.dir} → không tải lại.")
+            snapshot_download(repo_id=a.repo, repo_type="model", local_dir=a.dir, token=token,
+                              allow_patterns=["predictions/*"])
             return
         print(f"⬇️ Tải model tốt nhất (thư mục gốc) từ {a.repo} → {a.dir}")
         snapshot_download(repo_id=a.repo, repo_type="model", local_dir=a.dir, token=token,
-                          allow_patterns=INFERENCE_FILES)
+                          allow_patterns=INFERENCE_FILES + ["predictions/*"])
         if not os.path.exists(model_path):
             sys.exit(f"❌ Repo {a.repo} không có model.safetensors ở thư mục gốc.")
         print(f"✅ {sorted(os.listdir(a.dir))}")
