@@ -33,11 +33,11 @@ save_total_limit: 2   # đĩa Kaggle ~20GB; mỗi checkpoint ~4.5GB. Giữ best+
                       # override bằng env SAVE_TOTAL_LIMIT nếu cần.
 
 # metric_for_best_model / greater_is_better được ĐẶT TỰ ĐỘNG theo dataset trong
-# training/finetune.py: ViTextVQA & ViOCRVQA → "em"; OpenViVQA → "cider" (cần java);
-# cả hai greater_is_better=true. Hai dòng dưới chỉ là mặc định dự phòng, sẽ bị ghi đè.
+# training/finetune.py: ViTextVQA & ViOCRVQA → "em_f1" (trung bình EM và F1 trên val);
+# OpenViVQA → "cider" (cần java). Không chọn theo loss.
 # Ghi đè thủ công bằng env METRIC_FOR_BEST_MODEL nếu cần.
-metric_for_best_model: "loss"
-greater_is_better: false
+metric_for_best_model: "em_f1"
+greater_is_better: true
 load_best_model_at_end: true
 remove_unused_columns: false
 predict_with_generate: true
