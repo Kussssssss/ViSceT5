@@ -132,6 +132,31 @@ def _safe_remove(p):
     except Exception:
         pass
 
+# Index tên-file -> đường dẫn đầy đủ, đệ quy toàn bộ cây thư mục (cache theo root).
+# Xử lý bộ dữ liệu tách ảnh/OCR thành NHIỀU thư mục con theo split (OpenViVQA:
+# images/{train,dev,test}-images/...), khi _find_leaf_dir chỉ trả về MỘT leaf.
+_FILE_INDEX_CACHE: Dict[str, Dict[str, str]] = {}
+
+def _file_index(root, pred):
+    if root in _FILE_INDEX_CACHE:
+        return _FILE_INDEX_CACHE[root]
+    idx = {}
+    try:
+        for cur, _dirs, files in os.walk(root):
+            for f in files:
+                if pred(f):
+                    idx.setdefault(f, os.path.join(cur, f))
+    except Exception:
+        pass
+    _FILE_INDEX_CACHE[root] = idx
+    return idx
+
+def _resolve_in_tree(image_dir, filename, pred):
+    """Tìm filename ở bất kỳ thư mục con nào dưới CÙNG cấp với image_dir (parent)."""
+    root = os.path.dirname(image_dir.rstrip("/\\")) or image_dir
+    return _file_index(root, pred).get(filename)
+
+
 def _default_vqa_mapper(
     data: Dict[str, Any],
     image_dir: str,
@@ -155,7 +180,13 @@ def _default_vqa_mapper(
     if isinstance(raw_anns, list):
         annotations_list = raw_anns
     elif isinstance(raw_anns, dict):
-        annotations_list = list(raw_anns.values())
+        # Một số bộ (OpenViVQA/VLSP) dùng KHÓA của dict làm question-id còn value
+        # KHÔNG có 'id' → list(values()) sẽ mất id submission. Giữ khóa làm 'id'.
+        annotations_list = []
+        for _k, _v in raw_anns.items():
+            if isinstance(_v, dict) and _v.get("id") is None:
+                _v = {**_v, "id": int(_k) if str(_k).isdigit() else _k}
+            annotations_list.append(_v)
 
     rows = []
     for ann in annotations_list:
@@ -187,6 +218,12 @@ def _default_vqa_mapper(
             answer = all_answers[0]
 
         img_path = os.path.join(image_dir, filename) if filename else None
+        # Fallback đa-thư-mục: ảnh không có ở leaf đã chọn → tìm trong toàn cây
+        # (vd train image nằm ở train-images/ còn leaf lại là test-images/).
+        if img_path and filename and not os.path.isfile(img_path):
+            _hit = _resolve_in_tree(image_dir, filename, _is_img)
+            if _hit:
+                img_path = _hit
 
         ocr_path = None
         if ocr_dir and filename:
@@ -219,9 +256,20 @@ def _default_vqa_mapper(
                  elif os.path.isfile(cand_npz_12):
                      ocr_path = cand_npz_12
 
+            # Fallback đa-thư-mục cho OCR (train-ocr/, dev-ocr/, ...): tìm theo tên
+            if ocr_path is None:
+                for _cand in (f"{stem}.npy", f"{stem}.npz",
+                              *(( f"{int(stem)}.npy", f"{int(stem)}.npz",
+                                  f"{int(stem):012d}.npy", f"{int(stem):012d}.npz")
+                                if stem.isdigit() else ())):
+                    _hit = _resolve_in_tree(ocr_dir, _cand, _is_ocr)
+                    if _hit:
+                        ocr_path = _hit; break
+
         rows.append({
             "dataset": None,
             "split": split_name,
+            "id": ann.get("id"),          # annotation/question id — submission ID (ID,Answer)
             "image_id": img_id,
             "image_filename": filename,
             "question": question,
@@ -284,6 +332,11 @@ class DatasetHubLoader:
         for split, conf in spec["splits"].items():
             id_ = conf.get("id")
             url = conf.get("url")
+            # Bỏ qua split không có nguồn (id/url rỗng) — vd test bị gỡ khi id sai/thiếu.
+            # Không raise, chỉ skip → build_df sẽ không có split đó (finetune chỉ cần train/val).
+            if not (id_ and str(id_).strip()) and not url:
+                print(f"ℹ️ [Hub] Bỏ qua split '{split}' (không có drive_id/url).")
+                continue
             out_p = os.path.join(out_dir, f"{dataset_name}_{split}.json")
             _maybe_download(id_, url, out_p)
             ann_out[split] = out_p
@@ -350,7 +403,13 @@ class DatasetHubLoader:
         mapper = spec["mapper_fn"]
         rows = []
         for split, json_path in ann.items():
-            data = _load_json(json_path)
+            # Bỏ qua split có JSON hỏng (vd file tải nhầm không phải JSON) thay vì
+            # crash cả build — split khác vẫn dùng được (finetune chỉ cần train/val).
+            try:
+                data = _load_json(json_path)
+            except Exception as e:
+                print(f"⚠️ [Hub] Bỏ qua split '{split}': đọc JSON lỗi ({type(e).__name__}: {e}).")
+                continue
             rows.extend(mapper(data, img_dir, split, ocr_dir))
         df = pd.DataFrame(rows)
         if "dataset" in df.columns:
