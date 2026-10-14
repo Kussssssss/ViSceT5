@@ -54,6 +54,12 @@ def compute_f1_em(preds: List[str], labels: List[str]):
     return float(np.mean(f1_scores)), float(np.mean(em_scores))
 
 
+def java_available():
+    import shutil
+
+    return shutil.which("java") is not None
+
+
 def build_compute_metrics(tokenizer_for_metrics):
     from pycocoevalcap.bleu.bleu import Bleu
     from pycocoevalcap.cider.cider import Cider
@@ -61,7 +67,11 @@ def build_compute_metrics(tokenizer_for_metrics):
 
     bleu_metric = Bleu()
     cider_metric = Cider()
-    ptb_tokenizer = PTBTokenizer()
+    # PTBTokenizer needs Java; without it (setup.sh may skip the install) report
+    # EM/F1 only instead of crashing every evaluation.
+    ptb_tokenizer = PTBTokenizer() if java_available() else None
+    if ptb_tokenizer is None:
+        print("[metrics] no 'java' on PATH -> BLEU/CIDEr disabled, EM/F1 only.")
 
     def compute_metrics(eval_pred):
         predictions, labels = eval_pred
@@ -97,6 +107,8 @@ def build_compute_metrics(tokenizer_for_metrics):
 
         # EM/F1 theo ViTextVQA
         f1, em = compute_f1_em(pred_texts, label_texts)
+        if ptb_tokenizer is None:
+            return {"em": float(em), "f1": float(f1), "em_f1": 0.5 * (float(em) + float(f1))}
 
         # Chuẩn hoá cho BLEU / CIDEr
         pred_texts_n = [_normalize_txt(x) for x in pred_texts]

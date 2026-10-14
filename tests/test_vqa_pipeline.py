@@ -716,7 +716,10 @@ def test_training_entrypoint_save_resume_and_evaluation(
     metrics = evaluate.main(
         ["--checkpoint", str(tmp_path), "--output_dir", str(tmp_path / "evaluate")]
     )
-    assert "validation_em" in metrics and "validation_cider" in metrics
+    assert "validation_em" in metrics and "validation_em_f1" in metrics
+    from training.metrics import java_available
+
+    assert ("validation_cider" in metrics) == java_available()
     assert all(np.isfinite(value) for value in metrics.values())
 
 
