@@ -18,11 +18,21 @@ class ModelArguments:
     )
     # Ablation Flags
     ablation_use_qaclip: bool = field(
-        default=True, metadata={"help": "Whether to use Late Fusion QACLIP"}
+        default=False, metadata={"help": "Feed the question into CLIP (QA-ViT). False = plain CLIP."}
     )
     ablation_use_ocr: bool = field(
-        default=True, metadata={"help": "Whether to use OCR Consformer"}
+        default=True, metadata={"help": "SceSpaVis OCR representation. False = text-only OCR baseline."}
     )
+    ablation_use_image: bool = field(
+        default=True, metadata={"help": "False = no image features at all (CLIP is not built)."}
+    )
+    ablation_use_ocr_aug: bool = field(
+        default=True, metadata={"help": "Append the corrected (related) OCR copy after the original."}
+    )
+    use_twc: bool = field(
+        default=False, metadata={"help": "Add the TWA token-word contrastive loss during training."}
+    )
+    twc_weight: float = field(default=1.0, metadata={"help": "Weight of the TWC loss."})
 
 
 @dataclass
@@ -39,6 +49,12 @@ class DataArguments:
         metadata={
             "help": "Local path where datasets are stored or will be downloaded."
         },
+    )
+    term_vocab_path: str = field(
+        default="configs/data/term_vocab.txt", metadata={"help": "Term list of the correction lexicon."}
+    )
+    viet_vocab_path: str = field(
+        default="configs/data/viet_vocab.txt", metadata={"help": "Vietnamese dictionary of the correction lexicon."}
     )
 
 

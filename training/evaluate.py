@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from transformers import Seq2SeqTrainingArguments, set_seed
 
 from data.dataset import ViT5VQADataset
-from training.common import build_collator, load_dataframes, load_model_and_tokenizer
+from training.common import build_collator, build_corrector, load_dataframes, load_model_and_tokenizer
 from training.metrics import build_compute_metrics
 from training.trainer import VQATrainer
 from utils.debug_tools import visualize_samples
@@ -25,7 +25,8 @@ def main(args_list=None):
     )
     parser.add_argument("--dataset_name", default="ViTextVQA")
     parser.add_argument("--data_dir", default="./datasets")
-    parser.add_argument("--split", choices=("validation", "test"), default="validation")
+    # Test answers are placeholders: score test with training/predict.py + training/benchmark_eval.py.
+    parser.add_argument("--split", choices=("validation",), default="validation")
     parser.add_argument("--output_dir", default="./output/evaluate")
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--visualize_samples", type=int, default=0)
@@ -33,12 +34,12 @@ def main(args_list=None):
     args = parser.parse_args(args_list)
     set_seed(args.seed)
     model, tokenizer = load_model_and_tokenizer(args.model_name_or_path)
-    dataset = ViT5VQADataset(
-        load_dataframes(args.dataset_name, args.data_dir)[args.split]
-    )
+    frames = load_dataframes(args.dataset_name, args.data_dir)
+    dataset = ViT5VQADataset(frames[args.split])
     if not len(dataset):
         raise ValueError(f"The {args.split} split is empty.")
-    collator = build_collator(model, tokenizer)
+    corrector = build_corrector(model.config, frames["train"]) if model.config.ablation_use_ocr_aug else None
+    collator = build_collator(model, tokenizer, corrector, training=False)
     trainer = VQATrainer(
         model=model,
         tokenizer=tokenizer,

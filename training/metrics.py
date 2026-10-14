@@ -118,6 +118,8 @@ def build_compute_metrics(tokenizer_for_metrics):
             "cider": float(cider_score),
             "em": float(em),
             "f1": float(f1),
+            # Tiêu chí chọn checkpoint cho ViTextVQA/ViOCRVQA (xem training/finetune.py).
+            "em_f1": 0.5 * (float(em) + float(f1)),
         }
         return res
 
