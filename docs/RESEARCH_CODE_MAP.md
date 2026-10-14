@@ -1,7 +1,8 @@
 # Bản đồ mã nghiên cứu ViSceT5
 
-Luồng hiện hành huấn luyện trực tiếp VQA bằng cross-entropy trên câu trả lời.
-Các mục tiêu ITM, MLM, TWC và việc sinh OCR related/augmented đã được loại bỏ.
+Luồng hiện hành huấn luyện trực tiếp VQA bằng cross-entropy trên câu trả lời,
+cộng loss phụ TWC (tùy chọn `use_twc`). Không có pretrain; ITM và MLM đã bỏ.
+Kênh sửa OCR (`ablation_use_ocr_aug`) nối bản OCR đã sửa (related) sau bản gốc.
 Các trọng số backbone ViT5 và CLIP dùng để khởi tạo mô hình. Nhánh Visual Search
 và ConvNeXtV2 đã được loại bỏ khỏi kiến trúc.
 `models/modules/visual_search.py` vẫn được giữ làm source tham khảo, không import
@@ -52,9 +53,28 @@ OCR Consformer encode chuỗi subword qua GroupAttention. Mapping subword→entr
 gắn box, det/rec và character features với từng subword. SemanticOCREmbedding
 hợp nhất các feature đó. Mọi nhánh đưa vào ViT5 phải có cùng chiều d_model.
 
-Encoder ViT5 nhận chuỗi ghép: question embeddings, CLIP patch tokens, OCR features,
-một token trung bình patch. Attention mask được ghép
+Encoder ViT5 nhận chuỗi ghép: question embeddings, CLIP patch tokens (nếu dùng ảnh),
+OCR features (bản gốc rồi bản related, mức subword). Attention mask được ghép
 cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
+
+## Kênh sửa OCR và TWC
+
+`data/ocr_correction.py` (`OCRCorrector`): từ điển = term list + từ điển tiếng Việt
++ từ của câu hỏi/đáp án TẬP TRAIN. Hai cách sinh bản related (cùng độ dài, cùng thứ tự,
+dùng chung box/det/rec với entry gốc):
+
+- `correct` (xác định; eval/test, và train khi tắt TWC): giữ chuỗi đặc biệt/số/từ có
+  trong từ điển; từ còn lại thay bằng ứng viên tốt nhất (dời dấu → đổi dấu → edit
+  distance ≤ 2 cùng dạng không dấu hoặc phụ âm đầu). Hòa nhau phá bằng chính từ đó.
+- `augment` (TWA §3.4, chỉ khi train với TWC): với xác suất 0.35, từ trong từ điển bị
+  sửa một ký tự (nhãn 0.9), từ ngoài từ điển được sửa (0.9); còn lại giữ (1.0); cùng chữ
+  kế thừa nhãn, khác chữ = 0, PAD = -1. Ngẫu nhiên cố định theo mẫu (tái lập được).
+
+TWC (`OpenViVQAModel._twc`): pool đầu ra encoder về mức entry cho bản gốc và bản related,
+chuẩn hóa L2, logits = exp(τ)·cos trên mọi cặp trong batch (τ học được, kẹp [1/100, 100]);
+nhãn block-diagonal theo mẫu, cặp khác mẫu cùng (ảnh, chữ) kế thừa nhãn, hàng/cột PAD bỏ;
+loss = sigmoid-BCE hai chiều trên ô hợp lệ (như code TWA). Tổng loss = VQA + λ·TWC.
+`VQATrainer` dùng collator `twa` khi train và `correct` khi eval/predict.
 
 ## Module và ablation
 
@@ -65,9 +85,12 @@ cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 | `models/modules/ocr_spatial.py` | Semantic OCR embedding và spatial utilities |
 | `models/modules/ocr_encoder_feature.py` | Đọc OCR features và chuẩn hóa box |
 
-Tắt QACLIP nghĩa là bỏ instruction câu hỏi, vẫn chạy CLIP. Tắt OCR module nghĩa là dùng encoder lite
-cho text/character/box, vẫn nhận thông tin OCR. Đây là các baseline ablation
-của repository, cần giữ ý nghĩa này khi thiết kế thí nghiệm tiếp theo.
+Module tắt thì không được dựng (không tham số); mỗi nhóm module khởi tạo từ seed riêng
+nên các module chung có cùng trọng số ban đầu giữa các cấu hình.
+`ablation_use_image=False`: không có CLIP, encoder chỉ nhận [câu hỏi, OCR].
+`ablation_use_qaclip=False` (mặc định): CLIP thường, không adapter QA-ViT.
+`ablation_use_ocr=False`: baseline OCR text-only mức subword (embedding ViT5 → RMSNorm →
+Linear khởi tạo đơn vị), không ký tự/box/det/rec.
 
 ## Training, evaluation và checkpoint
 

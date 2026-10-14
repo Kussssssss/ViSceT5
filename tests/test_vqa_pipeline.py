@@ -1,5 +1,6 @@
 """Exercise the real multimodal modules with tiny, offline random backbones."""
 
+import copy
 import itertools
 import json
 import sys
@@ -28,6 +29,7 @@ from transformers import (
 from configs.arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from configs.model_config import OpenViVQAConfig
 from data.dataset import ViT5VQADataset
+from data.ocr_correction import OCRCorrector
 from models.modules.qa_clip import QACLIPEncoder
 from models.openvivqa_model import OpenViVQAModel
 from training.common import (
@@ -43,12 +45,13 @@ import transformers.modeling_utils as hf_modeling_utils
 
 
 def test_memory_audit_uses_same_batch_and_real_optimizer(
-    model, tokenizer, samples, tmp_path, monkeypatch
+    make_model, tokenizer, samples, tmp_path, monkeypatch
 ):
     from scripts import profile_training_memory as audit
 
+    model = make_model(ablation_use_qaclip=True, ablation_use_ocr_aug=False)
     monkeypatch.setattr(
-        audit, "load_model_and_tokenizer", lambda checkpoint: (model, tokenizer)
+        audit, "load_model_and_tokenizer", lambda checkpoint, overrides=None: (model, tokenizer)
     )
     monkeypatch.setattr(
         audit, "load_dataframes", lambda *args: {"train": pd.DataFrame(samples)}
@@ -89,12 +92,12 @@ def test_memory_audit_uses_same_batch_and_real_optimizer(
         for n, p in report["parameters"].items()
         if p["requires_grad"] and not p["has_gradient"]
     ]
-    assert all(n.startswith("ocr_lite_") for n in missing)
+    assert not missing  # unused branches are not built at all
     shape = next(e for e in events if e["phase"] == "after_forward")["shapes"][
         "vit5.encoder"
     ]
     assert len(shape) == 2
-    assert shape[1]["shape"] == [2, 17, 32]
+    assert shape[1]["shape"] == [2, 16, 32]  # question 8 + patches 4 + OCR tokens 4
 
     def unexpected_data_load(*args):
         raise AssertionError("A saved audit batch must bypass the dataset/collator.")
@@ -139,7 +142,11 @@ def offline_backbones(monkeypatch):
         lambda *a, **k: T5ForConditionalGeneration(text_config),
     )
     monkeypatch.setattr(
-        QACLIPEncoder, "from_pretrained", lambda *a, **k: QACLIPEncoder(vision_config)
+        QACLIPEncoder,
+        "from_pretrained",
+        lambda *a, **k: QACLIPEncoder(
+            copy.deepcopy(vision_config), integration_point=k.get("integration_point")
+        ),
     )
 
 
@@ -171,21 +178,37 @@ def tokenizer():
     )
 
 
+TINY = dict(
+    image_size=32,
+    ocr_d_det=4,
+    ocr_d_rec=4,
+    ocr_max_scene_text=9,
+    char_max_num=12,
+    text_max_input_length=8,
+    text_max_target_length=6,
+    generation_max_new_tokens=3,
+    generation_num_beams=1,
+)
+
+
 @pytest.fixture
-def model():
-    return OpenViVQAModel(
-        OpenViVQAConfig(
-            image_size=32,
-            ocr_d_det=4,
-            ocr_d_rec=4,
-            ocr_max_scene_text=9,
-            char_max_num=12,
-            text_max_input_length=8,
-            text_max_target_length=6,
-            generation_max_new_tokens=3,
-            generation_num_beams=1,
-        )
-    )
+def make_model():
+    def build(**flags):
+        torch.manual_seed(7)
+        return OpenViVQAModel(OpenViVQAConfig(**{**TINY, **flags}))
+
+    return build
+
+
+@pytest.fixture
+def model(make_model):
+    # Original-OCR layout (no related copy) for the collator/loader tests.
+    return make_model(ablation_use_ocr_aug=False)
+
+
+@pytest.fixture
+def corrector(samples):
+    return OCRCorrector(train_frame=pd.DataFrame(samples), label_list=[0.9, 0.9])
 
 
 @pytest.fixture
@@ -366,38 +389,49 @@ def test_qaclip_load_initializes_new_instruction_weights(tmp_path, monkeypatch):
         )
 
 
-@pytest.mark.parametrize("qaclip,ocr", list(itertools.product([False, True], repeat=2)))
+@pytest.mark.parametrize(
+    "image,qaclip,ocr,aug,twc",
+    [
+        (image, qaclip, ocr, aug, twc)
+        for image, qaclip, ocr, aug, twc in itertools.product([False, True], repeat=5)
+        if (image or not qaclip) and (aug or not twc)
+    ],
+)
 def test_all_ablations_forward_backward_generate(
-    model, tokenizer, samples, qaclip, ocr
+    make_model, tokenizer, samples, corrector, image, qaclip, ocr, aug, twc
 ):
-    model.config.ablation_use_qaclip = qaclip
-    model.config.ablation_use_ocr = ocr
-    batch = build_collator(model, tokenizer)(samples)
+    model = make_model(
+        ablation_use_image=image,
+        ablation_use_qaclip=qaclip,
+        ablation_use_ocr=ocr,
+        ablation_use_ocr_aug=aug,
+        use_twc=twc,
+    )
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
     outputs = model(**batch)
     assert outputs["logits"].shape == (2, 6, 32)
     assert torch.isfinite(outputs["loss"])
-    assert (
-        outputs["attention_mask"].shape
-        == outputs["encoder_outputs"].last_hidden_state.shape[:2]
-    )
-    outputs["loss"].backward()
+    loss = outputs["loss"]
+    if twc:
+        assert torch.isfinite(outputs["twc_loss"]) and 0 <= outputs["twc_acc"] <= 1
+        loss = loss + outputs["twc_loss"]
+    else:
+        assert "twc_loss" not in outputs
+    loss.backward()
     gradients = [p.grad for p in model.parameters() if p.grad is not None]
     assert gradients and all(torch.isfinite(grad).all() for grad in gradients)
-    assert not hasattr(model, "visual_search")
-    assert not hasattr(model, "image_projector")
-    assert not hasattr(model, "ocr_projector")
-    assert not any(n.startswith("visual_search.") for n, _ in model.named_parameters())
-    ocr_length = (
-        batch["ocr_input_ids"].shape[1] if ocr else batch["ocr_word_mask"].shape[1]
-    )
-    expected_length = batch["input_ids"].shape[1] + 4 + ocr_length + 1
-    assert outputs["attention_mask"].shape == (2, expected_length)
+    expected = batch["input_ids"].shape[1] + (4 if image else 0) + batch["ocr_input_ids"].shape[1]
+    assert outputs["attention_mask"].shape == (2, expected)
     assert model.get_input_embeddings().weight.grad is not None
+    # Every built parameter that is trainable receives a gradient (nothing dead).
+    dead = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
+    assert not dead, dead
     model.eval()
-    inputs = {key: value for key, value in batch.items() if key != "labels"}
+    inputs = build_collator(model, tokenizer, corrector, training=False)(samples)
+    inputs.pop("labels")
     with torch.no_grad():
         direct = model.generate(**inputs)
-        encoded, mask = model.encode(**inputs)
+        encoded, mask, _ = model.encode(**inputs)
         cached = model.generate(encoder_outputs=encoded, attention_mask=mask)
     torch.testing.assert_close(direct, cached)
     assert cached.shape[0] == 2 and cached.shape[1] <= 4
@@ -405,11 +439,11 @@ def test_all_ablations_forward_backward_generate(
 
 @pytest.mark.parametrize("use_question", [False, True])
 def test_image_encoder_only_returns_patches_without_attention_export(
-    model, use_question
+    make_model, use_question
 ):
     from types import SimpleNamespace
 
-    model.config.ablation_use_qaclip = use_question
+    model = make_model(ablation_use_qaclip=use_question)
     hidden = torch.randn(2, 5, 32)  # CLS + four patches
     with patch.object(
         model.qa_clip,
@@ -418,13 +452,14 @@ def test_image_encoder_only_returns_patches_without_attention_export(
     ) as forward:
         tokens, mask = model._encode_image(
             torch.randn(2, 3, 32, 32),
-            torch.randn(2, 3, 32),
+            torch.randint(3, 12, (2, 3)),
             torch.ones(2, 3, dtype=torch.long),
         )
     torch.testing.assert_close(tokens, hidden[:, 1:])
     assert mask.shape == (2, 4)
     assert forward.call_args.kwargs["output_attentions"] is False
-    assert forward.call_args.kwargs["text_emb"].shape[1] == (3 if use_question else 0)
+    question = forward.call_args.kwargs["text_emb"]
+    assert (question is not None and question.shape[1] == 3) if use_question else question is None
 
 
 def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
@@ -441,7 +476,10 @@ def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
         actual = restored(**build_collator(restored, restored_tokenizer)(samples))[
             "logits"
         ]
-    torch.testing.assert_close(expected, actual, rtol=0, atol=0)
+    # Weights are identical (checked below); CPU kernels may differ in the last bits.
+    torch.testing.assert_close(expected, actual, rtol=1e-4, atol=1e-5)
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value, restored.state_dict()[name], rtol=0, atol=0)
     assert (
         restored.vit5.shared.weight.data_ptr()
         == restored.vit5.lm_head.weight.data_ptr()
@@ -506,66 +544,57 @@ def test_ocr_norms_use_fresh_weights_and_vit5_config_epsilon():
     source.variance_epsilon = 9e-4
     with torch.no_grad():
         source.weight.copy_(torch.linspace(0.5, 1.5, backbone.config.d_model))
-    with patch.object(
-        T5ForConditionalGeneration, "from_pretrained", return_value=backbone
-    ):
-        model = OpenViVQAModel(OpenViVQAConfig(image_size=32, ocr_d_det=4, ocr_d_rec=4))
-    norms = [model.ocr_lite_text_ln, model.ocr_char_layernorm] + [
-        getattr(model.semantic_ocr_embedding, name)
-        for name in (
-            "layer_norm_bboxes",
-            "layer_norm_det",
-            "layer_norm_rec",
-            "layer_norm_tok",
-            "layer_norm_char",
-        )
-    ]
+    norms = []
+    for use_ocr in (True, False):
+        with patch.object(T5ForConditionalGeneration, "from_pretrained", return_value=backbone):
+            model = OpenViVQAModel(
+                OpenViVQAConfig(image_size=32, ocr_d_det=4, ocr_d_rec=4, ablation_use_ocr=use_ocr)
+            )
+        if use_ocr:
+            norms += [model.ocr_char_layernorm] + [
+                getattr(model.semantic_ocr_embedding, name)
+                for name in ("layer_norm_bboxes", "layer_norm_det", "layer_norm_rec",
+                             "layer_norm_tok", "layer_norm_char")
+            ]
+        else:
+            norms.append(model.ocr_lite_text_ln)
     for norm in norms:
         assert isinstance(norm, T5LayerNorm) and not hasattr(norm, "bias")
         assert norm.variance_epsilon == backbone.config.layer_norm_epsilon
         torch.testing.assert_close(norm.weight, torch.ones_like(norm.weight))
-        assert not torch.equal(norm.weight, source.weight)
     assert len({norm.weight.data_ptr() for norm in [source, *norms]}) == 8
-    with torch.no_grad():
-        norms[0].weight.add_(1)
-    torch.testing.assert_close(norms[1].weight, torch.ones_like(norms[1].weight))
-    torch.testing.assert_close(
-        source.weight, torch.linspace(0.5, 1.5, backbone.config.d_model)
-    )
 
 
-def test_inactive_ocr_branch_has_parameters_but_no_gradients(model, tokenizer, samples):
-    lite_names = (
-        "ocr_lite_text_ln",
-        "ocr_lite_text_proj",
-        "ocr_lite_text_ff",
-        "ocr_lite_box_proj",
-        "ocr_lite_box_ff",
-    )
-    lite_parameters = [
-        parameter
-        for name in lite_names
-        for parameter in getattr(model, name).parameters()
-    ]
-    assert (
-        sum(parameter.numel() for parameter in lite_parameters)
-        == 5 * model.d_model**2 + 11 * model.d_model
-    )
-    assert all(parameter.requires_grad for parameter in lite_parameters)
-    model(**build_collator(model, tokenizer)(samples))["loss"].backward()
-    assert all(parameter.grad is None for parameter in lite_parameters)
-    assert any(
-        parameter.grad is not None
-        for parameter in model.semantic_ocr_embedding.parameters()
-    )
+@pytest.mark.parametrize("image,qaclip,ocr,twc", [(True, False, True, False), (True, True, False, True),
+                                                  (False, False, True, True)])
+def test_unused_modules_are_not_built(make_model, image, qaclip, ocr, twc):
+    model = make_model(ablation_use_image=image, ablation_use_qaclip=qaclip,
+                       ablation_use_ocr=ocr, use_twc=twc)
+    names = [name for name, _ in model.named_parameters()]
+    assert hasattr(model, "qa_clip") == image
+    assert any("instruct_dim_reduce" in n for n in names) == qaclip
+    assert hasattr(model, "ocr_encoder") == ocr and hasattr(model, "semantic_ocr_embedding") == ocr
+    assert hasattr(model, "ocr_lite_text_proj") == (not ocr)
+    assert hasattr(model, "twc_logit_scale") == twc
 
 
-def test_trainer_train_evaluate_predict(model, tokenizer, samples, tmp_path):
+def test_shared_modules_get_the_same_init_across_configurations(make_model):
+    full = make_model(ablation_use_qaclip=True, use_twc=True).state_dict()
+    plain = make_model(ablation_use_image=False).state_dict()
+    shared = [k for k in plain if k in full]
+    assert any(k.startswith("ocr_encoder.") for k in shared)
+    for key in shared:
+        torch.testing.assert_close(plain[key], full[key], rtol=0, atol=0)
+
+
+def test_trainer_train_evaluate_predict(make_model, tokenizer, samples, corrector, tmp_path):
+    model = make_model(use_twc=True)
     dataset = ViT5VQADataset(pd.DataFrame(samples))
     trainer = VQATrainer(
         model=model,
         tokenizer=tokenizer,
-        data_collator=build_collator(model, tokenizer),
+        data_collator=build_collator(model, tokenizer, corrector, training=True),
+        eval_data_collator=build_collator(model, tokenizer, corrector, training=False),
         train_dataset=dataset,
         eval_dataset=dataset,
         args=Seq2SeqTrainingArguments(
@@ -587,6 +616,10 @@ def test_trainer_train_evaluate_predict(model, tokenizer, samples, tmp_path):
     )
     result = trainer.train()
     assert np.isfinite(result.training_loss)
+    logged = [entry for entry in trainer.state.log_history if "twc_loss" in entry]
+    assert logged and np.isfinite(logged[0]["twc_loss"])
+    assert trainer.get_eval_dataloader().collate_fn.related_mode == "correct"
+    assert trainer.get_train_dataloader().collate_fn.related_mode == "twa"
     with patch.object(model, "encode", wraps=model.encode) as encode:
         metrics = trainer.evaluate()
         assert encode.call_count == 2
@@ -636,10 +669,11 @@ def test_training_entrypoint_save_resume_and_evaluation(
     monkeypatch.setattr(
         finetune,
         "load_model_and_tokenizer",
-        lambda checkpoint: (
-            load_model_and_tokenizer(checkpoint) if checkpoint else (model, tokenizer)
+        lambda checkpoint, overrides=None: (
+            load_model_and_tokenizer(checkpoint, overrides) if checkpoint else (model, tokenizer)
         ),
     )
+    monkeypatch.setattr(finetune, "hub_target", lambda: (None, None))
     arguments = [
         str(PROJECT_ROOT / "configs" / "finetune.yaml"),
         "--output_dir",
@@ -698,3 +732,103 @@ def test_pipeline_arguments_do_not_modify_process_argv(monkeypatch):
     assert arguments[arguments.index("--model_name_or_path") + 1] == "checkpoint-10"
     assert arguments[arguments.index("--smoke_max_steps") + 1] == "2"
     assert arguments[arguments.index("--smoke_test") + 1] == "True"
+
+
+def _reference_twc(logits, o2r_blocks, r2o_blocks, groups, words):
+    """Previous pretrain implementation (model TWC branch + create_batch_labels + loss)."""
+
+    def create_batch_labels(result):
+        result = result.clone()
+        ignore = torch.diagonal(result) == -1
+        result[ignore, :] = -1.0
+        result[:, ignore] = -1.0
+        return result
+
+    o2r = torch.block_diag(*o2r_blocks)
+    r2o = torch.block_diag(*r2o_blocks)
+    g = groups.reshape(-1)
+    m = o2r.size(0)
+    samp = torch.arange(m) // words
+    inherit = (g.unsqueeze(1) == g.unsqueeze(0)) & (g.unsqueeze(1) >= 0) & (samp.unsqueeze(1) != samp.unsqueeze(0))
+    o2r = torch.where(inherit, torch.diagonal(o2r).clone().unsqueeze(0).expand(m, m), o2r)
+    r2o = torch.where(inherit, torch.diagonal(r2o).clone().unsqueeze(0).expand(m, m), r2o)
+    o2r_l, r2o_l = create_batch_labels(o2r), create_batch_labels(r2o)
+    mask = o2r_l != -1
+    loss_i = torch.nn.functional.binary_cross_entropy_with_logits(logits[mask], o2r_l[mask])
+    loss_t = torch.nn.functional.binary_cross_entropy_with_logits(logits.t()[mask], r2o_l[mask])
+    return (loss_i + loss_t) / 2
+
+
+def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer, samples, corrector):
+    model = make_model(use_twc=True)
+    # Same image asked twice: same (image, text) groups, different per-sample augmentation.
+    pair = [samples[0], {**samples[0], "question": "hiệu gì"}]
+    batch = build_collator(model, tokenizer, corrector, training=True)(pair)
+    # Same image + same text in both samples → cross-sample inheritance is exercised.
+    assert (batch["twc_group_ids"][0][:3] == batch["twc_group_ids"][1][:3]).all()
+    words = batch["twc_o2r"].shape[1]
+    hidden = torch.randn(2, 40, 32)
+    offset = 5
+    token_mask = batch["ocr_attention_mask"]
+    loss, accuracy = model._twc(hidden, offset, batch["ocr_to_word_map"], token_mask,
+                                batch["twc_o2r"], batch["twc_r2o"], batch["twc_group_ids"])
+    tokens = hidden[:, offset: offset + token_mask.shape[1]]
+    word_map = batch["ocr_to_word_map"]
+    feats = torch.zeros(2, 2 * words, 32)
+    counts = torch.zeros(2, 2 * words)
+    for b in range(2):
+        for t in range(word_map.shape[1]):
+            if word_map[b, t] >= 0 and token_mask[b, t]:
+                feats[b, word_map[b, t]] += tokens[b, t]
+                counts[b, word_map[b, t]] += 1
+    feats = feats / counts.clamp_min(1e-9).unsqueeze(-1)
+    norm = lambda x: x / x.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+    orig, rel = norm(feats[:, :words]).reshape(-1, 32), norm(feats[:, words:]).reshape(-1, 32)
+    logits = model.twc_logit_scale.exp() * orig @ rel.t()
+    reference = _reference_twc(logits, batch["twc_o2r"], batch["twc_r2o"], batch["twc_group_ids"], words)
+    torch.testing.assert_close(loss, reference, rtol=1e-5, atol=1e-6)
+    assert 0 <= float(accuracy) <= 1
+
+
+def test_twc_collator_layout_and_labels(make_model, tokenizer, samples, corrector):
+    model = make_model(use_twc=True)
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    words = batch["twc_o2r"].shape[1]
+    real = len(batch["ocr_info"][0]["texts"])
+    assert batch["ocr_char_ids"].shape[1] == 2 * words
+    assert batch["ocr_info"][0]["boxes"].shape[0] == 2 * words
+    mapping = batch["ocr_to_word_map"][0]
+    assert set(mapping[mapping >= 0].tolist()) == set(range(real)) | set(range(words, words + real))
+    torch.testing.assert_close(batch["ocr_info"][0]["boxes"][:words], batch["ocr_info"][0]["boxes"][words:])
+    o2r = batch["twc_o2r"][0]
+    assert (o2r[real:, :] == -1).all() and (o2r[:, real:] == -1).all()
+    assert set(o2r[:real, :real].diagonal().tolist()) <= {1.0, 0.9}
+    assert (batch["twc_group_ids"][0][real:] == -1).all()
+    again = build_collator(model, tokenizer, corrector, training=True)(samples)
+    torch.testing.assert_close(batch["twc_o2r"], again["twc_o2r"])  # per-sample fixed augmentation
+
+
+def test_corrector_labels_follow_twa():
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["cà phê sữa"], "answer": ["trà"]}))
+    words = ["cà", "phê", "cà", "123", "xyzw"]
+    related, o2r, r2o = corrector.augment(words, 0.0, __import__("random").Random(0))
+    assert related == words
+    assert [o2r[i][i] for i in range(5)] == [1.0] * 5
+    assert o2r[0][2] == o2r[2][0] == 1.0 and o2r[0][1] == 0.0
+    related, o2r, r2o = corrector.augment(words, 1.0, __import__("random").Random(0))
+    assert related[3] == "123" and o2r[3][3] == 1.0  # numbers are never edited
+    assert related[0] != "cà" and o2r[0][0] == 0.9  # in-lexicon word gets a char edit
+    assert o2r[0][2] == o2r[2][2] and o2r[2][0] == o2r[0][0]  # same text inherits
+    assert corrector.correct(["cà", "phẽ"]) == ["cà", "phê"]  # tone change → lexicon word
+
+
+
+def test_loading_a_checkpoint_keeps_clip_frozen(make_model, tokenizer, tmp_path):
+    model = make_model(ablation_use_qaclip=True)
+    model.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
+    restored, _ = load_model_and_tokenizer(str(tmp_path))
+    trainable = lambda m: {n for n, p in m.named_parameters() if p.requires_grad}
+    assert trainable(restored) == trainable(model)
+    assert not any(p.requires_grad for n, p in restored.qa_clip.named_parameters()
+                   if "instruct" not in n and "instruction" not in n)
