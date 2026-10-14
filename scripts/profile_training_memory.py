@@ -26,6 +26,7 @@ from configs.arguments import CustomTrainingArguments, DataArguments, ModelArgum
 from data.dataset import ViT5VQADataset
 from training.common import (
     build_collator,
+    build_corrector,
     load_dataframes,
     load_model_and_tokenizer,
     parse_args_with_yaml_and_cli,
@@ -206,9 +207,11 @@ def main(args_list=None):
             "Audit fresh optimizer states; use model_name_or_path to load model weights."
         )
     set_seed(train_args.seed)
-    model, tokenizer = load_model_and_tokenizer(model_args.model_name_or_path)
-    for name in ("ablation_use_qaclip", "ablation_use_ocr"):
-        setattr(model.config, name, getattr(model_args, name))
+    flags = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr",
+             "ablation_use_ocr_aug", "use_twc", "twc_weight")
+    model, tokenizer = load_model_and_tokenizer(
+        model_args.model_name_or_path, overrides={name: getattr(model_args, name) for name in flags}
+    )
     batch_file = Path(audit_args.audit_batch_file)
     if batch_file.is_file():
         # This is the locally generated audit batch.
@@ -222,7 +225,11 @@ def main(args_list=None):
             raise ValueError("The training split is smaller than the requested batch.")
         # Seeded sample selection, then save the complete collated tensors/mappings.
         indices = torch.randperm(len(dataset))[:count].tolist()
-        batch = build_collator(model, tokenizer)([dataset[i] for i in indices])
+        corrector = (
+            build_corrector(model.config, frames["train"]) if model.config.ablation_use_ocr_aug else None
+        )
+        collator = build_collator(model, tokenizer, corrector, training=True, seed=train_args.seed)
+        batch = collator([dataset[i] for i in indices])
         batch_file.parent.mkdir(parents=True, exist_ok=True)
         torch.save(batch, batch_file)
     batch_size = batch["input_ids"].shape[0]

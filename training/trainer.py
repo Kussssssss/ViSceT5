@@ -14,6 +14,34 @@ except ImportError:
 
 
 class VQATrainer(Seq2SeqTrainer):
+    """Seq2SeqTrainer + TWC auxiliary loss.
+
+    eval_data_collator: collator for evaluation/prediction. Training may use TWA
+    augmentation for the related OCR copy, but evaluation must see the same
+    deterministic correction as inference.
+    """
+
+    def __init__(self, *args, eval_data_collator=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.eval_data_collator = eval_data_collator
+        self._twc_sum = {"twc_loss": 0.0, "twc_acc": 0.0}
+        self._twc_count = 0
+
+    def _with_eval_collator(self, build, dataset):
+        if self.eval_data_collator is None:
+            return build(dataset)
+        train_collator, self.data_collator = self.data_collator, self.eval_data_collator
+        try:
+            return build(dataset)
+        finally:
+            self.data_collator = train_collator
+
+    def get_eval_dataloader(self, eval_dataset=None):
+        return self._with_eval_collator(super().get_eval_dataloader, eval_dataset)
+
+    def get_test_dataloader(self, test_dataset):
+        return self._with_eval_collator(super().get_test_dataloader, test_dataset)
+
     def _load_rng_state(self, checkpoint):
         # Transformers 4.45 saves NumPy's RNG array; recent torch restricts loading
         # it by default. Allow only the NumPy types used by that RNG state.
@@ -33,6 +61,12 @@ class VQATrainer(Seq2SeqTrainer):
             if self.label_smoother
             else outputs["loss"]
         )
+        if "twc_loss" in outputs:
+            loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
+            if model.training:
+                self._twc_sum["twc_loss"] += float(outputs["twc_loss"].detach())
+                self._twc_sum["twc_acc"] += float(outputs["twc_acc"])
+                self._twc_count += 1
         return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -81,6 +115,10 @@ class VQATrainer(Seq2SeqTrainer):
         return loss
 
     def log(self, logs):
+        if self._twc_count and "loss" in logs:  # training log: mean TWC since last log
+            logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
+            self._twc_sum = dict.fromkeys(self._twc_sum, 0.0)
+            self._twc_count = 0
         super().log(logs)
         if self.is_world_process_zero():
             output_dir = Path(self.args.output_dir)

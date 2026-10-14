@@ -11,6 +11,7 @@ from configs.base_config import OUTPUT_PATH
 from configs.model_config import OpenViVQAConfig
 from configs.ocr_config import DEFAULT_OCR_CONFIG
 from data.collator import ViT5VQADataCollator
+from data.ocr_correction import OCRCorrector
 from models.openvivqa_model import OpenViVQAModel
 from models.modules.ocr_encoder_feature import Vision_Encode_Ocr_Feature
 
@@ -75,23 +76,46 @@ def load_dataframes(dataset_name, data_dir):
     return {split: pd.read_csv(path) for split, path in paths.items()}
 
 
-def load_model_and_tokenizer(checkpoint=None):
+def load_model_and_tokenizer(checkpoint=None, overrides=None):
+    """overrides: config fields set BEFORE the model is built (modules are built only
+    when their switch is on, so ablation flags must be known at construction)."""
     if checkpoint:
         config = OpenViVQAConfig.from_pretrained(checkpoint)
+        for name, value in (overrides or {}).items():
+            setattr(config, name, value)
         model = OpenViVQAModel.from_pretrained(checkpoint, config=config)
         tokenizer = AutoTokenizer.from_pretrained(checkpoint)
         processor_dir = Path(checkpoint) / "image_processor"
         if processor_dir.is_dir():
             model.image_processor = model.image_processor.from_pretrained(processor_dir)
     else:
-        config = OpenViVQAConfig()
+        config = OpenViVQAConfig(**(overrides or {}))
         tokenizer = AutoTokenizer.from_pretrained(config.vit5_name)
         model = OpenViVQAModel(config)
     model.sync_tokenizer_ids(tokenizer)
     return model, tokenizer
 
 
-def build_collator(model, tokenizer):
+def build_corrector(config, train_frame, term_vocab_path="configs/data/term_vocab.txt",
+                    viet_vocab_path="configs/data/viet_vocab.txt"):
+    """Correction lexicon = term list + dictionary + question/answer words of the TRAIN split."""
+    root = PROJECT_ROOT
+    return OCRCorrector(
+        term_vocab_path=str(root / term_vocab_path),
+        viet_vocab_path=str(root / viet_vocab_path),
+        train_frame=train_frame,
+        edit_distance=config.ocr_edit_distance,
+        label_list=config.twc_label_list,
+    )
+
+
+def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
+    """training=True + use_twc → TWA augmentation with TWC labels; otherwise the related
+    copy (if OCR-Aug is on) comes from the deterministic correction channel."""
+    config = model.config
+    mode = "none"
+    if config.ablation_use_ocr_aug:
+        mode = "twa" if (training and config.use_twc) else "correct"
     ocr_config = {
         "ocr_embedding": {
             **DEFAULT_OCR_CONFIG["ocr_embedding"],
@@ -104,5 +128,8 @@ def build_collator(model, tokenizer):
         tokenizer,
         model.image_processor,
         Vision_Encode_Ocr_Feature(ocr_config),
-        model.config,
+        config,
+        corrector=corrector,
+        related_mode=mode,
+        seed=seed,
     )
