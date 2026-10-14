@@ -1,8 +1,11 @@
-"""ViT5 answer generation with question-guided vision and OCR features."""
+"""ViT5 answer generation over question, CLIP image tokens and OCR features (+ TWC)."""
 
+import math
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers import (
     CLIPImageProcessor,
@@ -18,6 +21,15 @@ from models.modules.ocr_spatial import SemanticOCREmbedding
 from models.modules.qa_clip import QACLIPEncoder
 
 
+@contextmanager
+def _seeded(seed):
+    """Initialise one module group from its own seed, independent of which other
+    groups a configuration builds (ablations share the init of common modules)."""
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(seed % (2**63))
+        yield
+
+
 class OpenViVQAModel(PreTrainedModel):
     config_class = OpenViVQAConfig
     base_model_prefix = "openvivqa"
@@ -29,6 +41,7 @@ class OpenViVQAModel(PreTrainedModel):
 
     def __init__(self, config):
         super().__init__(config)
+        seed = torch.initial_seed()
         self.vit5 = T5ForConditionalGeneration.from_pretrained(config.vit5_name)
         self.d_model = self.vit5.config.d_model
         for name in ("pad_token_id", "eos_token_id", "decoder_start_token_id"):
@@ -37,14 +50,21 @@ class OpenViVQAModel(PreTrainedModel):
                 value = getattr(self.vit5.config, name)
             setattr(config, name, value)
             setattr(self.vit5.config, name, value)
-        self.qa_clip = QACLIPEncoder.from_pretrained(
-            config.clip_vision_name,
-            instruction_dim=config.qa_clip_d_text or self.d_model,
-            integration_point="late",
-            freeze_clip=True,
-            attn_implementation="eager",
-        )
-        image_size = config.image_size or self.qa_clip.config.image_size
+        norm_eps = self.vit5.config.layer_norm_epsilon
+
+        # Module không dùng thì không dựng: không tham số, không state_dict, không optimizer.
+        image_size = config.image_size or 224
+        if config.ablation_use_image:
+            with _seeded(seed + 1):
+                self.qa_clip = QACLIPEncoder.from_pretrained(
+                    config.clip_vision_name,
+                    instruction_dim=config.qa_clip_d_text or self.d_model,
+                    # Không nhận câu hỏi → CLIP thường, không adapter QA-ViT.
+                    integration_point="late" if config.ablation_use_qaclip else "none",
+                    freeze_clip=True,
+                    attn_implementation="eager",
+                )
+            image_size = config.image_size or self.qa_clip.config.image_size
         self.image_processor = CLIPImageProcessor(
             do_resize=config.do_resize,
             do_center_crop=config.do_center_crop,
@@ -53,45 +73,41 @@ class OpenViVQAModel(PreTrainedModel):
             image_mean=config.image_mean,
             image_std=config.image_std,
         )
-        heads = self.vit5.config.num_heads
-        self.ocr_encoder = OCREncoder(
-            heads,
-            self.d_model,
-            self.vit5.config.d_kv,
-            self.vit5.config.d_ff,
-        )
-        self.ocr_encoder.set_word_embed_proxy(
-            lambda ids: self.get_input_embeddings()(ids)
-        )
-        norm_eps = self.vit5.config.layer_norm_epsilon
-        self.semantic_ocr_embedding = SemanticOCREmbedding(
-            SimpleNamespace(
-                d_model=self.d_model,
-                d_det=config.ocr_d_det,
-                d_rec=config.ocr_d_rec,
-                layer_norm_epsilon=norm_eps,
-            ),
-        )
-        self.char_embedding = nn.Embedding(config.char_num, self.d_model)
-        self.char_position_embedding = nn.Embedding(config.char_max_num, self.d_model)
-        self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=norm_eps)
-        # The OCR ablation retains text/character/box input via a lightweight encoder.
-        self.ocr_lite_text_ln = T5LayerNorm(self.d_model, eps=norm_eps)
-        self.ocr_lite_text_proj = nn.Linear(self.d_model, self.d_model)
-        self.ocr_lite_text_ff = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model),
-            nn.GELU(),
-            nn.Linear(self.d_model, self.d_model),
-        )
-        self.ocr_lite_box_proj = nn.Linear(4, self.d_model)
-        self.ocr_lite_box_ff = nn.Sequential(
-            nn.Linear(self.d_model, self.d_model),
-            nn.GELU(),
-            nn.Linear(self.d_model, self.d_model),
-        )
-        with torch.no_grad():
-            self.ocr_lite_text_proj.weight.copy_(torch.eye(self.d_model))
-            self.ocr_lite_text_proj.bias.zero_()
+
+        if config.ablation_use_ocr:
+            # SceSpaVis: ConsFormer + ký tự + box/det/rec.
+            with _seeded(seed + 2):
+                self.ocr_encoder = OCREncoder(
+                    self.vit5.config.num_heads,
+                    self.d_model,
+                    self.vit5.config.d_kv,
+                    self.vit5.config.d_ff,
+                )
+                self.semantic_ocr_embedding = SemanticOCREmbedding(
+                    SimpleNamespace(
+                        d_model=self.d_model,
+                        d_det=config.ocr_d_det,
+                        d_rec=config.ocr_d_rec,
+                        layer_norm_epsilon=norm_eps,
+                    ),
+                )
+                self.char_embedding = nn.Embedding(config.char_num, self.d_model)
+                self.char_position_embedding = nn.Embedding(config.char_max_num, self.d_model)
+                self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=norm_eps)
+            self.ocr_encoder.set_word_embed_proxy(lambda ids: self.get_input_embeddings()(ids))
+        else:
+            # Baseline: OCR text-only ở mức token (embedding ViT5 → RMSNorm → Linear).
+            with _seeded(seed + 3):
+                self.ocr_lite_text_ln = T5LayerNorm(self.d_model, eps=norm_eps)
+                self.ocr_lite_text_proj = nn.Linear(self.d_model, self.d_model)
+            with torch.no_grad():
+                self.ocr_lite_text_proj.weight.copy_(torch.eye(self.d_model))
+                self.ocr_lite_text_proj.bias.zero_()
+
+        if config.use_twc:
+            # Nhiệt độ học được τ của TWC (CLIP/TWA): exp(logit_scale) = 1/0.07 lúc đầu.
+            self.twc_logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
+
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
             num_beams=config.generation_num_beams,
@@ -101,6 +117,16 @@ class OpenViVQAModel(PreTrainedModel):
             do_sample=False,
         )
         self.post_init()
+
+    @classmethod
+    def from_pretrained(cls, *args, **kwargs):
+        # Weight loading re-creates parameters with requires_grad=True, which silently
+        # unfroze CLIP (7 → 46 trainable tensors) and broke optimizer resume.
+        loaded = super().from_pretrained(*args, **kwargs)
+        model = loaded[0] if isinstance(loaded, tuple) else loaded
+        if hasattr(model, "qa_clip"):
+            model.qa_clip._apply_freeze()
+        return loaded
 
     @property
     def target_dtype(self):
@@ -133,12 +159,13 @@ class OpenViVQAModel(PreTrainedModel):
             for config in (self.config, self.vit5.config, self.generation_config):
                 setattr(config, name, value)
 
-    def _encode_image(self, pixel_values, question_states, question_mask):
-        batch_size = pixel_values.shape[0]
+    def _encode_image(self, pixel_values, input_ids, attention_mask):
+        instruction = instruction_mask = None
         if self.config.ablation_use_qaclip:
-            instruction, instruction_mask = question_states, question_mask
-        else:
-            instruction, instruction_mask = question_states[:, :0], question_mask[:, :0]
+            instruction = self.vit5.encoder(
+                input_ids=input_ids, attention_mask=attention_mask, return_dict=True
+            ).last_hidden_state
+            instruction_mask = attention_mask
         outputs = self.qa_clip(
             pixel_values=pixel_values,
             text_emb=instruction,
@@ -147,9 +174,7 @@ class OpenViVQAModel(PreTrainedModel):
             return_dict=True,
         )
         tokens = outputs.last_hidden_state[:, 1:].to(self.target_dtype)
-        mask = torch.ones(
-            batch_size, tokens.shape[1], dtype=torch.long, device=tokens.device
-        )
+        mask = torch.ones(tokens.shape[:2], dtype=torch.long, device=tokens.device)
         return tokens, mask
 
     def _char_features(self, ids, mask):
@@ -157,31 +182,15 @@ class OpenViVQAModel(PreTrainedModel):
         features = self.char_embedding(ids) + self.char_position_embedding(positions)
         return self.ocr_char_layernorm((features * mask.unsqueeze(-1)).mean(dim=-2))
 
-    def _encode_ocr(
-        self, info, ids, token_mask, word_map, char_ids, char_mask, word_mask
-    ):
+    def _encode_ocr(self, info, ids, token_mask, word_map, char_ids, char_mask):
+        if not self.config.ablation_use_ocr:
+            tokens = self.get_input_embeddings()(ids)
+            features = self.ocr_lite_text_proj(self.ocr_lite_text_ln(tokens))
+            return features * token_mask.unsqueeze(-1).to(features.dtype), token_mask
         char_features = self._char_features(char_ids, char_mask)
         valid = (word_map >= 0) & token_mask.bool()
         indices = word_map.clamp(0, char_ids.shape[1] - 1)
-        boxes = torch.stack([item["boxes"] for item in info]).to(
-            ids.device, self.target_dtype
-        )
-        if not self.config.ablation_use_ocr:
-            tokens = self.get_input_embeddings()(ids)
-            features = tokens.new_zeros(*char_features.shape)
-            counts = tokens.new_zeros(*char_features.shape[:2], 1)
-            features.scatter_add_(
-                1, indices.unsqueeze(-1).expand_as(tokens), tokens * valid.unsqueeze(-1)
-            )
-            counts.scatter_add_(
-                1, indices.unsqueeze(-1), valid.unsqueeze(-1).to(tokens.dtype)
-            )
-            text = self.ocr_lite_text_ln(features / counts.clamp_min(1) + char_features)
-            text = self.ocr_lite_text_proj(text)
-            text = text + self.ocr_lite_text_ff(text)
-            box_features = self.ocr_lite_box_proj(boxes)
-            box_features = box_features + self.ocr_lite_box_ff(box_features)
-            return (text + box_features) * word_mask.unsqueeze(-1), word_mask
+        boxes = torch.stack([item["boxes"] for item in info]).to(ids.device, self.target_dtype)
         text_features, _ = self.ocr_encoder(ids, token_mask)
         results = []
         for batch_index, item in enumerate(info):
@@ -191,10 +200,8 @@ class OpenViVQAModel(PreTrainedModel):
                 "width": item["width"],
                 "height": item["height"],
                 "boxes": boxes[batch_index][mapping] * keep,
-                "det": item["det_features"].to(ids.device, self.target_dtype)[mapping]
-                * keep,
-                "rec": item["rec_features"].to(ids.device, self.target_dtype)[mapping]
-                * keep,
+                "det": item["det_features"].to(ids.device, self.target_dtype)[mapping] * keep,
+                "rec": item["rec_features"].to(ids.device, self.target_dtype)[mapping] * keep,
             }
             features, _ = self.semantic_ocr_embedding(
                 [token_info],
@@ -213,60 +220,86 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_to_word_map,
         ocr_char_ids,
         ocr_char_mask,
-        ocr_word_mask,
+        ocr_word_mask=None,
         attention_mask=None,
         ocr_attention_mask=None,
     ):
-        """Encode once; the same fused memory serves decoder loss and generation."""
-        device = input_ids.device
+        """Encode [question, image patches, OCR] once for loss and generation.
+
+        Returns (encoder outputs, fused mask, start index of the OCR block).
+        """
         if attention_mask is None:
             attention_mask = (input_ids != self.config.pad_token_id).long()
         if ocr_attention_mask is None:
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
-        text_embeddings = self.get_input_embeddings()(input_ids)
-        question = self.vit5.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            return_dict=True,
-        ).last_hidden_state
-        image_tokens, image_mask = self._encode_image(
-            pixel_values, question, attention_mask
-        )
+        pieces = [self.get_input_embeddings()(input_ids)]
+        masks = [attention_mask]
+        if self.config.ablation_use_image:
+            image_tokens, image_mask = self._encode_image(pixel_values, input_ids, attention_mask)
+            pieces.append(image_tokens)
+            masks.append(image_mask)
+        ocr_offset = sum(piece.shape[1] for piece in pieces)
         ocr_features, ocr_mask = self._encode_ocr(
-            ocr_info,
-            ocr_input_ids,
-            ocr_attention_mask,
-            ocr_to_word_map,
-            ocr_char_ids,
-            ocr_char_mask,
-            ocr_word_mask,
+            ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map, ocr_char_ids, ocr_char_mask
         )
-        summary = image_tokens.mean(dim=1, keepdim=True)
-        sequences = [
-            text_embeddings,
-            image_tokens,
-            ocr_features,
-            summary,
-        ]
-        if any(sequence.shape[-1] != self.d_model for sequence in sequences):
-            raise ValueError(
-                "All vision/OCR backbone output dimensions must match ViT5 d_model."
-            )
-        fused_mask = torch.cat(
-            [
-                attention_mask,
-                image_mask,
-                ocr_mask,
-                torch.ones(input_ids.shape[0], 1, device=device, dtype=torch.long),
-            ],
-            dim=1,
-        )
+        pieces.append(ocr_features)
+        masks.append(ocr_mask)
+        if any(piece.shape[-1] != self.d_model for piece in pieces):
+            raise ValueError("All vision/OCR backbone output dimensions must match ViT5 d_model.")
+        fused_mask = torch.cat(masks, dim=1)
         encoded = self.vit5.encoder(
-            inputs_embeds=torch.cat(sequences, dim=1),
-            attention_mask=fused_mask,
-            return_dict=True,
+            inputs_embeds=torch.cat(pieces, dim=1), attention_mask=fused_mask, return_dict=True
         )
-        return encoded, fused_mask
+        return encoded, fused_mask, ocr_offset
+
+    def _twc(self, hidden, ocr_offset, word_map, token_mask, o2r, r2o, groups):
+        """TWC (TWA §3.4–3.6): word features of the original and related OCR copies,
+        cosine similarity with learnable temperature, sigmoid BCE on soft labels."""
+        batch, words = o2r.shape[:2]
+        tokens = hidden[:, ocr_offset : ocr_offset + word_map.shape[1]].float()
+        valid = ((word_map >= 0) & token_mask.bool()).unsqueeze(-1).float()
+        index = word_map.clamp(min=0).unsqueeze(-1)
+        sums = tokens.new_zeros(batch, 2 * words, tokens.shape[-1]).scatter_add_(
+            1, index.expand_as(tokens), tokens * valid
+        )
+        counts = tokens.new_zeros(batch, 2 * words, 1).scatter_add_(1, index, valid)
+        features = torch.nan_to_num(sums / counts.clamp_min(1), nan=0.0, posinf=0.0, neginf=0.0)
+        features = F.normalize(features, dim=-1, eps=1e-6)
+        original = features[:, :words].reshape(batch * words, -1)
+        related = features[:, words:].reshape(batch * words, -1)
+        scale = self.twc_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
+        logits = scale * original @ related.t()  # [B·W, B·W], mọi cặp trong batch
+
+        # Nhãn: block-diagonal theo mẫu (khác ảnh = âm); cặp khác mẫu nhưng cùng
+        # (ảnh, chữ) kế thừa nhãn đường chéo của đối tác; hàng/cột PAD = -1.
+        o2r, r2o = torch.block_diag(*o2r.float()), torch.block_diag(*r2o.float())
+        group = groups.reshape(-1)
+        sample = torch.arange(group.numel(), device=group.device) // words
+        inherit = (
+            (group.unsqueeze(1) == group.unsqueeze(0))
+            & (group.unsqueeze(1) >= 0)
+            & (sample.unsqueeze(1) != sample.unsqueeze(0))
+        )
+        o2r = torch.where(inherit, o2r.diagonal().unsqueeze(0).expand_as(o2r), o2r)
+        r2o = torch.where(inherit, r2o.diagonal().unsqueeze(0).expand_as(r2o), r2o)
+        retrieval_labels = o2r.clone()
+        for labels in (o2r, r2o):
+            ignored = labels.diagonal() == -1
+            labels[ignored, :] = -1.0
+            labels[:, ignored] = -1.0
+        keep = o2r != -1
+        if not keep.any():
+            return logits.sum() * 0.0, logits.new_zeros(())
+        loss = 0.5 * (
+            F.binary_cross_entropy_with_logits(logits[keep], o2r[keep])
+            + F.binary_cross_entropy_with_logits(logits.t()[keep], r2o[keep])
+        )
+        with torch.no_grad():  # retrieval top-1: từ gốc tìm đúng bản related của nó
+            real = retrieval_labels.diagonal() != -1
+            rows = real.nonzero(as_tuple=True)[0]
+            best = logits.detach().masked_fill(~real.unsqueeze(0), -1e9)[rows].argmax(dim=1)
+            accuracy = (retrieval_labels[rows, best] > 0.5).float().mean()
+        return loss, accuracy
 
     def forward(
         self,
@@ -277,14 +310,20 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_to_word_map,
         ocr_char_ids,
         ocr_char_mask,
-        ocr_word_mask,
+        ocr_word_mask=None,
         attention_mask=None,
         ocr_attention_mask=None,
         labels=None,
         decoder_input_ids=None,
         decoder_attention_mask=None,
+        twc_o2r=None,
+        twc_r2o=None,
+        twc_group_ids=None,
+        ocr_words=None,
     ):
-        encoded, mask = self.encode(
+        if ocr_attention_mask is None:
+            ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
+        encoded, mask, ocr_offset = self.encode(
             input_ids,
             pixel_values,
             ocr_info,
@@ -308,6 +347,11 @@ class OpenViVQAModel(PreTrainedModel):
                 return_dict=True,
             )
             result.update(loss=decoded.loss, logits=decoded.logits)
+        if self.config.use_twc and twc_o2r is not None:
+            result["twc_loss"], result["twc_acc"] = self._twc(
+                encoded.last_hidden_state, ocr_offset, ocr_to_word_map, ocr_attention_mask,
+                twc_o2r, twc_r2o, twc_group_ids,
+            )
         return result
 
     @torch.no_grad()
@@ -327,8 +371,10 @@ class OpenViVQAModel(PreTrainedModel):
         generation_config=None,
         **generation_kwargs,
     ):
+        for name in ("twc_o2r", "twc_r2o", "twc_group_ids", "ocr_words", "labels"):
+            generation_kwargs.pop(name, None)
         if encoder_outputs is None:
-            encoder_outputs, attention_mask = self.encode(
+            encoder_outputs, attention_mask, _ = self.encode(
                 input_ids,
                 pixel_values,
                 ocr_info,
