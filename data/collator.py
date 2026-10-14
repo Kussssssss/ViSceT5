@@ -1,5 +1,7 @@
 """Build deterministic image/question/OCR batches for answer generation."""
 
+import hashlib
+import random
 import re
 
 import torch
@@ -15,11 +17,25 @@ from data.vocab import (
     _normalize_text,
 )
 
+RELATED_MODES = ("none", "correct", "twa")
+
+
+def _stable_hash(text):
+    return int.from_bytes(hashlib.md5(text.encode("utf-8")).digest()[:8], "little")
+
 
 class ViT5VQADataCollator:
-    """OCR features stay aligned with their original image and text entries."""
+    """OCR features stay aligned with their original image and text entries.
 
-    def __init__(self, tokenizer, image_processor, ocr_encoder, config):
+    related_mode:
+      none    — OCR gốc (W entry).
+      correct — thêm bản OCR đã sửa (kênh sửa OCR, xác định) → 2W entry.
+      twa     — thêm bản tăng cường kiểu TWA + nhãn TWC (chỉ dùng khi train với TWC).
+    Nửa related đứng sau nửa gốc và dùng chung box/det/rec của entry gốc tương ứng.
+    """
+
+    def __init__(self, tokenizer, image_processor, ocr_encoder, config,
+                 corrector=None, related_mode="none", seed=42):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -28,6 +44,14 @@ class ViT5VQADataCollator:
         self.char_set = {char: index for index, char in enumerate(COMBINED_CHARS)}
         self.char_max_num = config.char_max_num
         self.seq_max = config.ocr_max_scene_text
+        self.corrector = corrector
+        self.related_mode = related_mode
+        self.seed = int(seed)
+        self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
+        if related_mode not in RELATED_MODES:
+            raise ValueError(f"related_mode must be one of {RELATED_MODES}.")
+        if related_mode != "none" and corrector is None:
+            raise ValueError("The related OCR copy needs an OCRCorrector.")
         if self.seq_max < 1 or self.char_max_num < 1:
             raise ValueError("OCR word and character limits must be positive.")
         if self.pad_id is None:
@@ -97,10 +121,22 @@ class ViT5VQADataCollator:
                 "det_features": torch.zeros(1, self.cfg.ocr_d_det),
                 "rec_features": torch.zeros(1, self.cfg.ocr_d_rec),
             }
-        info.update(texts=texts, width=raw["width"], height=raw["height"])
+        info.update(texts=texts, width=raw["width"], height=raw["height"], placeholder=not keep)
         return info
 
-    def _encode_ocr_text(self, texts, word_count):
+    def _related(self, item, sample):
+        """Related copy (+ TWC labels in twa mode). The <unk> placeholder is never edited."""
+        texts = item["texts"]
+        if item["placeholder"]:
+            return list(texts), None, None
+        if self.related_mode == "correct":
+            return self.corrector.correct(texts), None, None
+        # TWA: cố định theo mẫu (như seed tăng cường cố định của TWA) → tái lập được,
+        # độc lập số worker DataLoader và PYTHONHASHSEED.
+        rng = random.Random(_stable_hash(f"{self.seed}|{sample['image_path']}|{sample['question']}"))
+        return self.corrector.augment(texts, self.cfg.twc_adv_probability, rng)
+
+    def _encode_ocr_text(self, texts, word_count, offset=0):
         char_ids = torch.zeros(word_count, self.char_max_num, dtype=torch.long)
         char_mask = torch.zeros_like(char_ids, dtype=torch.float)
         token_ids, word_map = [], []
@@ -109,18 +145,13 @@ class ViT5VQADataCollator:
             if not ids:
                 ids = [self.tokenizer.unk_token_id]
             token_ids.extend(ids)
-            word_map.extend([index] * len(ids))
+            word_map.extend([offset + index] * len(ids))
             for position, char in enumerate(text[: self.char_max_num]):
                 char_ids[index, position] = self.char_set.get(
                     char, self.char_set["<unk>"]
                 )
                 char_mask[index, position] = 1.0
-        return (
-            torch.tensor(token_ids, dtype=torch.long),
-            torch.tensor(word_map, dtype=torch.long),
-            char_ids,
-            char_mask,
-        )
+        return token_ids, word_map, char_ids, char_mask
 
     def __call__(self, batch):
         if not batch:
@@ -147,22 +178,50 @@ class ViT5VQADataCollator:
         word_count = min(
             self.seq_max, ((max(len(item["texts"]) for item in info) + 7) // 8) * 8
         )
+        with_related = self.related_mode != "none"
+        twa = self.related_mode == "twa"
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
-        for item in info:
+        o2r_all, r2o_all, groups, words = [], [], [], []
+        for sample, item in zip(batch, info):
             count = len(item["texts"])
             ids, mapping, chars, mask = self._encode_ocr_text(item["texts"], word_count)
-            token_ids.append(ids)
-            word_maps.append(mapping)
-            char_ids.append(chars)
-            char_masks.append(mask)
-            word_masks.append(torch.arange(word_count) < count)
+            valid = torch.arange(word_count) < count
             for key in ("boxes", "det_features", "rec_features"):
                 item[key] = torch.cat(
-                    [
-                        item[key],
-                        item[key].new_zeros(word_count - count, item[key].shape[-1]),
-                    ]
+                    [item[key], item[key].new_zeros(word_count - count, item[key].shape[-1])]
                 )
+            related = None
+            if with_related:
+                related, o2r, r2o = self._related(item, sample)
+                rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(
+                    related, word_count, offset=word_count
+                )
+                ids, mapping = ids + rel_ids, mapping + rel_map
+                chars, mask = torch.cat([chars, rel_chars]), torch.cat([mask, rel_mask])
+                valid = torch.cat([valid, valid])
+                for key in ("boxes", "det_features", "rec_features"):
+                    item[key] = torch.cat([item[key], item[key]])
+                if twa:
+                    # PAD và placeholder <unk> = -1 (không phải mẫu tương phản).
+                    full_o2r = torch.full((word_count, word_count), -1.0)
+                    full_r2o = torch.full((word_count, word_count), -1.0)
+                    group = torch.full((word_count,), -1, dtype=torch.long)
+                    if o2r is not None:
+                        full_o2r[:count, :count] = torch.tensor(o2r)
+                        full_r2o[:count, :count] = torch.tensor(r2o)
+                        group[:count] = torch.tensor(
+                            [_stable_hash(f"{sample['image_path']}|{text}") & 0x3FFFFFFF
+                             for text in item["texts"]]
+                        )
+                    o2r_all.append(full_o2r)
+                    r2o_all.append(full_r2o)
+                    groups.append(group)
+            token_ids.append(torch.tensor(ids, dtype=torch.long))
+            word_maps.append(torch.tensor(mapping, dtype=torch.long))
+            char_ids.append(chars)
+            char_masks.append(mask)
+            word_masks.append(valid)
+            words.append({"orig": list(item["texts"]), "rel": related})
         ids = pad_sequence(token_ids, batch_first=True, padding_value=self.pad_id)
         result = {
             "input_ids": questions.input_ids,
@@ -180,6 +239,14 @@ class ViT5VQADataCollator:
             "ocr_char_mask": torch.stack(char_masks),
             "ocr_word_mask": torch.stack(word_masks).long(),
         }
+        if twa:
+            result.update(
+                twc_o2r=torch.stack(o2r_all),
+                twc_r2o=torch.stack(r2o_all),
+                twc_group_ids=torch.stack(groups),
+            )
+        if self.return_ocr_words:
+            result["ocr_words"] = words
         # Unlabelled inference batches do not create an all-ignored decoder loss.
         answers = [sample.get("answer") for sample in batch]
         if all(answer is not None and str(answer).strip() for answer in answers):

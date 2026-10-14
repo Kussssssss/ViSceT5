@@ -27,8 +27,15 @@ class OpenViVQAConfig(PretrainedConfig):
         self,
         vit5_name: str = "VietAI/vit5-base",
         clip_vision_name: str = "openai/clip-vit-base-patch16",
-        ablation_use_qaclip: bool = True,
+        ablation_use_qaclip: bool = False,
         ablation_use_ocr: bool = True,
+        ablation_use_image: bool = True,
+        ablation_use_ocr_aug: bool = True,
+        use_twc: bool = False,
+        twc_weight: float = 1.0,
+        twc_adv_probability: float = 0.35,
+        twc_label_list: Optional[List[float]] = None,
+        ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
         decoder_start_token_id: Optional[int] = None,
@@ -82,6 +89,19 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_vision_name = clip_vision_name
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
         self.ablation_use_ocr = bool(ablation_use_ocr)
+        # Bỏ ảnh: CLIP không được dựng, encoder chỉ nhận [câu hỏi, OCR].
+        self.ablation_use_image = bool(ablation_use_image)
+        # Kênh sửa OCR: nối bản OCR đã sửa (related) sau bản gốc.
+        self.ablation_use_ocr_aug = bool(ablation_use_ocr_aug)
+        # TWC (TWA, Jin et al. MM'22): loss phụ khi train, cần nửa related → cần OCR-Aug.
+        self.use_twc = bool(use_twc)
+        self.twc_weight = float(twc_weight)
+        self.twc_adv_probability = float(twc_adv_probability)
+        # [o2r, r2o] cho cặp bị tăng cường (nhiễu ký tự / sửa từ); cặp giữ nguyên = 1.0.
+        self.twc_label_list = list(twc_label_list) if twc_label_list is not None else [0.9, 0.9]
+        self.ocr_edit_distance = int(ocr_edit_distance)
+        if self.use_twc and not self.ablation_use_ocr_aug:
+            raise ValueError("use_twc needs ablation_use_ocr_aug=True (TWC pairs each OCR word with its related copy).")
 
         self.qa_clip_d_text = qa_clip_d_text
         self.pad_token_id = pad_token_id
