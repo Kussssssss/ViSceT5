@@ -1,4 +1,8 @@
 dataset_name: OpenViVQA
+# LƯU Ý: id 'test' cũ (10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc) tải về 1.66GB — KHÔNG phải
+# JSON annotation (chỉ vài MB) mà chính là ZIP ẢNH → yaml gốc gán nhãn SAI. Đã chuyển
+# id đó sang 'image' (đúng vai trò). 'test' để trống → finetune bỏ qua (chỉ cần
+# train+val); khi nào có id JSON test THẬT (public) thì điền lại để predict/eval test.
 dataset:
   train:
     dir: ""
@@ -8,10 +12,16 @@ dataset:
     drive_id: "1uo-HI_vrT2UGZEDP6NNivw2Dx16Q-Dbr"
   test:
     dir: ""
-    drive_id: "10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc"
+    # SUBSET 3536 câu CÓ ground-truth (list, id inline) — chỉ predict đúng phần chấm được,
+    # KHÔNG phí 14k câu. (Bản đầy đủ 14035 câu = 1OY1eOfrtUUHorG3uDfJzOGv_e0NU7LIP nếu cần.)
+    drive_id: "10azOS9TzgQl8HrztbexlKh08pkyMb4m5"
 image:
   dir: ""
-  drive_id: "12w-9Nlq2cM3qQY_8k1k2d0n5UqL3z0hH"
+  # primary = 10z-92 chứa ảnh TRAIN+DEV (cần cho finetune); backup = 1Mv3aS (test-images,
+  # dùng cho predict test). LƯU Ý: gdown chỉ tải PRIMARY (backup chỉ khi primary lỗi) —
+  # đây là 2 BỘ ẢNH KHÁC NHAU: finetune (train+dev) dùng 10z-92; predict test cần 1Mv3aS
+  # (khi predict test thì đảo primary hoặc dùng --image_dir_override).
+  drive_id: "10z-92oXTvX2hIk0ds4yJOOHav5GGiEyc, 1Mv3aSahvoQV6cT6Av-gwYQOgB8g7bGq3"
 ocr:
   dir: ""
   drive_id: "1Jk0Gl04Xlsc1U86XcTaRbsF6EUvHxgFx"
