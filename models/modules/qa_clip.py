@@ -159,6 +159,8 @@ class MMCLIPEncoderLayer(nn.Module):
 def _instruction_layers(integration_point, num_layers):
     """The six integration schedules implemented by QA-ViT."""
     schedules = {
+        # "none": CLIP thường, không adapter nào (dùng khi CLIP không nhận câu hỏi).
+        "none": lambda i: False,
         "all": lambda i: True,
         "early": lambda i: i < num_layers // 2,
         "late": lambda i: i >= num_layers // 2,
