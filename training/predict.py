@@ -59,6 +59,7 @@ def main(args_list=None):
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--num_beams", type=int, default=0, help="0 = config value")
     parser.add_argument("--max_new_tokens", type=int, default=0, help="0 = config value")
+    parser.add_argument("--limit", type=int, default=0, help="only the first N questions (smoke test)")
     args = parser.parse_args(args_list)
 
     model, tokenizer = load_model_and_tokenizer(args.ckpt_dir)
@@ -72,6 +73,8 @@ def main(args_list=None):
     outputs = []
     for split in (("dev", "test") if args.split == "both" else (args.split,)):
         frame = frames[SPLITS[split]]
+        if args.limit:
+            frame = frame.head(args.limit)
         if frame.empty or "id" not in frame:
             print(f"[{split}] no data or no 'id' column — skipped.")
             continue

@@ -19,7 +19,7 @@ from training.common import (
     parse_args_with_yaml_and_cli,
 )
 from training.hub_sync import PushEachCheckpoint, hub_target, resume_from_hub
-from training.metrics import build_compute_metrics
+from training.metrics import build_compute_metrics, java_available
 from training.trainer import VQATrainer
 from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
@@ -60,6 +60,9 @@ def main(args_list=None):
     best_metric = os.environ.get("METRIC_FOR_BEST_MODEL", "").strip() or (
         "cider" if data_args.dataset_name == "OpenViVQA" else "em_f1"
     )
+    if best_metric == "cider" and not java_available():
+        print("[finetune] CIDEr needs Java, which is missing -> best checkpoint by em_f1 instead.")
+        best_metric = "em_f1"
     training_args.metric_for_best_model = best_metric
     training_args.greater_is_better = best_metric not in ("loss", "eval_loss")
 

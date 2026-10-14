@@ -83,6 +83,8 @@ def run():
                          "--split", _env("PREDICT_SPLIT") or "both"]
             if _env("PREDICT_BATCH_SIZE"):
                 arguments += ["--batch_size", _env("PREDICT_BATCH_SIZE")]
+            if _env("PREDICT_LIMIT"):
+                arguments += ["--limit", _env("PREDICT_LIMIT")]
             return predict(arguments)
         from training.finetune import main
 
