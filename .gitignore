@@ -165,5 +165,8 @@ checkpoints/
 !notebooks/finetune_colab.ipynb
 !notebooks/pretrain_colab.ipynb
 !notebooks/verify_data_resolution_colab.ipynb
+!notebooks/repro_vast_colab.ipynb
 # Đáp án test công khai dùng cho training/benchmark_eval.py
 !eval_gt/*.json
+# File nộp test gốc của run Vast, tham chiếu cho notebooks/repro_vast_colab.ipynb
+!repro/*.csv

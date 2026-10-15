@@ -150,6 +150,7 @@ def upload(a, token):
     if not token:
         sys.exit("❌ Thiếu HF_TOKEN → không upload được; hãy tải file về trước khi ngắt phiên.")
     api = HfApi(token=token)
+    api.create_repo(repo_id=a.repo, repo_type="model", exist_ok=True)
     for f in a.files:
         p = os.path.join(a.dir, f)
         if os.path.exists(p):
