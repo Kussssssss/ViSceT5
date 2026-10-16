@@ -48,12 +48,25 @@ tokens; model tổng không yêu cầu xuất attention maps và không trích x
 Chi tiết đối chiếu QAClip với repo QA-ViT gốc, khởi tạo adapter và các điều chỉnh
 được ghi tại [QA_VIT_REFACTOR.md](QA_VIT_REFACTOR.md).
 
-OCR Consformer encode chuỗi subword qua GroupAttention. Mapping subword→entry
-gắn box, det/rec và character features với từng subword. SemanticOCREmbedding
-hợp nhất các feature đó. Mọi nhánh đưa vào ViT5 phải có cùng chiều d_model.
+Nhánh OCR đầy đủ trên `research/ocr-image-joint-attention`:
 
-Encoder ViT5 nhận chuỗi ghép: question embeddings, CLIP patch tokens, OCR features,
-một token trung bình patch. Attention mask được ghép
+1. Giữ det/rec/bbox ở entry-level (mỗi bbox là một token), Linear riêng về d_model,
+   cộng ba feature **trước norm**, rồi qua `nn.RMSNorm(eps=ViT5 epsilon)`.
+2. Concat `[image patches sau QA-ViT, OCR visual entries]`, qua ba lớp joint
+   self-attention độc lập. Mỗi lớp là `x + MHA(RMSNorm(x))`, số head của ViT5,
+   không FFN/dropout. Cả hai nhóm token đều được cập nhật; không xuất attention maps.
+3. Attention dùng `ocr_word_mask` để loại padding khỏi keys/values, đồng thời zero
+   output padding sau mỗi lớp. Tách lại image/region features bằng độ dài image gốc.
+4. OCR visual qua T5LayerNorm ở entry-level, rồi gather về subword bằng
+   `ocr_to_word_map`. OCR Consformer vẫn encode subwords qua GroupAttention như cũ;
+   cộng visual mới với tok/char qua hai T5Norm riêng. Output OCR padding được zero.
+
+Không nhân bản visual entry theo số subword trước attention. Ảnh có thể attend
+OCR và OCR có thể attend ảnh. Gradient xuyên suốt nhánh này và question encoder;
+backbone CLIP vẫn freeze như trước. Tất cả feature đưa vào ViT5 có chiều d_model.
+
+Encoder ViT5 nhận chuỗi ghép: question embeddings, image tokens sau joint attention,
+OCR features hoàn chỉnh, một token trung bình của image tokens đã cập nhật. Attention mask được ghép
 cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 
 ## Module và ablation
@@ -63,11 +76,12 @@ cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 | `models/modules/qa_clip.py` | CLIP với instruction ở nửa sau encoder; giữ cơ chế freeze CLIP gốc |
 | `models/modules/ocr_consformer.py` | OCR encoder với GroupAttention |
 | `models/modules/ocr_spatial.py` | Semantic OCR embedding và spatial utilities |
+| `models/modules/ocr_image_fusion.py` | Ba lớp residual self-attention cho ảnh/OCR entry-level |
 | `models/modules/ocr_encoder_feature.py` | Đọc OCR features và chuẩn hóa box |
 
 Tắt QACLIP nghĩa là bỏ instruction câu hỏi, vẫn chạy CLIP. Tắt OCR module nghĩa là dùng encoder lite
 cho text/character/box, vẫn nhận thông tin OCR. Đây là các baseline ablation
-của repository, cần giữ ý nghĩa này khi thiết kế thí nghiệm tiếp theo.
+của repository. Nhánh OCR-lite bỏ qua joint attention và giữ output cũ.
 
 ## Training, evaluation và checkpoint
 
@@ -83,6 +97,9 @@ Checkpoint dùng định dạng Hugging Face thông thường, gồm config, mod
 resume từ `checkpoint-*` còn khôi phục optimizer, scheduler và Trainer state.
 Checkpoint có Visual Search có thể dùng để warm-start những trọng số còn lại;
 không resume optimizer của kiến trúc cũ vì danh sách parameter đã thay đổi.
+Checkpoint baseline khởi tạo random ba attention mới; RMSNorm và T5Norm visual
+mới khởi tạo scale=1. Ba norm riêng det/rec/bbox cũ được thay thế, không nạp vào
+hai norm visual mới. Linear det/rec/bbox và tok/char norm cũ vẫn được nạp.
 Các checkpoint cũ chứa head hoặc metadata của những mục tiêu đã bỏ không phải
 checkpoint chuẩn của luồng mới; các tensor batch cũ cũng đã đổi sang API OCR ở trên.
 
@@ -94,5 +111,8 @@ Các tiện ích chuẩn bị dữ liệu/vocabulary được giữ để phục
 `tests/test_vqa_pipeline.py` kiểm tra bằng ảnh/OCR tổng hợp và backbone ngẫu nhiên
 kích thước nhỏ: alignment, padding, OCR rỗng, dữ liệu không nhãn, 4 tổ hợp ablation,
 loss/backward, cached generation, checkpoint sharding và train/evaluate/resume.
+Tests nhánh mới kiểm tra fusion trước subword mapping, công thức sum/norm,
+mask padding (cả khi không có OCR hợp lệ), gradient hai chiều image/region và
+khởi tạo attention còn thiếu khi warm-start từ baseline.
 Việc này xác minh luồng mã; chất lượng nghiên cứu và tài nguyên GPU cần được đo
 qua thí nghiệm trên dataset và backbone thực tế.

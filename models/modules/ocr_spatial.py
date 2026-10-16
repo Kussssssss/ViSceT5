@@ -135,70 +135,53 @@ class SpatialCirclePosition(ScaledDotProductAttention_Embedding):
         return out, att
 
 class SemanticOCREmbedding(nn.Module):
+    """Project visual OCR entries, then combine contextual regions with subwords."""
+
     def __init__(self, ns):
         super().__init__()
-        # Each modality learns an independent RMSNorm initialized with unit scale.
         norm_eps = getattr(ns, "layer_norm_epsilon", 1e-6)
         self.linear_boxes = nn.Linear(4, ns.d_model)
-        self.layer_norm_bboxes = T5LayerNorm(ns.d_model, eps=norm_eps)
-
         self.linear_det = nn.Linear(ns.d_det, ns.d_model)
-        self.layer_norm_det = T5LayerNorm(ns.d_model, eps=norm_eps)
-
         self.linear_rec = nn.Linear(ns.d_rec, ns.d_model)
-        self.layer_norm_rec = T5LayerNorm(ns.d_model, eps=norm_eps)
-
+        self.visual_fusion_norm = nn.RMSNorm(ns.d_model, eps=norm_eps)
+        self.layer_norm_visual = T5LayerNorm(ns.d_model, eps=norm_eps)
         self.layer_norm_tok = T5LayerNorm(ns.d_model, eps=norm_eps)
         self.layer_norm_char = T5LayerNorm(ns.d_model, eps=norm_eps)
 
-    def forward(self, ocr_info, ocr_tok_features, ocr_char_features):
-        W = self.linear_boxes.weight
-        target_device = W.device
-        target_dtype  = W.dtype
-
-        boxes, dets, recs = [], [], []
+    def project_visual(self, ocr_info, word_mask):
+        """Sum Linear(det/rec/box), then RMSNorm, once per OCR region."""
+        reference = self.linear_boxes.weight
+        regions = []
         for info in ocr_info:
+            boxes = torch.as_tensor(
+                info["boxes"], device=reference.device, dtype=reference.dtype
+            )
+            features = self.linear_boxes(boxes)
+            for key, projection in (
+                ("det_features", self.linear_det),
+                ("rec_features", self.linear_rec),
+            ):
+                if info.get(key) is not None:
+                    features = features + projection(torch.as_tensor(
+                        info[key], device=reference.device, dtype=reference.dtype
+                    ))
+            regions.append(features)
+        fused = self.visual_fusion_norm(torch.stack(regions).to(reference.dtype))
+        return fused.masked_fill(~word_mask.bool().unsqueeze(-1), 0)
 
-            b = info["boxes"]
-            if not torch.is_tensor(b): b = torch.tensor(b, device=target_device, dtype=target_dtype)
-            else: b = b.to(device=target_device, dtype=target_dtype)
-            boxes.append(b)
-
-            d = info.get("det")
-            if d is not None:
-                if not torch.is_tensor(d): d = torch.tensor(d, device=target_device, dtype=target_dtype)
-                else: d = d.to(device=target_device, dtype=target_dtype)
-                dets.append(d)
-
-            r = info.get("rec")
-            if r is not None:
-                if not torch.is_tensor(r): r = torch.tensor(r, device=target_device, dtype=target_dtype)
-                else: r = r.to(device=target_device, dtype=target_dtype)
-                recs.append(r)
-
-        ocr_boxes = torch.stack(boxes, dim=0)
-        ocr_box_features = self.layer_norm_bboxes(self.linear_boxes(ocr_boxes))
-
-        if len(dets) > 0:
-            ocr_dets = torch.stack(dets, dim=0)
-            ocr_det_features = self.layer_norm_det(self.linear_det(ocr_dets))
-        else:
-            ocr_det_features = 0.0
-
-        if len(recs) > 0:
-            ocr_recs = torch.stack(recs, dim=0)
-            ocr_rec_features = self.layer_norm_rec(self.linear_rec(ocr_recs))
-        else:
-            ocr_rec_features = 0.0
-
-        ocr_tok_features = ocr_tok_features.to(device=target_device, dtype=target_dtype)
-        ocr_char_features = ocr_char_features.to(device=target_device, dtype=target_dtype)
-
-        ocr_tok_norm = self.layer_norm_tok(ocr_tok_features)
-        ocr_char_norm = self.layer_norm_char(ocr_char_features)
-
-        combined_text_features = ocr_tok_norm + ocr_char_norm
-
-        final_features = ocr_box_features + ocr_det_features + ocr_rec_features + combined_text_features
-
-        return final_features, combined_text_features
+    def forward(
+        self, visual_features, ocr_tok_features, ocr_char_features, word_map, token_mask
+    ):
+        """T5Norm contextual regions before gathering to each OCR subword."""
+        valid = (word_map >= 0) & token_mask.bool()
+        indices = word_map.clamp(0, visual_features.shape[1] - 1)
+        visual = self.layer_norm_visual(visual_features).gather(
+            1, indices.unsqueeze(-1).expand(-1, -1, visual_features.shape[-1])
+        )
+        chars = ocr_char_features.gather(
+            1, indices.unsqueeze(-1).expand(-1, -1, ocr_char_features.shape[-1])
+        )
+        text = self.layer_norm_tok(ocr_tok_features) + self.layer_norm_char(chars)
+        text = text.masked_fill(~valid.unsqueeze(-1), 0)
+        final = (visual + text).masked_fill(~valid.unsqueeze(-1), 0)
+        return final, text

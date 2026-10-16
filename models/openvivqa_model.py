@@ -15,6 +15,7 @@ from transformers.models.t5.modeling_t5 import T5LayerNorm
 from configs.model_config import OpenViVQAConfig
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding
+from models.modules.ocr_image_fusion import JointAttentionLayer, OCRImageFusion
 from models.modules.qa_clip import QACLIPEncoder
 
 
@@ -72,6 +73,7 @@ class OpenViVQAModel(PreTrainedModel):
                 layer_norm_epsilon=norm_eps,
             ),
         )
+        self.image_ocr_fusion = OCRImageFusion(self.d_model, heads, norm_eps)
         self.char_embedding = nn.Embedding(config.char_num, self.d_model)
         self.char_position_embedding = nn.Embedding(config.char_max_num, self.d_model)
         self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=norm_eps)
@@ -101,6 +103,21 @@ class OpenViVQAModel(PreTrainedModel):
             do_sample=False,
         )
         self.post_init()
+
+    def _init_weights(self, module):
+        if isinstance(module, JointAttentionLayer):
+            module.reset_parameters()
+        elif isinstance(module, nn.RMSNorm):
+            module.reset_parameters()
+        elif isinstance(module, SemanticOCREmbedding):
+            # Explicit initialization for missing modules in baseline checkpoints.
+            for layer in module.modules():
+                if isinstance(layer, nn.Linear):
+                    layer.reset_parameters()
+                elif isinstance(layer, nn.RMSNorm):
+                    layer.reset_parameters()
+                elif isinstance(layer, T5LayerNorm):
+                    layer.weight.data.fill_(1)
 
     @property
     def target_dtype(self):
@@ -158,7 +175,16 @@ class OpenViVQAModel(PreTrainedModel):
         return self.ocr_char_layernorm((features * mask.unsqueeze(-1)).mean(dim=-2))
 
     def _encode_ocr(
-        self, info, ids, token_mask, word_map, char_ids, char_mask, word_mask
+        self,
+        info,
+        ids,
+        token_mask,
+        word_map,
+        char_ids,
+        char_mask,
+        word_mask,
+        image_tokens,
+        image_mask,
     ):
         char_features = self._char_features(char_ids, char_mask)
         valid = (word_map >= 0) & token_mask.bool()
@@ -181,28 +207,20 @@ class OpenViVQAModel(PreTrainedModel):
             text = text + self.ocr_lite_text_ff(text)
             box_features = self.ocr_lite_box_proj(boxes)
             box_features = box_features + self.ocr_lite_box_ff(box_features)
-            return (text + box_features) * word_mask.unsqueeze(-1), word_mask
-        text_features, _ = self.ocr_encoder(ids, token_mask)
-        results = []
-        for batch_index, item in enumerate(info):
-            mapping = indices[batch_index]
-            keep = valid[batch_index].unsqueeze(-1)
-            token_info = {
-                "width": item["width"],
-                "height": item["height"],
-                "boxes": boxes[batch_index][mapping] * keep,
-                "det": item["det_features"].to(ids.device, self.target_dtype)[mapping]
-                * keep,
-                "rec": item["rec_features"].to(ids.device, self.target_dtype)[mapping]
-                * keep,
-            }
-            features, _ = self.semantic_ocr_embedding(
-                [token_info],
-                text_features[batch_index : batch_index + 1],
-                (char_features[batch_index][mapping] * keep).unsqueeze(0),
+            return (
+                image_tokens,
+                (text + box_features) * word_mask.unsqueeze(-1),
+                word_mask,
             )
-            results.append(features.squeeze(0))
-        return torch.stack(results), token_mask
+        visual = self.semantic_ocr_embedding.project_visual(info, word_mask)
+        image_tokens, visual = self.image_ocr_fusion(
+            image_tokens, visual, image_mask, word_mask
+        )
+        text_features, _ = self.ocr_encoder(ids, token_mask)
+        features, _ = self.semantic_ocr_embedding(
+            visual, text_features, char_features, word_map, token_mask
+        )
+        return image_tokens, features, token_mask
 
     def encode(
         self,
@@ -232,7 +250,7 @@ class OpenViVQAModel(PreTrainedModel):
         image_tokens, image_mask = self._encode_image(
             pixel_values, question, attention_mask
         )
-        ocr_features, ocr_mask = self._encode_ocr(
+        image_tokens, ocr_features, ocr_mask = self._encode_ocr(
             ocr_info,
             ocr_input_ids,
             ocr_attention_mask,
@@ -240,6 +258,8 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_char_ids,
             ocr_char_mask,
             ocr_word_mask,
+            image_tokens,
+            image_mask,
         )
         summary = image_tokens.mean(dim=1, keepdim=True)
         sequences = [

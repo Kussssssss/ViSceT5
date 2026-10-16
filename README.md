@@ -28,6 +28,8 @@ to resume a complete Trainer checkpoint with optimizer/scheduler state.
 Weights from older checkpoints with Visual Search can be loaded with
 `--model_name_or_path PATH`; the removed ConvNeXt weights are unused. Start a fresh
 optimizer after this architecture change instead of resuming the old optimizer state.
+On this research branch, baseline checkpoints also initialize the new joint-attention
+layers and visual OCR norms; the old separate det/rec/box norm weights are unused.
 
 Model checkpoints and the tokenizer are saved together in `output/finetune`;
 the image processor is saved in its `image_processor/` subdirectory.
@@ -49,6 +51,16 @@ The two flags in `configs/finetune.yaml` select the existing ablation baselines:
 | `ablation_use_qaclip` | CLIP without question instruction |
 | `ablation_use_ocr` | Lightweight OCR text/character/box features |
 
+The full OCR branch first sums the independent Linear projections of det, rec and
+bbox features **at OCR entry level**, then applies `nn.RMSNorm`. The sequence
+`[QA-ViT image patches, fused OCR regions]` passes through three independent joint
+self-attention layers. Each uses `x + MHA(RMSNorm(x))`, ViT5's head count, and no
+FFN/dropout. OCR padding is excluded from keys/values and zeroed after every layer.
+The updated OCR regions pass through T5LayerNorm, then `ocr_to_word_map` expands
+them to subwords before adding the original normalized tok/char features. The
+image patches and mean patch token both use the updated image features. The
+OCR-lite baseline bypasses this interaction and keeps its previous behavior.
+
 The collator filters and normalizes the original OCR entries while retaining the
 alignment between text, boxes, detection features, and recognition features.
 It produces `ocr_input_ids`, `ocr_attention_mask`, `ocr_to_word_map`,
@@ -60,7 +72,7 @@ unlabelled.
 answer loss, and `generate()` can reuse that memory. `VQATrainer` performs evaluation
 generation from the same encoder result and writes `train_metrics.jsonl`.
 
-The fused sequence is `[question embeddings, CLIP patches, OCR features, mean patch token]`.
+The fused sequence is `[question embeddings, updated image patches, OCR features, mean updated patch token]`.
 Visual Search, ConvNeXt, ROI crops and crop tokens have been removed.
 `models/modules/visual_search.py` is retained only as reference source and is not
 imported by the active model or module package. Image and OCR features enter the

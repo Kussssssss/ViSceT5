@@ -29,6 +29,7 @@ from configs.arguments import CustomTrainingArguments, DataArguments, ModelArgum
 from configs.model_config import OpenViVQAConfig
 from data.dataset import ViT5VQADataset
 from models.modules.qa_clip import QACLIPEncoder
+from models.modules.ocr_image_fusion import OCRImageFusion, JointAttentionLayer
 from models.openvivqa_model import OpenViVQAModel
 from training.common import (
     PROJECT_ROOT,
@@ -83,6 +84,7 @@ def test_memory_audit_uses_same_batch_and_real_optimizer(
     assert report["groups"]["vit5"]["with_gradient"] > 0
     assert report["groups"]["ocr_encoder"]["with_gradient"] > 0
     assert report["groups"]["qa_clip"]["with_gradient"] > 0
+    assert report["groups"]["image_ocr_fusion"]["optimizer_state_bytes"] > 0
     assert "visual_search" not in report["groups"]
     missing = [
         n
@@ -393,6 +395,10 @@ def test_all_ablations_forward_backward_generate(
     expected_length = batch["input_ids"].shape[1] + 4 + ocr_length + 1
     assert outputs["attention_mask"].shape == (2, expected_length)
     assert model.get_input_embeddings().weight.grad is not None
+    assert all(
+        (parameter.grad is not None) == ocr
+        for parameter in model.image_ocr_fusion.parameters()
+    )
     model.eval()
     inputs = {key: value for key, value in batch.items() if key != "labels"}
     with torch.no_grad():
@@ -499,6 +505,158 @@ def test_image_size_overrides_legacy_visual_search_size():
     assert "ablation_use_vs" not in config.to_dict()
 
 
+def test_region_fusion_precedes_subword_mapping_and_text_sum(model, tokenizer, samples):
+    model.eval()
+    batch = build_collator(model, tokenizer)(samples)
+    captured = {}
+
+    def capture_joint(module, args, output):
+        captured["joint_input"] = args
+        captured["joint_output"] = output
+
+    def capture_semantic(module, args, output):
+        captured["semantic_input"] = args
+        captured["semantic_output"] = output
+
+    def capture_encoder(module, args, kwargs):
+        if "inputs_embeds" in kwargs:
+            captured["fused"] = kwargs["inputs_embeds"]
+
+    hooks = [
+        model.image_ocr_fusion.register_forward_hook(capture_joint),
+        model.semantic_ocr_embedding.register_forward_hook(capture_semantic),
+        model.vit5.encoder.register_forward_pre_hook(capture_encoder, with_kwargs=True),
+    ]
+    try:
+        outputs = model(**batch)
+    finally:
+        for hook in hooks:
+            hook.remove()
+    image_in, visual_in, image_mask, word_mask = captured["joint_input"]
+    image_out, visual_out = captured["joint_output"]
+    assert visual_in.shape == (2, batch["ocr_word_mask"].shape[1], model.d_model)
+    assert visual_in.shape[1] != batch["ocr_input_ids"].shape[1]
+    assert len(model.image_ocr_fusion.layers) == 3
+    assert len({id(layer.attention) for layer in model.image_ocr_fusion.layers}) == 3
+    semantic = model.semantic_ocr_embedding
+    projected = torch.stack(
+        [
+            semantic.linear_det(info["det_features"])
+            + semantic.linear_rec(info["rec_features"])
+            + semantic.linear_boxes(info["boxes"])
+            for info in batch["ocr_info"]
+        ]
+    )
+    expected = semantic.visual_fusion_norm(projected).masked_fill(
+        ~word_mask.bool().unsqueeze(-1), 0
+    )
+    torch.testing.assert_close(visual_in, expected)
+    regions, text_features, chars, mapping, mask = captured["semantic_input"]
+    torch.testing.assert_close(regions, visual_out)
+    index = mapping.clamp_min(0).unsqueeze(-1).expand(-1, -1, model.d_model)
+    visual_tokens = semantic.layer_norm_visual(visual_out).gather(1, index)
+    text = semantic.layer_norm_tok(text_features)
+    text = text + semantic.layer_norm_char(chars.gather(1, index))
+    expected = (visual_tokens + text).masked_fill(~mask.bool().unsqueeze(-1), 0)
+    torch.testing.assert_close(captured["semantic_output"][0], expected)
+    # Entry 0 has two subwords: contextual visual evidence is repeated only here.
+    torch.testing.assert_close(visual_tokens[:, 0], visual_tokens[:, 1])
+    assert not torch.allclose(image_in, image_out)
+    q_length = batch["input_ids"].shape[1]
+    torch.testing.assert_close(captured["fused"][:, q_length : q_length + 4], image_out)
+    torch.testing.assert_close(
+        captured["fused"][:, -1:], image_out.mean(1, keepdim=True)
+    )
+    outputs["loss"].backward()
+    assert all(
+        p.grad is not None and torch.isfinite(p.grad).all()
+        for p in model.image_ocr_fusion.parameters()
+    )
+
+
+def test_joint_attention_masks_regions_and_preserves_two_way_gradients():
+    fusion = OCRImageFusion(32, 4, 1e-6).eval()
+    images = torch.randn(2, 4, 32, requires_grad=True)
+    regions = torch.randn(2, 5, 32, requires_grad=True)
+    image_mask = torch.ones(2, 4, dtype=torch.long)
+    word_mask = torch.tensor([[1, 1, 0, 0, 0], [0, 0, 0, 0, 0]])
+    image_out, region_out = fusion(images, regions, image_mask, word_mask)
+    changed = regions.detach().clone()
+    changed[~word_mask.bool()] = float("nan")
+    masked_image, masked_regions = fusion(images, changed, image_mask, word_mask)
+    torch.testing.assert_close(image_out, masked_image)
+    torch.testing.assert_close(region_out, masked_regions)
+    assert torch.isfinite(image_out).all() and torch.isfinite(region_out).all()
+    assert not region_out[~word_mask.bool()].any()
+    padded_regions = torch.cat((regions, torch.randn(2, 3, 32)), dim=1)
+    padded_mask = torch.cat((word_mask, torch.zeros(2, 3, dtype=torch.long)), dim=1)
+    padded_image, padded_output = fusion(
+        images, padded_regions, image_mask, padded_mask
+    )
+    torch.testing.assert_close(image_out, padded_image)
+    torch.testing.assert_close(region_out, padded_output[:, :5])
+    grad_regions = torch.autograd.grad(
+        image_out.square().sum(), regions, retain_graph=True
+    )[0]
+    grad_images = torch.autograd.grad(region_out.square().sum(), images)[0]
+    assert grad_regions[word_mask.bool()].abs().sum() > 0
+    assert not grad_regions[~word_mask.bool()].any()
+    assert grad_images.abs().sum() > 0
+
+
+def test_baseline_warm_start_initializes_missing_fusion_weights(model, tmp_path):
+    state = model.state_dict()
+    new_keys = {
+        name
+        for name in state
+        if name.startswith(
+            (
+                "image_ocr_fusion.",
+                "semantic_ocr_embedding.visual_fusion_norm.",
+                "semantic_ocr_embedding.layer_norm_visual.",
+            )
+        )
+    }
+    baseline = {name: value for name, value in state.items() if name not in new_keys}
+    obsolete = {
+        f"semantic_ocr_embedding.layer_norm_{name}.weight": torch.ones(model.d_model)
+        for name in ("bboxes", "det", "rec")
+    }
+    model.save_pretrained(
+        tmp_path, safe_serialization=False, state_dict={**baseline, **obsolete}
+    )
+    original_init = JointAttentionLayer.__init__
+
+    def poison_skipped_attention(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if not hf_modeling_utils._init_weights:
+            with torch.no_grad():
+                for parameter in self.parameters():
+                    parameter.fill_(float("nan"))
+
+    with patch.object(JointAttentionLayer, "__init__", poison_skipped_attention):
+        restored, info = OpenViVQAModel.from_pretrained(
+            tmp_path, output_loading_info=True
+        )
+    assert set(info["missing_keys"]) == new_keys
+    assert set(info["unexpected_keys"]) == set(obsolete)
+    assert all(torch.isfinite(p).all() for p in restored.parameters())
+    for name, value in baseline.items():
+        torch.testing.assert_close(value, restored.state_dict()[name], rtol=0, atol=0)
+
+
+def test_joint_fusion_mixed_precision_forward_backward(model, tokenizer, samples):
+    batch = build_collator(model, tokenizer)(samples)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        output = model(**batch)
+    assert torch.isfinite(output["loss"])
+    output["loss"].backward()
+    assert all(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in model.image_ocr_fusion.parameters()
+    )
+
+
 def test_ocr_norms_use_fresh_weights_and_vit5_config_epsilon():
     backbone = T5ForConditionalGeneration.from_pretrained("offline")
     source = backbone.encoder.final_layer_norm
@@ -513,9 +671,7 @@ def test_ocr_norms_use_fresh_weights_and_vit5_config_epsilon():
     norms = [model.ocr_lite_text_ln, model.ocr_char_layernorm] + [
         getattr(model.semantic_ocr_embedding, name)
         for name in (
-            "layer_norm_bboxes",
-            "layer_norm_det",
-            "layer_norm_rec",
+            "layer_norm_visual",
             "layer_norm_tok",
             "layer_norm_char",
         )
@@ -525,7 +681,11 @@ def test_ocr_norms_use_fresh_weights_and_vit5_config_epsilon():
         assert norm.variance_epsilon == backbone.config.layer_norm_epsilon
         torch.testing.assert_close(norm.weight, torch.ones_like(norm.weight))
         assert not torch.equal(norm.weight, source.weight)
-    assert len({norm.weight.data_ptr() for norm in [source, *norms]}) == 8
+    assert len({norm.weight.data_ptr() for norm in [source, *norms]}) == len(norms) + 1
+    fusion_norm = model.semantic_ocr_embedding.visual_fusion_norm
+    assert isinstance(fusion_norm, torch.nn.RMSNorm)
+    assert fusion_norm.eps == backbone.config.layer_norm_epsilon
+    torch.testing.assert_close(fusion_norm.weight, torch.ones_like(fusion_norm.weight))
     with torch.no_grad():
         norms[0].weight.add_(1)
     torch.testing.assert_close(norms[1].weight, torch.ones_like(norms[1].weight))
