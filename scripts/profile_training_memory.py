@@ -284,6 +284,7 @@ def main(args_list=None):
                 "models/modules/qa_clip.py",
                 "models/modules/ocr_consformer.py",
                 "models/modules/ocr_spatial.py",
+                "models/modules/ocr_image_fusion.py",
                 "data/collator.py",
                 "training/trainer.py",
             )
@@ -310,6 +311,7 @@ def main(args_list=None):
             "qa_clip",
             "ocr_encoder",
             "semantic_ocr_embedding",
+            "image_ocr_fusion",
         )
     ]
     trace.record("model_loaded")
