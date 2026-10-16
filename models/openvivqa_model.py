@@ -186,13 +186,14 @@ class OpenViVQAModel(PreTrainedModel):
         if not self.config.ablation_use_ocr:
             tokens = self.get_input_embeddings()(ids)
             features = self.ocr_lite_text_proj(self.ocr_lite_text_ln(tokens))
-            return features * token_mask.unsqueeze(-1).to(features.dtype), token_mask
+            features = features * token_mask.unsqueeze(-1).to(features.dtype)
+            return features, token_mask, features
         char_features = self._char_features(char_ids, char_mask)
         valid = (word_map >= 0) & token_mask.bool()
         indices = word_map.clamp(0, char_ids.shape[1] - 1)
         boxes = torch.stack([item["boxes"] for item in info]).to(ids.device, self.target_dtype)
         text_features, _ = self.ocr_encoder(ids, token_mask)
-        results = []
+        results, lexical = [], []
         for batch_index, item in enumerate(info):
             mapping = indices[batch_index]
             keep = valid[batch_index].unsqueeze(-1)
@@ -203,13 +204,14 @@ class OpenViVQAModel(PreTrainedModel):
                 "det": item["det_features"].to(ids.device, self.target_dtype)[mapping] * keep,
                 "rec": item["rec_features"].to(ids.device, self.target_dtype)[mapping] * keep,
             }
-            features, _ = self.semantic_ocr_embedding(
+            features, text_only = self.semantic_ocr_embedding(
                 [token_info],
                 text_features[batch_index : batch_index + 1],
                 (char_features[batch_index][mapping] * keep).unsqueeze(0),
             )
             results.append(features.squeeze(0))
-        return torch.stack(results), token_mask
+            lexical.append(text_only.squeeze(0))  # RMSNorm(ConsFormer) + RMSNorm(chars)
+        return torch.stack(results), token_mask, torch.stack(lexical)
 
     def encode(
         self,
@@ -223,10 +225,12 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_word_mask=None,
         attention_mask=None,
         ocr_attention_mask=None,
+        return_lexical=False,
     ):
         """Encode [question, image patches, OCR] once for loss and generation.
 
-        Returns (encoder outputs, fused mask, start index of the OCR block).
+        Returns (encoder outputs, fused mask, start index of the OCR block)
+        [+ token-level lexical OCR features when return_lexical].
         """
         if attention_mask is None:
             attention_mask = (input_ids != self.config.pad_token_id).long()
@@ -239,7 +243,7 @@ class OpenViVQAModel(PreTrainedModel):
             pieces.append(image_tokens)
             masks.append(image_mask)
         ocr_offset = sum(piece.shape[1] for piece in pieces)
-        ocr_features, ocr_mask = self._encode_ocr(
+        ocr_features, ocr_mask, lexical = self._encode_ocr(
             ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map, ocr_char_ids, ocr_char_mask
         )
         pieces.append(ocr_features)
@@ -250,13 +254,77 @@ class OpenViVQAModel(PreTrainedModel):
         encoded = self.vit5.encoder(
             inputs_embeds=torch.cat(pieces, dim=1), attention_mask=fused_mask, return_dict=True
         )
+        if return_lexical:
+            return encoded, fused_mask, ocr_offset, lexical
         return encoded, fused_mask, ocr_offset
 
-    def _twc(self, hidden, ocr_offset, word_map, token_mask, o2r, r2o, groups):
+    @staticmethod
+    def _soft_infonce(scores, labels, rows):
+        """Softmax cross-entropy per row against the soft multi-positive targets.
+
+        rows: the real (non-PAD) query rows. Columns labelled -1 (padding, ignored text
+        collisions) leave the softmax; positives (1.0 / 0.9, incl. same-text inheritance)
+        share the target mass; a row weighs max(label), so augmented pairs (0.9) count
+        slightly less than exact ones, as in TWA. Extra columns (memory) are negatives (0).
+        """
+        scores, labels = scores[rows], labels[rows]
+        valid = labels != -1
+        positive = labels.clamp(min=0) * valid
+        weight = positive.max(dim=1).values
+        target = positive / positive.sum(dim=1, keepdim=True).clamp_min(1e-12)
+        log_prob = torch.log_softmax(scores.masked_fill(~valid, float("-inf")), dim=1)
+        loss = -(target * log_prob.masked_fill(~valid, 0.0)).sum(dim=1)
+        return (weight * loss).sum() / weight.sum().clamp_min(1e-12)
+
+    @staticmethod
+    def _text_collision(query_text, key_text):
+        """[N, M] True where the (original, related) texts of a query and a candidate share
+        a string. query_text: [N, 2], key_text: [M, 2] hashed texts, -1 = unknown."""
+        hit = torch.zeros(query_text.shape[0], key_text.shape[0], dtype=torch.bool, device=query_text.device)
+        for a in range(2):
+            for b in range(2):
+                q, k = query_text[:, a].unsqueeze(1), key_text[:, b].unsqueeze(0)
+                hit |= (q == k) & (q >= 0) & (k >= 0)
+        return hit
+
+    def _twc_memory(self, dim, device):
+        """FIFO cross-batch memory: a plain attribute, so it is neither saved in checkpoints
+        nor optimised; it restarts empty after a resume."""
+        memory = getattr(self, "_twc_memory_state", None)
+        size = self.config.twc_queue_size
+        if memory is None or memory["original"].device != device or memory["original"].shape != (size, dim):
+            memory = {
+                "original": torch.zeros(size, dim, device=device),
+                "related": torch.zeros(size, dim, device=device),
+                "text": torch.full((size, 2), -1, dtype=torch.long, device=device),
+                "pointer": 0, "filled": 0, "forwards": 0,
+            }
+            self._twc_memory_state = memory
+        return memory
+
+    @torch.no_grad()
+    def _twc_enqueue(self, memory, original, related, text):
+        size, count = memory["original"].shape[0], original.shape[0]
+        if count == 0:
+            return
+        if count >= size:
+            original, related, text, count = original[-size:], related[-size:], text[-size:], size
+        index = (memory["pointer"] + torch.arange(count, device=original.device)) % size
+        # Out-of-place: this step's loss still holds the old bank for its backward pass.
+        memory["original"] = memory["original"].index_copy(0, index, original)
+        memory["related"] = memory["related"].index_copy(0, index, related)
+        memory["text"] = memory["text"].index_copy(0, index, text)
+        memory["pointer"] = (memory["pointer"] + count) % size
+        memory["filled"] = min(size, memory["filled"] + count)
+
+    def _twc(self, tokens, word_map, token_mask, o2r, r2o, groups, text_ids=None):
         """TWC (TWA §3.4–3.6): word features of the original and related OCR copies,
-        cosine similarity with learnable temperature, sigmoid BCE on soft labels."""
+        cosine similarity with learnable temperature; softmax InfoNCE (paper) or
+        sigmoid BCE (TWA code) on the soft labels. tokens: [B, L_ocr, D].
+        text_ids: [B, 2W] hashed word texts (original half, related half), -1 = PAD.
+        With twc_queue_size > 0 the softmax also sees the features of earlier batches."""
         batch, words = o2r.shape[:2]
-        tokens = hidden[:, ocr_offset : ocr_offset + word_map.shape[1]].float()
+        tokens = tokens.float()
         valid = ((word_map >= 0) & token_mask.bool()).unsqueeze(-1).float()
         index = word_map.clamp(min=0).unsqueeze(-1)
         sums = tokens.new_zeros(batch, 2 * words, tokens.shape[-1]).scatter_add_(
@@ -282,23 +350,56 @@ class OpenViVQAModel(PreTrainedModel):
         )
         o2r = torch.where(inherit, o2r.diagonal().unsqueeze(0).expand_as(o2r), o2r)
         r2o = torch.where(inherit, r2o.diagonal().unsqueeze(0).expand_as(r2o), r2o)
-        retrieval_labels = o2r.clone()
+        pair_text = None
+        if text_ids is not None:
+            pair_text = torch.stack(
+                [text_ids[:, :words].reshape(-1), text_ids[:, words:].reshape(-1)], dim=1
+            ).long()
+            if self.config.twc_mask_same_text:
+                collision = self._text_collision(pair_text, pair_text)
+                o2r = torch.where(collision & (o2r == 0), torch.full_like(o2r, -1.0), o2r)
+                r2o = torch.where(collision.t() & (r2o == 0), torch.full_like(r2o, -1.0), r2o)
         for labels in (o2r, r2o):
             ignored = labels.diagonal() == -1
             labels[ignored, :] = -1.0
             labels[:, ignored] = -1.0
-        keep = o2r != -1
-        if not keep.any():
+        real = o2r.diagonal() != -1
+        if not real.any():
             return logits.sum() * 0.0, logits.new_zeros(())
-        loss = 0.5 * (
-            F.binary_cross_entropy_with_logits(logits[keep], o2r[keep])
-            + F.binary_cross_entropy_with_logits(logits.t()[keep], r2o[keep])
-        )
-        with torch.no_grad():  # retrieval top-1: từ gốc tìm đúng bản related của nó
-            real = retrieval_labels.diagonal() != -1
+        if self.config.twc_loss == "infonce":
+            scores_o, labels_o = logits[real], o2r[real]
+            scores_r, labels_r = logits.t()[real], r2o[real]
+            use_memory = self.training and self.config.twc_queue_size > 0 and pair_text is not None
+            if use_memory:
+                memory = self._twc_memory(original.shape[-1], original.device)
+                memory["forwards"] += 1
+                filled = memory["filled"]
+                if memory["forwards"] > self.config.twc_queue_start and filled > 0:
+                    extra = torch.zeros(int(real.sum()), filled, device=original.device)
+                    if self.config.twc_mask_same_text:
+                        extra = extra.masked_fill(
+                            self._text_collision(pair_text[real], memory["text"][:filled]), -1.0
+                        )
+                    scores_o = torch.cat([scores_o, scale * original[real] @ memory["related"][:filled].t()], dim=1)
+                    scores_r = torch.cat([scores_r, scale * related[real] @ memory["original"][:filled].t()], dim=1)
+                    labels_o = torch.cat([labels_o, extra], dim=1)
+                    labels_r = torch.cat([labels_r, extra], dim=1)
+            every = torch.ones(scores_o.shape[0], dtype=torch.bool, device=scores_o.device)
+            loss = 0.5 * (
+                self._soft_infonce(scores_o, labels_o, every) + self._soft_infonce(scores_r, labels_r, every)
+            )
+            if use_memory:
+                self._twc_enqueue(memory, original[real].detach(), related[real].detach(), pair_text[real])
+        else:
+            keep = o2r != -1
+            loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(logits[keep], o2r[keep])
+                + F.binary_cross_entropy_with_logits(logits.t()[keep], r2o[keep])
+            )
+        with torch.no_grad():  # retrieval top-1 trong batch: từ gốc tìm đúng bản related của nó
             rows = real.nonzero(as_tuple=True)[0]
-            best = logits.detach().masked_fill(~real.unsqueeze(0), -1e9)[rows].argmax(dim=1)
-            accuracy = (retrieval_labels[rows, best] > 0.5).float().mean()
+            best = logits.detach().masked_fill(o2r == -1, -1e9)[rows].argmax(dim=1)
+            accuracy = (o2r[rows, best] > 0.5).float().mean()
         return loss, accuracy
 
     def forward(
@@ -319,11 +420,12 @@ class OpenViVQAModel(PreTrainedModel):
         twc_o2r=None,
         twc_r2o=None,
         twc_group_ids=None,
+        twc_text_ids=None,
         ocr_words=None,
     ):
         if ocr_attention_mask is None:
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
-        encoded, mask, ocr_offset = self.encode(
+        encoded, mask, ocr_offset, lexical = self.encode(
             input_ids,
             pixel_values,
             ocr_info,
@@ -334,6 +436,7 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_word_mask,
             attention_mask,
             ocr_attention_mask,
+            return_lexical=True,
         )
         result = {"encoder_outputs": encoded, "attention_mask": mask}
         if labels is not None or decoder_input_ids is not None:
@@ -348,9 +451,13 @@ class OpenViVQAModel(PreTrainedModel):
             )
             result.update(loss=decoded.loss, logits=decoded.logits)
         if self.config.use_twc and twc_o2r is not None:
+            if self.config.twc_feature == "lexical":
+                tokens = lexical
+            else:
+                tokens = encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_input_ids.shape[1]]
             result["twc_loss"], result["twc_acc"] = self._twc(
-                encoded.last_hidden_state, ocr_offset, ocr_to_word_map, ocr_attention_mask,
-                twc_o2r, twc_r2o, twc_group_ids,
+                tokens, ocr_to_word_map, ocr_attention_mask, twc_o2r, twc_r2o, twc_group_ids,
+                twc_text_ids,
             )
         return result
 

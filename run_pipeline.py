@@ -3,7 +3,8 @@
 STAGE=finetune (default) | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG, USE_TWC,
-            TWC_WEIGHT, MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
+            TWC_WEIGHT, TWC_LOSS, TWC_FEATURE, TWC_QUEUE_SIZE, TWC_QUEUE_START,
+            TWC_MASK_SAME_TEXT, MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE.
 """
 
@@ -32,6 +33,11 @@ def training_arguments():
         "ABLATION_USE_OCR_AUG": "ablation_use_ocr_aug",
         "USE_TWC": "use_twc",
         "TWC_WEIGHT": "twc_weight",
+        "TWC_LOSS": "twc_loss",
+        "TWC_FEATURE": "twc_feature",
+        "TWC_QUEUE_SIZE": "twc_queue_size",
+        "TWC_QUEUE_START": "twc_queue_start",
+        "TWC_MASK_SAME_TEXT": "twc_mask_same_text",
         "SMOKE_TRAIN_SAMPLES": "smoke_train_samples",
         "SMOKE_EVAL_SAMPLES": "smoke_eval_samples",
         "SMOKE_MAX_STEPS": "smoke_max_steps",

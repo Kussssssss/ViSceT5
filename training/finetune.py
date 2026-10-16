@@ -25,7 +25,8 @@ from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
 
 ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr",
-                      "ablation_use_ocr_aug", "use_twc", "twc_weight")
+                      "ablation_use_ocr_aug", "use_twc", "twc_weight", "twc_loss", "twc_feature",
+                      "twc_queue_size", "twc_queue_start", "twc_mask_same_text")
 
 
 def main(args_list=None):
