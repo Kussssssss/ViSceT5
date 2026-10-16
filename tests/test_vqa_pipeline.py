@@ -29,6 +29,7 @@ from transformers import (
 from configs.arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from configs.model_config import OpenViVQAConfig
 from data.dataset import ViT5VQADataset
+from data.collator import _stable_hash
 from data.ocr_correction import OCRCorrector
 from models.modules.qa_clip import QACLIPEncoder
 from models.openvivqa_model import OpenViVQAModel
@@ -763,7 +764,8 @@ def _reference_twc(logits, o2r_blocks, r2o_blocks, groups, words):
 
 
 def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer, samples, corrector):
-    model = make_model(use_twc=True)
+    # BCE, no memory, no text masking = the previous TWA-code implementation.
+    model = make_model(use_twc=True, twc_loss="bce", twc_queue_size=0, twc_mask_same_text=False)
     # Same image asked twice: same (image, text) groups, different per-sample augmentation.
     pair = [samples[0], {**samples[0], "question": "hiệu gì"}]
     batch = build_collator(model, tokenizer, corrector, training=True)(pair)
@@ -773,9 +775,9 @@ def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer
     hidden = torch.randn(2, 40, 32)
     offset = 5
     token_mask = batch["ocr_attention_mask"]
-    loss, accuracy = model._twc(hidden, offset, batch["ocr_to_word_map"], token_mask,
-                                batch["twc_o2r"], batch["twc_r2o"], batch["twc_group_ids"])
     tokens = hidden[:, offset: offset + token_mask.shape[1]]
+    loss, accuracy = model._twc(tokens, batch["ocr_to_word_map"], token_mask,
+                                batch["twc_o2r"], batch["twc_r2o"], batch["twc_group_ids"])
     word_map = batch["ocr_to_word_map"]
     feats = torch.zeros(2, 2 * words, 32)
     counts = torch.zeros(2, 2 * words)
@@ -807,6 +809,10 @@ def test_twc_collator_layout_and_labels(make_model, tokenizer, samples, correcto
     assert (o2r[real:, :] == -1).all() and (o2r[:, real:] == -1).all()
     assert set(o2r[:real, :real].diagonal().tolist()) <= {1.0, 0.9}
     assert (batch["twc_group_ids"][0][real:] == -1).all()
+    text_ids = batch["twc_text_ids"][0]
+    assert text_ids.shape == (2 * words,)
+    assert (text_ids[:real] >= 0).all() and (text_ids[real:words] == -1).all() and (text_ids[words + real:] == -1).all()
+    assert text_ids[0] == _stable_hash(batch["ocr_info"][0]["texts"][0]) & 0x3FFFFFFF
     again = build_collator(model, tokenizer, corrector, training=True)(samples)
     torch.testing.assert_close(batch["twc_o2r"], again["twc_o2r"])  # per-sample fixed augmentation
 
@@ -835,3 +841,61 @@ def test_loading_a_checkpoint_keeps_clip_frozen(make_model, tokenizer, tmp_path)
     assert trainable(restored) == trainable(model)
     assert not any(p.requires_grad for n, p in restored.qa_clip.named_parameters()
                    if "instruct" not in n and "instruction" not in n)
+
+
+def _twc_batch(model, tokenizer, samples, corrector):
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    tokens = torch.randn(len(samples), batch["ocr_input_ids"].shape[1], 32, requires_grad=True)
+    args = (tokens, batch["ocr_to_word_map"], batch["ocr_attention_mask"], batch["twc_o2r"],
+            batch["twc_r2o"], batch["twc_group_ids"], batch["twc_text_ids"])
+    return batch, tokens, args
+
+
+def test_twc_text_collision():
+    query = torch.tensor([[1, 2], [3, 3], [-1, -1]])
+    keys = torch.tensor([[2, 9], [4, 5], [5, 3], [-1, -1]])
+    hit = OpenViVQAModel._text_collision(query, keys)
+    expected = torch.tensor([[True, False, False, False], [False, False, True, False],
+                             [False, False, False, False]])
+    assert torch.equal(hit, expected)
+
+
+def test_twc_memory_adds_negatives_after_start(make_model, tokenizer, samples, corrector):
+    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=1)
+    model.train()
+    batch, tokens, args = _twc_batch(model, tokenizer, samples, corrector)
+    real = int((batch["twc_o2r"].diagonal(dim1=1, dim2=2) != -1).sum())
+    first, _ = model._twc(*args)            # forward 1: memory filled, not read
+    memory = model._twc_memory_state
+    assert memory["filled"] == min(64, real) and memory["forwards"] == 1
+    second, accuracy = model._twc(*args)    # forward 2: memory read → more negatives
+    assert memory["filled"] == min(64, 2 * real)
+    assert torch.isfinite(second) and 0 <= float(accuracy) <= 1
+    second.backward()
+    assert tokens.grad is not None and torch.isfinite(tokens.grad).all()
+    assert all("_twc_memory" not in key for key in model.state_dict())
+
+
+def test_twc_memory_negatives_change_loss(make_model, tokenizer, samples, corrector):
+    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=0)
+    model.train()
+    batch, tokens, args = _twc_batch(model, tokenizer, samples, corrector)
+    plain, _ = model._twc(*args)            # memory empty on the first forward
+    memory = model._twc_memory_state
+    unrelated = 10**9 + torch.arange(2 * memory["filled"]).reshape(-1, 2)  # texts not in the batch
+    memory["text"] = memory["text"].index_copy(0, torch.arange(memory["filled"]), unrelated)
+    with_memory, _ = model._twc(*args)
+    assert float(with_memory) > float(plain)  # extra (unmasked) negatives only add to the softmax
+
+
+def test_twc_memory_unused_in_eval(make_model, tokenizer, samples, corrector):
+    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=0)
+    model.eval()
+    _, _, args = _twc_batch(model, tokenizer, samples, corrector)
+    model._twc(*args)
+    assert getattr(model, "_twc_memory_state", None) is None
+
+
+def test_twc_memory_needs_softmax():
+    with pytest.raises(ValueError):
+        OpenViVQAConfig(use_twc=True, twc_loss="bce", twc_queue_size=16)

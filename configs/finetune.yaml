@@ -7,6 +7,11 @@ ablation_use_ocr: true
 ablation_use_ocr_aug: true
 use_twc: false
 twc_weight: 1.0
+twc_loss: "infonce"          # softmax trên mọi ứng viên (TWA paper); bce = bản code TWA
+twc_feature: "lexical"       # đặc trưng OCR trước fusion (text ConsFormer + ký tự)
+twc_queue_size: 16384        # bộ nhớ cross-batch: thêm ~16k negative từ các batch trước; 0 = chỉ trong batch
+twc_queue_start: 1000        # số forward train trước khi đọc bộ nhớ
+twc_mask_same_text: true     # không coi ứng viên trùng chữ với query là negative
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"

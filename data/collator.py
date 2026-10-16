@@ -181,7 +181,7 @@ class ViT5VQADataCollator:
         with_related = self.related_mode != "none"
         twa = self.related_mode == "twa"
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
-        o2r_all, r2o_all, groups, words = [], [], [], []
+        o2r_all, r2o_all, groups, text_ids, words = [], [], [], [], []
         for sample, item in zip(batch, info):
             count = len(item["texts"])
             ids, mapping, chars, mask = self._encode_ocr_text(item["texts"], word_count)
@@ -206,6 +206,7 @@ class ViT5VQADataCollator:
                     full_o2r = torch.full((word_count, word_count), -1.0)
                     full_r2o = torch.full((word_count, word_count), -1.0)
                     group = torch.full((word_count,), -1, dtype=torch.long)
+                    texts_hashed = torch.full((2 * word_count,), -1, dtype=torch.long)
                     if o2r is not None:
                         full_o2r[:count, :count] = torch.tensor(o2r)
                         full_r2o[:count, :count] = torch.tensor(r2o)
@@ -213,9 +214,16 @@ class ViT5VQADataCollator:
                             [_stable_hash(f"{sample['image_path']}|{text}") & 0x3FFFFFFF
                              for text in item["texts"]]
                         )
+                        texts_hashed[:count] = torch.tensor(
+                            [_stable_hash(text) & 0x3FFFFFFF for text in item["texts"]]
+                        )
+                        texts_hashed[word_count:word_count + count] = torch.tensor(
+                            [_stable_hash(text) & 0x3FFFFFFF for text in related]
+                        )
                     o2r_all.append(full_o2r)
                     r2o_all.append(full_r2o)
                     groups.append(group)
+                    text_ids.append(texts_hashed)
             token_ids.append(torch.tensor(ids, dtype=torch.long))
             word_maps.append(torch.tensor(mapping, dtype=torch.long))
             char_ids.append(chars)
@@ -244,6 +252,7 @@ class ViT5VQADataCollator:
                 twc_o2r=torch.stack(o2r_all),
                 twc_r2o=torch.stack(r2o_all),
                 twc_group_ids=torch.stack(groups),
+                twc_text_ids=torch.stack(text_ids),
             )
         if self.return_ocr_words:
             result["ocr_words"] = words

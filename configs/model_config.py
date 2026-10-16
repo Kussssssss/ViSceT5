@@ -35,6 +35,11 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_weight: float = 1.0,
         twc_adv_probability: float = 0.35,
         twc_label_list: Optional[List[float]] = None,
+        twc_loss: str = "infonce",
+        twc_feature: str = "lexical",
+        twc_queue_size: int = 16384,
+        twc_queue_start: int = 1000,
+        twc_mask_same_text: bool = True,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -100,6 +105,31 @@ class OpenViVQAConfig(PretrainedConfig):
         # [o2r, r2o] cho cặp bị tăng cường (nhiễu ký tự / sửa từ); cặp giữ nguyên = 1.0.
         self.twc_label_list = list(twc_label_list) if twc_label_list is not None else [0.9, 0.9]
         self.ocr_edit_distance = int(ocr_edit_distance)
+        # infonce: softmax over all in-batch candidates with soft multi-positive targets
+        #          (TWA paper Eq. 4–6); bce: sigmoid BCE averaged over all cells (TWA code).
+        self.twc_loss = str(twc_loss)
+        # lexical: OCR features before fusion (ConsFormer text + characters, no box/det/rec);
+        # fused: multimodal encoder output. The related copy shares box/det/rec with its
+        # original, so on fused features a pair can be matched by layout alone.
+        self.twc_feature = str(twc_feature)
+        if self.twc_loss not in ("infonce", "bce") or self.twc_feature not in ("lexical", "fused"):
+            raise ValueError("twc_loss must be infonce|bce and twc_feature lexical|fused.")
+        # Cross-batch memory (XBM, Wang et al. CVPR'20): FIFO of detached word features
+        # from previous steps, used as extra negatives for the softmax TWC. A batch of 8
+        # gives ~300 candidates; 16384 entries cover the last ~55 steps. 0 = in-batch only.
+        # The memory is read only after twc_queue_start training forwards, once features
+        # drift slowly (it is filled from the start, so it is full when first read).
+        self.twc_queue_size = int(twc_queue_size)
+        self.twc_queue_start = int(twc_queue_start)
+        # A candidate whose text (original or related) equals the query's original or related
+        # text is never a negative: identical strings get identical lexical features, so
+        # pushing them apart is a false negative. Within an image same-text pairs stay
+        # positives (TWA label inheritance); every other text collision is ignored.
+        self.twc_mask_same_text = bool(twc_mask_same_text)
+        if self.twc_queue_size < 0 or self.twc_queue_start < 0:
+            raise ValueError("twc_queue_size and twc_queue_start must be >= 0.")
+        if self.use_twc and self.twc_queue_size > 0 and self.twc_loss != "infonce":
+            raise ValueError("The TWC memory adds negatives to the softmax loss; use twc_loss=infonce.")
         if self.use_twc and not self.ablation_use_ocr_aug:
             raise ValueError("use_twc needs ablation_use_ocr_aug=True (TWC pairs each OCR word with its related copy).")
 
