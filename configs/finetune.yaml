@@ -42,7 +42,8 @@ load_best_model_at_end: true
 remove_unused_columns: false
 predict_with_generate: true
 
-label_smoothing_factor: 0.1
+# 0 = CE thường, khớp công thức của run Vast cũ (code cũ bỏ qua giá trị này) để so sánh công bằng.
+label_smoothing_factor: 0.0
 optim: "adamw_torch"
 dataloader_num_workers: 4
 dataloader_pin_memory: true
