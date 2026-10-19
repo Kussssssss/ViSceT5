@@ -166,3 +166,5 @@ checkpoints/
 
 # Đáp án test công khai dùng cho training/benchmark_eval.py
 !eval_gt/*.json
+# File nộp test gốc của run Vast (tham chiếu cho kiểm tra tương đương)
+!repro/*.csv

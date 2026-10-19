@@ -706,6 +706,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "False",
         "--ocr_feature_norm",
         "rmsnorm",  # the fixture model; resume re-applies the architecture flags
+        "--clip_late_adapter",
+        "False",
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -972,3 +974,17 @@ def test_ocr_feature_norm_switch(make_model):
     assert isinstance(rms.layer_norm_det, T5LayerNorm)
     with pytest.raises(ValueError):
         OpenViVQAConfig(ocr_feature_norm="batchnorm")
+
+
+def test_clip_late_adapter_trains_without_question(make_model, tokenizer, samples, corrector):
+    model = make_model(clip_late_adapter=True, ablation_use_qaclip=False, ablation_use_ocr_aug=False)
+    gates = [p for n, p in model.named_parameters() if n.endswith("instruction_proj_gate")]
+    assert gates and all(g.requires_grad for g in gates)
+    frozen = [n for n, p in model.qa_clip.named_parameters()
+              if not p.requires_grad and "instruction" not in n and "instruct_dim_reduce" not in n]
+    assert frozen  # CLIP itself stays frozen
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    model(**batch)["loss"].backward()
+    assert any(g.grad is not None and g.grad.abs().sum() > 0 for g in gates)
+    plain = make_model(ablation_use_qaclip=False, ablation_use_ocr_aug=False)
+    assert not any(n.endswith("instruction_proj_gate") for n, _ in plain.named_parameters())

@@ -59,8 +59,9 @@ class OpenViVQAModel(PreTrainedModel):
                 self.qa_clip = QACLIPEncoder.from_pretrained(
                     config.clip_vision_name,
                     instruction_dim=config.qa_clip_d_text or self.d_model,
-                    # Không nhận câu hỏi → CLIP thường, không adapter QA-ViT.
-                    integration_point="late" if config.ablation_use_qaclip else "none",
+                    # Không nhận câu hỏi → CLIP thường; clip_late_adapter giữ adapter có
+                    # cổng ở 6 lớp cuối như code trước refactor (câu hỏi rỗng).
+                    integration_point="late" if (config.ablation_use_qaclip or config.clip_late_adapter) else "none",
                     freeze_clip=True,
                     attn_implementation="eager",
                 )
@@ -175,6 +176,11 @@ class OpenViVQAModel(PreTrainedModel):
                 input_ids=input_ids, attention_mask=attention_mask, return_dict=True
             ).last_hidden_state
             instruction_mask = attention_mask
+        elif self.config.clip_late_adapter:
+            # Empty instruction: the gated adapter runs on the visual attention only.
+            batch = pixel_values.shape[0]
+            instruction = pixel_values.new_zeros(batch, 0, self.qa_clip.config.instruction_dim)
+            instruction_mask = torch.zeros(batch, 0, dtype=torch.long, device=pixel_values.device)
         outputs = self.qa_clip(
             pixel_values=pixel_values,
             text_emb=instruction,
