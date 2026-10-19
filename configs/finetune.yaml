@@ -5,6 +5,7 @@ ablation_use_image: true
 ablation_use_qaclip: false
 ablation_use_ocr: true
 ablation_use_ocr_aug: true
+clip_late_adapter: true        # adapter có cổng ở 6 lớp cuối CLIP như code trước refactor (gate học được)
 ocr_feature_norm: "layernorm"   # norm từng luồng OCR như code trước refactor (run Vast 31.7); rmsnorm = bản refactor
 use_twc: false
 twc_weight: 1.0

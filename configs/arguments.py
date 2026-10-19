@@ -48,6 +48,9 @@ class ModelArguments:
         default="answer", metadata={"help": "answer (question ↔ answer OCR words) | lexical (TWA) | both."}
     )
     twc_answer_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-grounded TWC loss."})
+    clip_late_adapter: bool = field(
+        default=True, metadata={"help": "Keep the gated adapter of the late CLIP layers (pre-refactor CLIP)."}
+    )
     ocr_feature_norm: str = field(
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
     )

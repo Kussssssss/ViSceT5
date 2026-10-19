@@ -44,6 +44,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_answer_weight: float = 0.1,
         twc_related_train: str = "correct",
         ocr_feature_norm: Optional[str] = None,
+        clip_late_adapter: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -143,6 +144,11 @@ class OpenViVQAConfig(PretrainedConfig):
         # layernorm = pre-refactor code (the Vast/old runs); rmsnorm = refactor. None (configs
         # saved before this switch existed) = rmsnorm, so those checkpoints still load as trained.
         self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")
+        # Pre-refactor CLIP: the late 6 layers are QA-ViT layers even without a question
+        # (empty instruction), so their gated instruction_out_proj (init = out_proj, gate 0)
+        # stays trainable — a small trained adapter on frozen CLIP. The refactor dropped it
+        # (plain frozen CLIP). None (older configs) = off, so refactor checkpoints load as trained.
+        self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
         self.twc_objective = str(twc_objective)
