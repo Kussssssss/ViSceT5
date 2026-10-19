@@ -88,8 +88,16 @@ def main(args_list=None):
         )
         print(f"Wrote {len(answers)} rows -> {path}")
         if split == "dev":
-            f1, em = compute_f1_em(answers, frame["answer"].fillna("").astype(str).tolist())
-            print(f"📊 [dev] EM={em:.4f} ({em * 100:.2f}%) | F1={f1:.4f}")
+            gold = frame["answer"].fillna("").astype(str).tolist()
+            f1, em = compute_f1_em(answers, gold)
+            print(f"📊 [dev] EM={em:.4f} ({em * 100:.2f}%) | F1={f1:.4f}  (vs raw answers)")
+            # The validation metric during training compares against the answers after the
+            # tokenizer round trip (labels decoded back to text): the ViT5 vocabulary has no
+            # '@' or '~', so e.g. 27/5155 dev e-mail answers differ. Same number as training:
+            ids = tokenizer(gold, padding="max_length", truncation=True,
+                            max_length=model.config.text_max_target_length).input_ids
+            f1_rt, em_rt = compute_f1_em(answers, tokenizer.batch_decode(ids, skip_special_tokens=True))
+            print(f"📊 [dev] EM={em_rt:.4f} ({em_rt * 100:.2f}%) | F1={f1_rt:.4f}  (vs tokenized labels = training eval)")
         outputs.append(str(path))
     return outputs
 
