@@ -24,7 +24,7 @@ class VQATrainer(Seq2SeqTrainer):
     def __init__(self, *args, eval_data_collator=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.eval_data_collator = eval_data_collator
-        self._twc_sum = {"twc_loss": 0.0, "twc_acc": 0.0}
+        self._twc_sum = {}
         self._twc_count = 0
 
     def _with_eval_collator(self, build, dataset):
@@ -61,12 +61,17 @@ class VQATrainer(Seq2SeqTrainer):
             if self.label_smoother
             else outputs["loss"]
         )
-        if "twc_loss" in outputs:
-            loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
+        config = getattr(model, "module", model).config
+        terms = [(name, weight) for name, weight in (("twc", config.twc_weight),
+                                                     ("twc_answer", config.twc_answer_weight))
+                 if f"{name}_loss" in outputs]
+        for name, weight in terms:
+            loss = loss + weight * outputs[f"{name}_loss"]
             if model.training:
-                self._twc_sum["twc_loss"] += float(outputs["twc_loss"].detach())
-                self._twc_sum["twc_acc"] += float(outputs["twc_acc"])
-                self._twc_count += 1
+                for key in (f"{name}_loss", f"{name}_acc"):
+                    self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
+        if terms and model.training:
+            self._twc_count += 1
         return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -117,7 +122,7 @@ class VQATrainer(Seq2SeqTrainer):
     def log(self, logs):
         if self._twc_count and "loss" in logs:  # training log: mean TWC since last log
             logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
-            self._twc_sum = dict.fromkeys(self._twc_sum, 0.0)
+            self._twc_sum = {}
             self._twc_count = 0
         super().log(logs)
         if self.is_world_process_zero():

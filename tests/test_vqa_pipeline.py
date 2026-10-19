@@ -407,6 +407,7 @@ def test_all_ablations_forward_backward_generate(
         ablation_use_ocr=ocr,
         ablation_use_ocr_aug=aug,
         use_twc=twc,
+        twc_objective="both",
     )
     batch = build_collator(model, tokenizer, corrector, training=True)(samples)
     outputs = model(**batch)
@@ -414,10 +415,11 @@ def test_all_ablations_forward_backward_generate(
     assert torch.isfinite(outputs["loss"])
     loss = outputs["loss"]
     if twc:
-        assert torch.isfinite(outputs["twc_loss"]) and 0 <= outputs["twc_acc"] <= 1
-        loss = loss + outputs["twc_loss"]
+        for name in ("twc", "twc_answer"):
+            assert torch.isfinite(outputs[f"{name}_loss"]) and 0 <= outputs[f"{name}_acc"] <= 1
+            loss = loss + outputs[f"{name}_loss"]
     else:
-        assert "twc_loss" not in outputs
+        assert "twc_loss" not in outputs and "twc_answer_loss" not in outputs
     loss.backward()
     gradients = [p.grad for p in model.parameters() if p.grad is not None]
     assert gradients and all(torch.isfinite(grad).all() for grad in gradients)
@@ -576,7 +578,8 @@ def test_unused_modules_are_not_built(make_model, image, qaclip, ocr, twc):
     assert any("instruct_dim_reduce" in n for n in names) == qaclip
     assert hasattr(model, "ocr_encoder") == ocr and hasattr(model, "semantic_ocr_embedding") == ocr
     assert hasattr(model, "ocr_lite_text_proj") == (not ocr)
-    assert hasattr(model, "twc_logit_scale") == twc
+    assert hasattr(model, "twc_answer_query") == twc  # default objective: answer
+    assert not hasattr(model, "twc_logit_scale")
 
 
 def test_shared_modules_get_the_same_init_across_configurations(make_model):
@@ -589,7 +592,7 @@ def test_shared_modules_get_the_same_init_across_configurations(make_model):
 
 
 def test_trainer_train_evaluate_predict(make_model, tokenizer, samples, corrector, tmp_path):
-    model = make_model(use_twc=True)
+    model = make_model(use_twc=True, twc_objective="both", twc_related_train="twa")
     dataset = ViT5VQADataset(pd.DataFrame(samples))
     trainer = VQATrainer(
         model=model,
@@ -618,7 +621,7 @@ def test_trainer_train_evaluate_predict(make_model, tokenizer, samples, correcto
     result = trainer.train()
     assert np.isfinite(result.training_loss)
     logged = [entry for entry in trainer.state.log_history if "twc_loss" in entry]
-    assert logged and np.isfinite(logged[0]["twc_loss"])
+    assert logged and np.isfinite(logged[0]["twc_loss"]) and np.isfinite(logged[0]["twc_answer_loss"])
     assert trainer.get_eval_dataloader().collate_fn.related_mode == "correct"
     assert trainer.get_train_dataloader().collate_fn.related_mode == "twa"
     with patch.object(model, "encode", wraps=model.encode) as encode:
@@ -701,6 +704,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "True",
         "--dataloader_pin_memory",
         "False",
+        "--ocr_feature_norm",
+        "rmsnorm",  # the fixture model; resume re-applies the architecture flags
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -765,7 +770,8 @@ def _reference_twc(logits, o2r_blocks, r2o_blocks, groups, words):
 
 def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer, samples, corrector):
     # BCE, no memory, no text masking = the previous TWA-code implementation.
-    model = make_model(use_twc=True, twc_loss="bce", twc_queue_size=0, twc_mask_same_text=False)
+    model = make_model(use_twc=True, twc_loss="bce", twc_queue_size=0, twc_mask_same_text=False,
+                       twc_objective="lexical", twc_related_train="twa")
     # Same image asked twice: same (image, text) groups, different per-sample augmentation.
     pair = [samples[0], {**samples[0], "question": "hiệu gì"}]
     batch = build_collator(model, tokenizer, corrector, training=True)(pair)
@@ -796,7 +802,7 @@ def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer
 
 
 def test_twc_collator_layout_and_labels(make_model, tokenizer, samples, corrector):
-    model = make_model(use_twc=True)
+    model = make_model(use_twc=True, twc_objective="lexical", twc_related_train="twa")
     batch = build_collator(model, tokenizer, corrector, training=True)(samples)
     words = batch["twc_o2r"].shape[1]
     real = len(batch["ocr_info"][0]["texts"])
@@ -861,7 +867,7 @@ def test_twc_text_collision():
 
 
 def test_twc_memory_adds_negatives_after_start(make_model, tokenizer, samples, corrector):
-    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=1)
+    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=1, twc_objective="lexical")
     model.train()
     batch, tokens, args = _twc_batch(model, tokenizer, samples, corrector)
     real = int((batch["twc_o2r"].diagonal(dim1=1, dim2=2) != -1).sum())
@@ -877,7 +883,7 @@ def test_twc_memory_adds_negatives_after_start(make_model, tokenizer, samples, c
 
 
 def test_twc_memory_negatives_change_loss(make_model, tokenizer, samples, corrector):
-    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=0)
+    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=0, twc_objective="lexical")
     model.train()
     batch, tokens, args = _twc_batch(model, tokenizer, samples, corrector)
     plain, _ = model._twc(*args)            # memory empty on the first forward
@@ -889,7 +895,7 @@ def test_twc_memory_negatives_change_loss(make_model, tokenizer, samples, correc
 
 
 def test_twc_memory_unused_in_eval(make_model, tokenizer, samples, corrector):
-    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=0)
+    model = make_model(use_twc=True, twc_queue_size=64, twc_queue_start=0, twc_objective="lexical")
     model.eval()
     _, _, args = _twc_batch(model, tokenizer, samples, corrector)
     model._twc(*args)
@@ -898,4 +904,71 @@ def test_twc_memory_unused_in_eval(make_model, tokenizer, samples, corrector):
 
 def test_twc_memory_needs_softmax():
     with pytest.raises(ValueError):
-        OpenViVQAConfig(use_twc=True, twc_loss="bce", twc_queue_size=16)
+        OpenViVQAConfig(use_twc=True, twc_loss="bce", twc_queue_size=16, twc_objective="lexical")
+
+
+def test_answer_twc_collator_targets(make_model, tokenizer, samples, corrector):
+    model = make_model(use_twc=True)  # default: answer objective, related = correction
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    assert collator.related_mode == "correct" and collator.twc_answer and not collator.twc_lexical
+    batch = collator(samples)
+    assert "twc_o2r" not in batch
+    labels, words = batch["twc_answer_labels"][0], batch["ocr_words"][0] if "ocr_words" in batch else None
+    texts = batch["ocr_info"][0]["texts"]
+    slots = batch["ocr_char_ids"].shape[1]
+    half = slots // 2
+    assert labels.shape == (slots,)
+    for k, text in enumerate(texts):  # answer "cà phê": the entry "cà phê" is a positive, "sữa" is not
+        assert labels[k] == float(set(text.split()) <= {"cà", "phê"})
+    assert labels[len(texts):half].eq(-1).all()
+    assert (labels == 1).any()
+    assert (batch["twc_answer_text_ids"] >= -1).all()
+    eval_batch = build_collator(model, tokenizer, corrector, training=False)(samples)
+    assert "twc_answer_labels" not in eval_batch
+    # Same related copy at train and at test.
+    torch.testing.assert_close(batch["ocr_input_ids"], eval_batch["ocr_input_ids"])
+
+
+def test_answer_twc_retrieves_answer_words(make_model):
+    model = make_model(use_twc=True)
+    torch.manual_seed(0)
+    batch, slots, dim = 2, 4, 32
+    hidden_q = torch.randn(batch, 3, dim)
+    tokens = torch.randn(batch, slots, dim)
+    word_map = torch.arange(slots).repeat(batch, 1)
+    token_mask = torch.ones(batch, slots, dtype=torch.long)
+    labels = torch.tensor([[1.0, 0.0, 0.0, -1.0], [0.0, 1.0, 0.0, 0.0]])
+    text_ids = torch.tensor([[7, 8, 9, -1], [7, 5, 6, 4]])
+    answer_ids = torch.tensor([[7], [5]])
+    loss, accuracy = model._twc_answer(hidden_q, torch.ones(batch, 3), tokens, word_map, token_mask,
+                                       labels, text_ids, answer_ids)
+    assert torch.isfinite(loss) and 0 <= float(accuracy) <= 1
+    # Sample 1's slot 0 has sample 0's answer text (7): ignored for sample 0, not a negative.
+    plain, _ = model._twc_answer(hidden_q, torch.ones(batch, 3), tokens, word_map, token_mask,
+                                 labels, text_ids.masked_fill(text_ids == 7, 99), answer_ids)
+    assert not torch.allclose(loss, plain)
+    # Aligning the question with its answer word lowers the loss.
+    aligned = tokens.clone()
+    aligned[0, 0] = 10 * hidden_q[0].mean(0)
+    aligned[1, 1] = 10 * hidden_q[1].mean(0)
+    better, acc = model._twc_answer(hidden_q, torch.ones(batch, 3), aligned, word_map, token_mask,
+                                    labels, text_ids, answer_ids)
+    assert float(better) < float(loss) and float(acc) == 1.0
+
+
+def test_lexical_twc_labels_from_correction(make_model, tokenizer, samples, corrector):
+    model = make_model(use_twc=True, twc_objective="lexical")  # related = correction (default)
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    assert collator.related_mode == "correct" and collator.twc_lexical
+    batch = collator(samples)
+    real = len(batch["ocr_info"][0]["texts"])
+    assert set(batch["twc_o2r"][0][:real, :real].diagonal().tolist()) <= {1.0, 0.9}
+
+
+def test_ocr_feature_norm_switch(make_model):
+    layer = make_model(ocr_feature_norm="layernorm").semantic_ocr_embedding
+    rms = make_model().semantic_ocr_embedding  # configs without the field = rmsnorm (refactor checkpoints)
+    assert isinstance(layer.layer_norm_det, torch.nn.LayerNorm) and layer.layer_norm_det.bias is not None
+    assert isinstance(rms.layer_norm_det, T5LayerNorm)
+    with pytest.raises(ValueError):
+        OpenViVQAConfig(ocr_feature_norm="batchnorm")

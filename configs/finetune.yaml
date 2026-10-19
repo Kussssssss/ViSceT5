@@ -5,6 +5,7 @@ ablation_use_image: true
 ablation_use_qaclip: false
 ablation_use_ocr: true
 ablation_use_ocr_aug: true
+ocr_feature_norm: "layernorm"   # norm từng luồng OCR như code trước refactor (run Vast 31.7); rmsnorm = bản refactor
 use_twc: false
 twc_weight: 1.0
 twc_loss: "infonce"          # softmax trên mọi ứng viên (TWA paper); bce = bản code TWA
@@ -12,6 +13,9 @@ twc_feature: "lexical"       # đặc trưng OCR trước fusion (text ConsForme
 twc_queue_size: 16384        # bộ nhớ cross-batch: thêm ~16k negative từ các batch trước; 0 = chỉ trong batch
 twc_queue_start: 1000        # số forward train trước khi đọc bộ nhớ
 twc_mask_same_text: true     # không coi ứng viên trùng chữ với query là negative
+twc_objective: "answer"      # answer: câu hỏi ↔ từ OCR của đáp án | lexical: gốc ↔ related (TWA) | both
+twc_answer_weight: 0.1       # trọng số loss answer-grounded
+twc_related_train: "correct" # bản related lúc train = bản sửa xác định như lúc test; twa = tăng cường TWA
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
