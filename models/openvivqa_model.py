@@ -538,7 +538,8 @@ class OpenViVQAModel(PreTrainedModel):
         generation_config=None,
         **generation_kwargs,
     ):
-        for name in ("twc_o2r", "twc_r2o", "twc_group_ids", "ocr_words", "labels"):
+        for name in ("twc_o2r", "twc_r2o", "twc_group_ids", "twc_text_ids", "twc_answer_labels",
+                     "twc_answer_text_ids", "ocr_words", "labels"):
             generation_kwargs.pop(name, None)
         if encoder_outputs is None:
             encoder_outputs, attention_mask, _ = self.encode(
