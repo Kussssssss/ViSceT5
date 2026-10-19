@@ -24,6 +24,10 @@ def _stable_hash(text):
     return int.from_bytes(hashlib.md5(text.encode("utf-8")).digest()[:8], "little")
 
 
+def _text_id(text):
+    return _stable_hash(text) & 0x3FFFFFFF
+
+
 class ViT5VQADataCollator:
     """OCR features stay aligned with their original image and text entries.
 
@@ -35,7 +39,7 @@ class ViT5VQADataCollator:
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
-                 corrector=None, related_mode="none", seed=42):
+                 corrector=None, related_mode="none", seed=42, twc_lexical=None, twc_answer=False):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -46,12 +50,18 @@ class ViT5VQADataCollator:
         self.seq_max = config.ocr_max_scene_text
         self.corrector = corrector
         self.related_mode = related_mode
+        # TWC targets (training only). twc_lexical: original↔related labels (TWA); default =
+        # on exactly in twa mode, as before. twc_answer: which OCR words belong to the answer.
+        self.twc_lexical = (related_mode == "twa") if twc_lexical is None else bool(twc_lexical)
+        self.twc_answer = bool(twc_answer)
         self.seed = int(seed)
         self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
         if related_mode not in RELATED_MODES:
             raise ValueError(f"related_mode must be one of {RELATED_MODES}.")
         if related_mode != "none" and corrector is None:
             raise ValueError("The related OCR copy needs an OCRCorrector.")
+        if self.twc_lexical and related_mode == "none":
+            raise ValueError("Lexical TWC labels need a related OCR copy.")
         if self.seq_max < 1 or self.char_max_num < 1:
             raise ValueError("OCR word and character limits must be positive.")
         if self.pad_id is None:
@@ -130,7 +140,10 @@ class ViT5VQADataCollator:
         if item["placeholder"]:
             return list(texts), None, None
         if self.related_mode == "correct":
-            return self.corrector.correct(texts), None, None
+            related = self.corrector.correct(texts)
+            if self.twc_lexical:
+                return (related, *self.corrector.pair_labels(texts, related))
+            return related, None, None
         # TWA: cố định theo mẫu (như seed tăng cường cố định của TWA) → tái lập được,
         # độc lập số worker DataLoader và PYTHONHASHSEED.
         rng = random.Random(_stable_hash(f"{self.seed}|{sample['image_path']}|{sample['question']}"))
@@ -179,9 +192,11 @@ class ViT5VQADataCollator:
             self.seq_max, ((max(len(item["texts"]) for item in info) + 7) // 8) * 8
         )
         with_related = self.related_mode != "none"
-        twa = self.related_mode == "twa"
+        lexical, answer_targets = self.twc_lexical, self.twc_answer
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
         o2r_all, r2o_all, groups, text_ids, words = [], [], [], [], []
+        answer_labels, answer_ids = [], []
+        slots = 2 * word_count if with_related else word_count
         for sample, item in zip(batch, info):
             count = len(item["texts"])
             ids, mapping, chars, mask = self._encode_ocr_text(item["texts"], word_count)
@@ -201,12 +216,11 @@ class ViT5VQADataCollator:
                 valid = torch.cat([valid, valid])
                 for key in ("boxes", "det_features", "rec_features"):
                     item[key] = torch.cat([item[key], item[key]])
-                if twa:
+                if lexical:
                     # PAD và placeholder <unk> = -1 (không phải mẫu tương phản).
                     full_o2r = torch.full((word_count, word_count), -1.0)
                     full_r2o = torch.full((word_count, word_count), -1.0)
                     group = torch.full((word_count,), -1, dtype=torch.long)
-                    texts_hashed = torch.full((2 * word_count,), -1, dtype=torch.long)
                     if o2r is not None:
                         full_o2r[:count, :count] = torch.tensor(o2r)
                         full_r2o[:count, :count] = torch.tensor(r2o)
@@ -214,16 +228,27 @@ class ViT5VQADataCollator:
                             [_stable_hash(f"{sample['image_path']}|{text}") & 0x3FFFFFFF
                              for text in item["texts"]]
                         )
-                        texts_hashed[:count] = torch.tensor(
-                            [_stable_hash(text) & 0x3FFFFFFF for text in item["texts"]]
-                        )
-                        texts_hashed[word_count:word_count + count] = torch.tensor(
-                            [_stable_hash(text) & 0x3FFFFFFF for text in related]
-                        )
                     o2r_all.append(full_o2r)
                     r2o_all.append(full_r2o)
                     groups.append(group)
-                    text_ids.append(texts_hashed)
+            if lexical or answer_targets:
+                # Hash of every OCR slot's text (original half, related half); -1 = PAD/placeholder.
+                slot_texts = [None] * slots
+                if not item["placeholder"]:
+                    slot_texts[:count] = item["texts"]
+                    if related is not None:
+                        slot_texts[word_count:word_count + count] = related
+                text_ids.append(torch.tensor([_text_id(t) if t is not None else -1 for t in slot_texts]))
+            if answer_targets:
+                # Positive = an OCR entry made only of answer words (entries can hold
+                # several words, e.g. "cà phê"); the answer string itself also counts.
+                answer_text = _normalize_text(str(sample.get("answer") or ""), lowercase=True)
+                answer_words = set(answer_text.split())
+                answer_labels.append(torch.tensor(
+                    [-1.0 if t is None else float(bool(t.split()) and set(t.split()) <= answer_words)
+                     for t in slot_texts]
+                ))
+                answer_ids.append(sorted({_text_id(w) for w in answer_words | ({answer_text} if answer_text else set())}))
             token_ids.append(torch.tensor(ids, dtype=torch.long))
             word_maps.append(torch.tensor(mapping, dtype=torch.long))
             char_ids.append(chars)
@@ -247,12 +272,19 @@ class ViT5VQADataCollator:
             "ocr_char_mask": torch.stack(char_masks),
             "ocr_word_mask": torch.stack(word_masks).long(),
         }
-        if twa:
+        if lexical:
             result.update(
                 twc_o2r=torch.stack(o2r_all),
                 twc_r2o=torch.stack(r2o_all),
                 twc_group_ids=torch.stack(groups),
-                twc_text_ids=torch.stack(text_ids),
+            )
+        if lexical or answer_targets:
+            result["twc_text_ids"] = torch.stack(text_ids)
+        if answer_targets:
+            width = max(1, max(len(ids) for ids in answer_ids))
+            result["twc_answer_labels"] = torch.stack(answer_labels)
+            result["twc_answer_text_ids"] = torch.tensor(
+                [ids + [-1] * (width - len(ids)) for ids in answer_ids], dtype=torch.long
             )
         if self.return_ocr_words:
             result["ocr_words"] = words

@@ -137,19 +137,25 @@ class SpatialCirclePosition(ScaledDotProductAttention_Embedding):
 class SemanticOCREmbedding(nn.Module):
     def __init__(self, ns):
         super().__init__()
-        # Each modality learns an independent RMSNorm initialized with unit scale.
+        # Each modality gets its own norm. layernorm = the original notebook / pre-refactor
+        # code (mean-centred, with bias); rmsnorm = the refactor's T5 RMSNorm (unit scale).
         norm_eps = getattr(ns, "layer_norm_epsilon", 1e-6)
+        norm_type = getattr(ns, "norm_type", "rmsnorm")
+
+        def norm():
+            return nn.LayerNorm(ns.d_model) if norm_type == "layernorm" else T5LayerNorm(ns.d_model, eps=norm_eps)
+
         self.linear_boxes = nn.Linear(4, ns.d_model)
-        self.layer_norm_bboxes = T5LayerNorm(ns.d_model, eps=norm_eps)
+        self.layer_norm_bboxes = norm()
 
         self.linear_det = nn.Linear(ns.d_det, ns.d_model)
-        self.layer_norm_det = T5LayerNorm(ns.d_model, eps=norm_eps)
+        self.layer_norm_det = norm()
 
         self.linear_rec = nn.Linear(ns.d_rec, ns.d_model)
-        self.layer_norm_rec = T5LayerNorm(ns.d_model, eps=norm_eps)
+        self.layer_norm_rec = norm()
 
-        self.layer_norm_tok = T5LayerNorm(ns.d_model, eps=norm_eps)
-        self.layer_norm_char = T5LayerNorm(ns.d_model, eps=norm_eps)
+        self.layer_norm_tok = norm()
+        self.layer_norm_char = norm()
 
     def forward(self, ocr_info, ocr_tok_features, ocr_char_features):
         W = self.linear_boxes.weight

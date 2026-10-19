@@ -208,10 +208,23 @@ class OCRCorrector:
             related.append(rel)
             diag_o2r.append(label[0])
             diag_r2o.append(label[1])
+        o2r, r2o = self._label_matrix(words, diag_o2r, diag_r2o)
+        return related, o2r, r2o
+
+    @staticmethod
+    def _label_matrix(words, diag_o2r, diag_r2o):
+        n = len(words)
         o2r = [[0.0] * n for _ in range(n)]
         r2o = [[0.0] * n for _ in range(n)]
         for i in range(n):
             for j in range(n):
                 if i == j or words[i] == words[j]:  # same text → inherit the partner's label
                     o2r[i][j], r2o[i][j] = diag_o2r[j], diag_r2o[j]
-        return related, o2r, r2o
+        return o2r, r2o
+
+    def pair_labels(self, words, related):
+        """TWC labels for a given related copy (e.g. the deterministic correction):
+        unchanged word = 1.0, changed (corrected) word = label_list, same-text inheritance."""
+        diag_o2r = [1.0 if r == w else self.label_list[0] for w, r in zip(words, related)]
+        diag_r2o = [1.0 if r == w else self.label_list[1] for w, r in zip(words, related)]
+        return self._label_matrix(words, diag_o2r, diag_r2o)

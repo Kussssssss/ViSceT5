@@ -40,6 +40,10 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_queue_size: int = 16384,
         twc_queue_start: int = 1000,
         twc_mask_same_text: bool = True,
+        twc_objective: str = "answer",
+        twc_answer_weight: float = 0.1,
+        twc_related_train: str = "correct",
+        ocr_feature_norm: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -128,10 +132,31 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_mask_same_text = bool(twc_mask_same_text)
         if self.twc_queue_size < 0 or self.twc_queue_start < 0:
             raise ValueError("twc_queue_size and twc_queue_start must be >= 0.")
-        if self.use_twc and self.twc_queue_size > 0 and self.twc_loss != "infonce":
+        if self.use_twc and self.twc_queue_size > 0 and self.twc_loss != "infonce" and twc_objective != "answer":
             raise ValueError("The TWC memory adds negatives to the softmax loss; use twc_loss=infonce.")
-        if self.use_twc and not self.ablation_use_ocr_aug:
-            raise ValueError("use_twc needs ablation_use_ocr_aug=True (TWC pairs each OCR word with its related copy).")
+        # answer : question ↔ OCR words of the answer (answer-grounded contrast on the fused
+        #          encoder output; candidates = every OCR word of the batch, original and
+        #          corrected copies). Supervises WHERE the answer is, which the decoder copies.
+        # lexical: original ↔ related copy of each OCR word (TWA word-level contrast).
+        # both   : sum of the two (weights twc_answer_weight and twc_weight).
+        # Norm of each OCR stream (box/det/rec/token/char) in SemanticOCREmbedding.
+        # layernorm = pre-refactor code (the Vast/old runs); rmsnorm = refactor. None (configs
+        # saved before this switch existed) = rmsnorm, so those checkpoints still load as trained.
+        self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")
+        if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
+            raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
+        self.twc_objective = str(twc_objective)
+        self.twc_answer_weight = float(twc_answer_weight)
+        # Related OCR copy at TRAIN time. correct = the deterministic correction used at test
+        # (train/test identical input); twa = TWA augmentation (noise / correction, p=0.35),
+        # which feeds the VQA loss a related half it never sees at test.
+        self.twc_related_train = str(twc_related_train)
+        if self.twc_objective not in ("answer", "lexical", "both"):
+            raise ValueError("twc_objective must be answer|lexical|both.")
+        if self.twc_related_train not in ("correct", "twa"):
+            raise ValueError("twc_related_train must be correct|twa.")
+        if self.use_twc and self.twc_objective != "answer" and not self.ablation_use_ocr_aug:
+            raise ValueError("Lexical TWC pairs each OCR word with its related copy: needs ablation_use_ocr_aug=True.")
 
         self.qa_clip_d_text = qa_clip_d_text
         self.pad_token_id = pad_token_id

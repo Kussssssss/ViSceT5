@@ -44,6 +44,16 @@ class ModelArguments:
     twc_mask_same_text: bool = field(
         default=True, metadata={"help": "Never use a candidate with the same text as the query as a negative."}
     )
+    twc_objective: str = field(
+        default="answer", metadata={"help": "answer (question ↔ answer OCR words) | lexical (TWA) | both."}
+    )
+    twc_answer_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-grounded TWC loss."})
+    ocr_feature_norm: str = field(
+        default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
+    )
+    twc_related_train: str = field(
+        default="correct", metadata={"help": "Related OCR copy at train: correct (as at test) | twa (augmentation)."}
+    )
 
 
 @dataclass

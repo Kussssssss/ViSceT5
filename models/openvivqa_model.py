@@ -89,6 +89,7 @@ class OpenViVQAModel(PreTrainedModel):
                         d_det=config.ocr_d_det,
                         d_rec=config.ocr_d_rec,
                         layer_norm_epsilon=norm_eps,
+                        norm_type=config.ocr_feature_norm,
                     ),
                 )
                 self.char_embedding = nn.Embedding(config.char_num, self.d_model)
@@ -104,9 +105,17 @@ class OpenViVQAModel(PreTrainedModel):
                 self.ocr_lite_text_proj.weight.copy_(torch.eye(self.d_model))
                 self.ocr_lite_text_proj.bias.zero_()
 
-        if config.use_twc:
+        if config.use_twc and config.twc_objective in ("lexical", "both"):
             # Nhiệt độ học được τ của TWC (CLIP/TWA): exp(logit_scale) = 1/0.07 lúc đầu.
             self.twc_logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
+        if config.use_twc and config.twc_objective in ("answer", "both"):
+            # Answer-grounded TWC: câu hỏi (đã qua encoder) → truy vấn; khởi tạo đồng nhất.
+            with _seeded(seed + 5):
+                self.twc_answer_query = nn.Linear(self.d_model, self.d_model)
+            with torch.no_grad():
+                self.twc_answer_query.weight.copy_(torch.eye(self.d_model))
+                self.twc_answer_query.bias.zero_()
+            self.twc_answer_logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -317,6 +326,55 @@ class OpenViVQAModel(PreTrainedModel):
         memory["pointer"] = (memory["pointer"] + count) % size
         memory["filled"] = min(size, memory["filled"] + count)
 
+    @staticmethod
+    def _pool_words(tokens, word_map, token_mask, slots):
+        """Mean of the token features of each OCR word slot, L2-normalised: [B, slots, D]."""
+        batch = tokens.shape[0]
+        tokens = tokens.float()
+        valid = ((word_map >= 0) & token_mask.bool()).unsqueeze(-1).float()
+        index = word_map.clamp(min=0, max=slots - 1).unsqueeze(-1)
+        sums = tokens.new_zeros(batch, slots, tokens.shape[-1]).scatter_add_(
+            1, index.expand_as(tokens), tokens * valid
+        )
+        counts = tokens.new_zeros(batch, slots, 1).scatter_add_(1, index, valid)
+        features = torch.nan_to_num(sums / counts.clamp_min(1), nan=0.0, posinf=0.0, neginf=0.0)
+        return F.normalize(features, dim=-1, eps=1e-6)
+
+    def _twc_answer(self, hidden, question_mask, ocr_tokens, word_map, token_mask,
+                    labels, text_ids, answer_ids):
+        """Answer-grounded TWC: the question (fused encoder states, mean over its tokens)
+        must retrieve the OCR words of its answer among every OCR word slot of the batch
+        (original + corrected copies). Positives = slots whose text is an answer word;
+        other images' slots with an answer word's text are ignored (false negatives).
+        labels: [B, S] 1/0/-1, text_ids: [B, S], answer_ids: [B, A] (-1 = pad)."""
+        batch, slots = labels.shape
+        words = self._pool_words(ocr_tokens, word_map, token_mask, slots).reshape(batch * slots, -1)
+        mask = question_mask.unsqueeze(-1).float()
+        question = (hidden.float() * mask).sum(1) / mask.sum(1).clamp_min(1)
+        query = F.normalize(self.twc_answer_query(question.to(self.twc_answer_query.weight.dtype)).float(),
+                            dim=-1, eps=1e-6)
+        scale = self.twc_answer_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
+        scores = scale * query @ words.t()  # [B, B·S]
+
+        flat = labels.reshape(-1).float()
+        owner = torch.arange(batch, device=labels.device).repeat_interleave(slots)
+        own = owner.unsqueeze(0) == torch.arange(batch, device=labels.device).unsqueeze(1)
+        targets = torch.where(flat.unsqueeze(0) == -1, torch.full_like(scores, -1.0),
+                              torch.zeros_like(scores))
+        targets = torch.where(own, flat.unsqueeze(0).expand_as(targets), targets)
+        flat_text = text_ids.reshape(-1)
+        same = ((flat_text.view(1, -1, 1) == answer_ids.unsqueeze(1))
+                & (answer_ids.unsqueeze(1) >= 0) & (flat_text.view(1, -1, 1) >= 0)).any(-1)
+        targets = targets.masked_fill(same & ~own, -1.0)
+        rows = (targets == 1).any(dim=1)
+        if not rows.any():
+            return scores.sum() * 0.0, scores.new_zeros(())
+        loss = self._soft_infonce(scores, targets, rows)
+        with torch.no_grad():
+            best = scores.detach().masked_fill(targets == -1, -1e9)[rows].argmax(dim=1)
+            accuracy = (targets[rows].gather(1, best.unsqueeze(1)) == 1).float().mean()
+        return loss, accuracy
+
     def _twc(self, tokens, word_map, token_mask, o2r, r2o, groups, text_ids=None):
         """TWC (TWA §3.4–3.6): word features of the original and related OCR copies,
         cosine similarity with learnable temperature; softmax InfoNCE (paper) or
@@ -324,15 +382,7 @@ class OpenViVQAModel(PreTrainedModel):
         text_ids: [B, 2W] hashed word texts (original half, related half), -1 = PAD.
         With twc_queue_size > 0 the softmax also sees the features of earlier batches."""
         batch, words = o2r.shape[:2]
-        tokens = tokens.float()
-        valid = ((word_map >= 0) & token_mask.bool()).unsqueeze(-1).float()
-        index = word_map.clamp(min=0).unsqueeze(-1)
-        sums = tokens.new_zeros(batch, 2 * words, tokens.shape[-1]).scatter_add_(
-            1, index.expand_as(tokens), tokens * valid
-        )
-        counts = tokens.new_zeros(batch, 2 * words, 1).scatter_add_(1, index, valid)
-        features = torch.nan_to_num(sums / counts.clamp_min(1), nan=0.0, posinf=0.0, neginf=0.0)
-        features = F.normalize(features, dim=-1, eps=1e-6)
+        features = self._pool_words(tokens, word_map, token_mask, 2 * words)
         original = features[:, :words].reshape(batch * words, -1)
         related = features[:, words:].reshape(batch * words, -1)
         scale = self.twc_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
@@ -421,6 +471,8 @@ class OpenViVQAModel(PreTrainedModel):
         twc_r2o=None,
         twc_group_ids=None,
         twc_text_ids=None,
+        twc_answer_labels=None,
+        twc_answer_text_ids=None,
         ocr_words=None,
     ):
         if ocr_attention_mask is None:
@@ -450,7 +502,15 @@ class OpenViVQAModel(PreTrainedModel):
                 return_dict=True,
             )
             result.update(loss=decoded.loss, logits=decoded.logits)
-        if self.config.use_twc and twc_o2r is not None:
+        if self.config.use_twc and twc_answer_labels is not None and hasattr(self, "twc_answer_query"):
+            questions = input_ids.shape[1]
+            result["twc_answer_loss"], result["twc_answer_acc"] = self._twc_answer(
+                encoded.last_hidden_state[:, :questions],
+                attention_mask if attention_mask is not None else (input_ids != self.config.pad_token_id).long(),
+                encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_input_ids.shape[1]],
+                ocr_to_word_map, ocr_attention_mask, twc_answer_labels, twc_text_ids, twc_answer_text_ids,
+            )
+        if self.config.use_twc and twc_o2r is not None and hasattr(self, "twc_logit_scale"):
             if self.config.twc_feature == "lexical":
                 tokens = lexical
             else:

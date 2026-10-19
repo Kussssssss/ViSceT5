@@ -110,12 +110,16 @@ def build_corrector(config, train_frame, term_vocab_path="configs/data/term_voca
 
 
 def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
-    """training=True + use_twc → TWA augmentation with TWC labels; otherwise the related
-    copy (if OCR-Aug is on) comes from the deterministic correction channel."""
+    """The related copy (if OCR-Aug is on) is the deterministic correction, at train and at
+    test. Only training with lexical TWC and twc_related_train=twa uses TWA augmentation.
+    Training with TWC also emits the TWC targets (lexical pairs and/or answer words)."""
     config = model.config
+    twc = training and config.use_twc
+    lexical = twc and config.twc_objective in ("lexical", "both")
+    answer = twc and config.twc_objective in ("answer", "both")
     mode = "none"
     if config.ablation_use_ocr_aug:
-        mode = "twa" if (training and config.use_twc) else "correct"
+        mode = "twa" if (lexical and config.twc_related_train == "twa") else "correct"
     ocr_config = {
         "ocr_embedding": {
             **DEFAULT_OCR_CONFIG["ocr_embedding"],
@@ -132,4 +136,6 @@ def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
         corrector=corrector,
         related_mode=mode,
         seed=seed,
+        twc_lexical=lexical,
+        twc_answer=answer,
     )
