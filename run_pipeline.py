@@ -5,6 +5,7 @@ Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG, USE_TWC,
             TWC_WEIGHT, TWC_LOSS, TWC_FEATURE, TWC_QUEUE_SIZE, TWC_QUEUE_START,
             TWC_MASK_SAME_TEXT, TWC_OBJECTIVE, TWC_ANSWER_WEIGHT, TWC_RELATED_TRAIN, OCR_FEATURE_NORM, CLIP_LATE_ADAPTER,
+            TWC_TEMPERATURE, TWC_ADV_PROBABILITY, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE.
 """
@@ -44,6 +45,11 @@ def training_arguments():
         "TWC_RELATED_TRAIN": "twc_related_train",
         "OCR_FEATURE_NORM": "ocr_feature_norm",
         "CLIP_LATE_ADAPTER": "clip_late_adapter",
+        "TWC_TEMPERATURE": "twc_temperature_init",
+        "TWC_ADV_PROBABILITY": "twc_adv_probability",
+        "LEARNING_RATE": "learning_rate",
+        "NEW_MODULE_LR": "new_module_learning_rate",
+        "SCALAR_LR": "scalar_learning_rate",
         "SMOKE_TRAIN_SAMPLES": "smoke_train_samples",
         "SMOKE_EVAL_SAMPLES": "smoke_eval_samples",
         "SMOKE_MAX_STEPS": "smoke_max_steps",

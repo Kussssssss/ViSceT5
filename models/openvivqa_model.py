@@ -108,7 +108,7 @@ class OpenViVQAModel(PreTrainedModel):
 
         if config.use_twc and config.twc_objective in ("lexical", "both"):
             # Nhiệt độ học được τ của TWC (CLIP/TWA): exp(logit_scale) = 1/0.07 lúc đầu.
-            self.twc_logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
+            self.twc_logit_scale = nn.Parameter(torch.tensor(math.log(1 / config.twc_temperature_init)))
         if config.use_twc and config.twc_objective in ("answer", "both"):
             # Answer-grounded TWC: câu hỏi (đã qua encoder) → truy vấn; khởi tạo đồng nhất.
             with _seeded(seed + 5):
@@ -116,7 +116,7 @@ class OpenViVQAModel(PreTrainedModel):
             with torch.no_grad():
                 self.twc_answer_query.weight.copy_(torch.eye(self.d_model))
                 self.twc_answer_query.bias.zero_()
-            self.twc_answer_logit_scale = nn.Parameter(torch.tensor(math.log(1 / 0.07)))
+            self.twc_answer_logit_scale = nn.Parameter(torch.tensor(math.log(1 / config.twc_temperature_init)))
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,

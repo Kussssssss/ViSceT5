@@ -27,7 +27,8 @@ from utils.io_utils import download_and_extract_checkpoint
 ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr",
                       "ablation_use_ocr_aug", "use_twc", "twc_weight", "twc_loss", "twc_feature",
                       "twc_queue_size", "twc_queue_start", "twc_mask_same_text", "twc_objective",
-                      "twc_answer_weight", "twc_related_train", "ocr_feature_norm", "clip_late_adapter")
+                      "twc_answer_weight", "twc_related_train", "ocr_feature_norm", "clip_late_adapter",
+                      "twc_temperature_init", "twc_adv_probability")
 
 
 def main(args_list=None):

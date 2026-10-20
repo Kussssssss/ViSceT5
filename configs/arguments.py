@@ -48,6 +48,12 @@ class ModelArguments:
         default="answer", metadata={"help": "answer (question ↔ answer OCR words) | lexical (TWA) | both."}
     )
     twc_answer_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-grounded TWC loss."})
+    twc_temperature_init: float = field(
+        default=0.07, metadata={"help": "Initial (learnable) TWC temperature τ; 0.07 = CLIP/TWA."}
+    )
+    twc_adv_probability: float = field(
+        default=0.35, metadata={"help": "TWA augmentation probability of each OCR word's related copy (TWA: 0.35)."}
+    )
     clip_late_adapter: bool = field(
         default=True, metadata={"help": "Keep the gated adapter of the late CLIP layers (pre-refactor CLIP)."}
     )
@@ -93,6 +99,16 @@ class CustomTrainingArguments(Seq2SeqTrainingArguments):
         metadata={
             "help": "Google Drive ID of a checkpoint zip to download and resume from."
         },
+    )
+    new_module_learning_rate: Optional[float] = field(
+        default=None,
+        metadata={"help": "LR of randomly initialised modules (ConsFormer, OCR/char embeddings, TWC query); "
+                          "None = learning_rate. M4C/TWA train new layers ~3-10x faster than pretrained ones."},
+    )
+    scalar_learning_rate: Optional[float] = field(
+        default=None,
+        metadata={"help": "LR of scalar parameters (TWC temperatures, CLIP adapter gates), without weight decay; "
+                          "None = learning_rate. Adam moves a scalar by ~lr per step, so 3e-5 barely moves it."},
     )
     smoke_test: bool = field(
         default=False,

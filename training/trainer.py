@@ -13,6 +13,12 @@ except ImportError:
     from numpy.core.multiarray import _reconstruct
 
 
+# Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
+NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
+               "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "twc_answer_query")
+SCALARS = ("twc_logit_scale", "twc_answer_logit_scale", "instruction_proj_gate")
+
+
 class VQATrainer(Seq2SeqTrainer):
     """Seq2SeqTrainer + TWC auxiliary loss.
 
@@ -50,6 +56,41 @@ class VQATrainer(Seq2SeqTrainer):
         allowed = [_reconstruct, np.ndarray, np.dtype, type(np.dtype("uint32"))]
         with torch.serialization.safe_globals(allowed):
             return super()._load_rng_state(checkpoint)
+
+    def create_optimizer(self):
+        """Three parameter groups (each keeps its own LR under the shared warmup/cosine schedule):
+        pretrained (ViT5, CLIP adapter projections) = learning_rate; randomly initialised
+        modules = new_module_learning_rate; scalars (TWC temperatures, adapter gates) =
+        scalar_learning_rate without weight decay (as CLIP's logit scale)."""
+        if self.optimizer is not None:
+            return self.optimizer
+        args = self.args
+        rates = {
+            "pretrained": args.learning_rate,
+            "new": getattr(args, "new_module_learning_rate", None) or args.learning_rate,
+            "scalar": getattr(args, "scalar_learning_rate", None) or args.learning_rate,
+        }
+        decay = set(self.get_decay_parameter_names(self.model))
+        groups = {}
+        for name, parameter in self.model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            if name.split(".")[-1] in SCALARS:
+                kind, weight_decay = "scalar", 0.0
+            else:
+                kind = "new" if name.split(".")[0] in NEW_MODULES else "pretrained"
+                weight_decay = args.weight_decay if name in decay else 0.0
+            group = groups.setdefault((kind, weight_decay), {"params": [], "lr": rates[kind],
+                                                             "weight_decay": weight_decay})
+            group["params"].append(parameter)
+        optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(args, self.model)
+        optimizer_kwargs.pop("lr", None)
+        self.optimizer = optimizer_cls(list(groups.values()), **optimizer_kwargs)
+        if self.is_world_process_zero():
+            summary = {f"{k}{'' if wd else ' (no decay)'}": f"{len(g['params'])} tensors @ lr {g['lr']:g}"
+                       for (k, wd), g in groups.items()}
+            print("[optimizer] parameter groups:", summary)
+        return self.optimizer
 
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(**inputs)
@@ -122,6 +163,11 @@ class VQATrainer(Seq2SeqTrainer):
     def log(self, logs):
         if self._twc_count and "loss" in logs:  # training log: mean TWC since last log
             logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
+            base = getattr(self.model, "module", self.model)
+            for name, key in (("twc_logit_scale", "twc_tau"), ("twc_answer_logit_scale", "twc_answer_tau")):
+                if hasattr(base, name):  # learned temperature τ = 1 / exp(clamped logit scale)
+                    theta = float(getattr(base, name).detach().clamp(-4.6052, 4.6052))
+                    logs[key] = round(float(torch.exp(torch.tensor(-theta))), 4)
             self._twc_sum = {}
             self._twc_count = 0
         super().log(logs)
