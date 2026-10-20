@@ -11,6 +11,8 @@ clip_late_adapter: false       # true = adapter có cổng ở 6 lớp cuối CL
 ocr_feature_norm: "rmsnorm"     # rmsnorm = bản refactor (t1); layernorm = code trước refactor
 use_twc: false
 twc_weight: 1.0
+twc_temperature_init: 0.4    # τ khởi tạo (vẫn học được); 0.07 = CLIP/TWA. τ lớn → sigmoid(cos/τ) mềm hơn
+twc_adv_probability: 0.7     # xác suất tăng cường TWA cho mỗi từ OCR (TWA gốc: 0.35)
 twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
 twc_feature: "fused"         # fused = đầu ra encoder (t1); lexical = đặc trưng OCR trước fusion
 twc_queue_size: 0            # 0 = chỉ trong batch (t1); >0 = bộ nhớ cross-batch (cần infonce)
@@ -31,7 +33,9 @@ num_train_epochs: 5
 per_device_train_batch_size: 8
 per_device_eval_batch_size: 8
 gradient_accumulation_steps: 1   # batch hiệu dụng 8 = 8 x 1 (t1)
-learning_rate: 0.00003
+learning_rate: 0.00003                 # phần đã pretrain (ViT5, projection của adapter CLIP)
+new_module_learning_rate: 0.0001       # module khởi tạo ngẫu nhiên (ConsFormer, embedding OCR/ký tự): ~3x, như M4C/TWA
+scalar_learning_rate: 0.001            # tham số vô hướng (temperature TWC, gate adapter), không weight decay
 weight_decay: 0.1
 warmup_ratio: 0.1
 lr_scheduler_type: "cosine"

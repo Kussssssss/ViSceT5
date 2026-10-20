@@ -45,6 +45,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_related_train: str = "correct",
         ocr_feature_norm: Optional[str] = None,
         clip_late_adapter: Optional[bool] = None,
+        twc_temperature_init: float = 0.07,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -151,6 +152,11 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
+        # Initial TWC temperature τ (learnable: logit scale = exp(θ), θ0 = log(1/τ)).
+        # 0.07 = CLIP/TWA; a larger τ starts with a softer similarity → logit mapping.
+        self.twc_temperature_init = float(twc_temperature_init)
+        if not 0.01 <= self.twc_temperature_init <= 100:
+            raise ValueError("twc_temperature_init must lie in [0.01, 100] (the logit-scale clamp).")
         self.twc_objective = str(twc_objective)
         self.twc_answer_weight = float(twc_answer_weight)
         # Related OCR copy at TRAIN time. correct = the deterministic correction used at test

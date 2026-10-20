@@ -1007,3 +1007,36 @@ def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
     outputs = model(**collator(samples))
     assert torch.isfinite(outputs["twc_loss"]) and "twc_answer_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
+
+
+def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, corrector, tmp_path):
+    import math
+    model = make_model(use_twc=True, twc_objective="lexical", twc_loss="bce", twc_feature="fused",
+                       twc_queue_size=0, twc_related_train="twa", twc_temperature_init=0.4,
+                       twc_adv_probability=0.7, clip_late_adapter=True, ablation_use_qaclip=False)
+    assert math.isclose(float(model.twc_logit_scale.exp()), 2.5, rel_tol=1e-5)
+    args = CustomTrainingArguments(output_dir=str(tmp_path), learning_rate=3e-5, weight_decay=0.1,
+                                   new_module_learning_rate=1e-4, scalar_learning_rate=1e-3,
+                                   max_steps=1, per_device_train_batch_size=2, logging_steps=1,
+                                   remove_unused_columns=False, report_to="none", save_strategy="no",
+                                   use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
+    dataset = ViT5VQADataset(pd.DataFrame(samples))
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer, train_dataset=dataset,
+                         data_collator=build_collator(model, tokenizer, corrector, training=True))
+    optimizer = trainer.create_optimizer()
+    by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
+    named = dict(model.named_parameters())
+    assert by_id[id(named["twc_logit_scale"])]["lr"] == 1e-3
+    assert by_id[id(named["twc_logit_scale"])]["weight_decay"] == 0.0
+    gate = next(n for n in named if n.endswith("instruction_proj_gate"))
+    assert by_id[id(named[gate])]["lr"] == 1e-3
+    consformer = next(n for n in named if n.startswith("ocr_encoder.") and n.endswith("weight"))
+    assert by_id[id(named[consformer])]["lr"] == 1e-4
+    t5 = "vit5.shared.weight"
+    assert by_id[id(named[t5])]["lr"] == 3e-5 and by_id[id(named[t5])]["weight_decay"] == 0.1
+    assert sum(len(g["params"]) for g in optimizer.param_groups) == sum(p.requires_grad for p in model.parameters())
+    trainer.train()
+    taus = [e["twc_tau"] for e in trainer.state.log_history if "twc_tau" in e]
+    assert taus and 0.3 < taus[0] < 0.5
+    batch = build_collator(model, tokenizer, corrector, training=True)
+    assert batch.cfg.twc_adv_probability == 0.7
