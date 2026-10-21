@@ -997,13 +997,13 @@ def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
             "twc_related_train", "ocr_feature_norm", "clip_late_adapter")
     assert {k: cfg[k] for k in keys} == {
         "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
-        "twc_objective": "lexical", "twc_related_train": "twa", "ocr_feature_norm": "rmsnorm",
+        "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "rmsnorm",
         "clip_late_adapter": False,
     }
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
     model = make_model(use_twc=True, **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector, training=True)
-    assert collator.related_mode == "twa" and collator.twc_lexical and not collator.twc_answer
+    assert collator.related_mode == "correct" and collator.twc_lexical and not collator.twc_answer
     outputs = model(**collator(samples))
     assert torch.isfinite(outputs["twc_loss"]) and "twc_answer_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
