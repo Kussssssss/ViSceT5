@@ -706,8 +706,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "False",
         "--ocr_feature_norm",
         "rmsnorm",  # the fixture model; resume re-applies the architecture flags
-        "--clip_late_adapter",
-        "False",
+        "--qavit_mode",
+        "off",
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -994,12 +994,12 @@ def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
-            "twc_related_train", "ocr_feature_norm", "clip_late_adapter")
+            "twc_related_train", "ocr_feature_norm")
     assert {k: cfg[k] for k in keys} == {
         "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
         "twc_objective": "lexical", "twc_related_train": "twa", "ocr_feature_norm": "rmsnorm",
-        "clip_late_adapter": False,
     }
+    assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
     model = make_model(use_twc=True, **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector, training=True)
@@ -1077,7 +1077,7 @@ def test_vast_only_consformer_recipe(make_model, tokenizer, samples, corrector, 
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune_vast_only_consformer.yaml", encoding="utf-8"))
     assert (cfg["ablation_use_image"], cfg["ablation_use_qaclip"], cfg["ablation_use_ocr"],
             cfg["ablation_use_ocr_aug"], cfg["use_twc"]) == (True, False, True, False, False)
-    assert (cfg["clip_late_adapter"], cfg["ocr_feature_norm"]) == (True, "layernorm")
+    assert (cfg["qavit_mode"], cfg["ocr_feature_norm"]) == ("no_question", "layernorm")
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"]) == (4, 2)
     assert (cfg["learning_rate"], cfg["new_module_learning_rate"], cfg["scalar_learning_rate"]) == (3e-5, None, None)
     assert (cfg["label_smoothing_factor"], cfg["weight_decay"], cfg["num_train_epochs"]) == (0.0, 0.1, 5)
@@ -1095,3 +1095,19 @@ def test_vast_only_consformer_recipe(make_model, tokenizer, samples, corrector, 
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     assert by_id[id(named[gate])]["weight_decay"] == 0.1
     assert build_collator(model, tokenizer, corrector, training=True).related_mode == "none"
+
+
+@pytest.mark.parametrize("env,expected", [
+    ({"QAVIT_MODE": "no_question"}, "no_question"),
+    ({"ABLATION_USE_QACLIP": "true"}, "question"),
+    ({"ABLATION_USE_QACLIP": "false", "CLIP_LATE_ADAPTER": "true"}, "no_question"),
+    ({"ABLATION_USE_QACLIP": "false"}, "off"),
+])
+def test_qavit_mode_from_env(monkeypatch, env, expected):
+    import run_pipeline
+    for key in ("QAVIT_MODE", "ABLATION_USE_QACLIP", "CLIP_LATE_ADAPTER"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    arguments = run_pipeline.training_arguments()
+    assert arguments[len(arguments) - 1 - arguments[::-1].index("--qavit_mode") + 1] == expected

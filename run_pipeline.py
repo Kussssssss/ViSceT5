@@ -4,7 +4,7 @@ STAGE=finetune (default) | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG, USE_TWC,
             TWC_WEIGHT, TWC_LOSS, TWC_FEATURE, TWC_QUEUE_SIZE, TWC_QUEUE_START,
-            TWC_MASK_SAME_TEXT, TWC_OBJECTIVE, TWC_ANSWER_WEIGHT, TWC_RELATED_TRAIN, OCR_FEATURE_NORM, CLIP_LATE_ADAPTER,
+            TWC_MASK_SAME_TEXT, TWC_OBJECTIVE, TWC_ANSWER_WEIGHT, TWC_RELATED_TRAIN, OCR_FEATURE_NORM, QAVIT_MODE (off|no_question|question),
             TWC_TEMPERATURE, TWC_ADV_PROBABILITY, TWC_VIEW, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE.
@@ -44,7 +44,7 @@ def training_arguments():
         "TWC_ANSWER_WEIGHT": "twc_answer_weight",
         "TWC_RELATED_TRAIN": "twc_related_train",
         "OCR_FEATURE_NORM": "ocr_feature_norm",
-        "CLIP_LATE_ADAPTER": "clip_late_adapter",
+        "QAVIT_MODE": "qavit_mode",
         "TWC_TEMPERATURE": "twc_temperature_init",
         "TWC_ADV_PROBABILITY": "twc_adv_probability",
         "TWC_VIEW": "twc_view",
@@ -58,6 +58,11 @@ def training_arguments():
     for variable, flag in overrides.items():
         if _env(variable):
             arguments.extend([f"--{flag}", _env(variable)])
+    if not _env("QAVIT_MODE") and (_env("CLIP_LATE_ADAPTER") or _env("ABLATION_USE_QACLIP")):
+        # Notebooks from before QAVIT_MODE: derive the single QA-ViT switch so YAML cannot override it.
+        question = _env("ABLATION_USE_QACLIP").lower() in ("1", "true", "yes")
+        layers = _env("CLIP_LATE_ADAPTER").lower() in ("1", "true", "yes")
+        arguments.extend(["--qavit_mode", "question" if question else ("no_question" if layers else "off")])
     if _env("OUTPUT_DIR"):
         output_dir = _env("OUTPUT_DIR")
         arguments.extend(["--output_dir", output_dir, "--logging_dir", output_dir.rstrip("/") + "/logs"])
