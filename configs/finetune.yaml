@@ -12,7 +12,8 @@ ocr_feature_norm: "rmsnorm"     # rmsnorm = bản refactor (t1); layernorm = cod
 use_twc: false
 twc_weight: 1.0
 twc_temperature_init: 0.1    # τ khởi tạo (vẫn học được); 0.07 = CLIP/TWA
-twc_adv_probability: 1.0     # tỷ lệ từ OCR bị tăng cường (twa): 1.0 = mọi từ → chỉ còn semi-positive (0.9) và negative; 0.35 = pretrain TWA
+twc_adv_probability: 0.5     # tỷ lệ từ OCR bị tăng cường cho TWC: 0.5 = nửa positive giữ nguyên (1.0), nửa semi-positive (0.9); 0.35 = pretrain TWA
+twc_view: "separate"         # decoder luôn đọc bản sửa (như lúc test); TWC dùng bản tăng cường riêng qua một lượt encoder phụ
 twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
 twc_feature: "fused"         # fused = đầu ra encoder (t1); lexical = đặc trưng OCR trước fusion
 twc_queue_size: 0            # 0 = chỉ trong batch (t1); >0 = bộ nhớ cross-batch (cần infonce)

@@ -39,7 +39,8 @@ class ViT5VQADataCollator:
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
-                 corrector=None, related_mode="none", seed=42, twc_lexical=None, twc_answer=False):
+                 corrector=None, related_mode="none", seed=42, twc_lexical=None, twc_answer=False,
+                 twc_separate=False):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -54,6 +55,11 @@ class ViT5VQADataCollator:
         # on exactly in twa mode, as before. twc_answer: which OCR words belong to the answer.
         self.twc_lexical = (related_mode == "twa") if twc_lexical is None else bool(twc_lexical)
         self.twc_answer = bool(twc_answer)
+        # twc_separate: the model input gets the deterministic correction; the TWA-augmented
+        # copy (with the TWC labels) is emitted separately as twc_ocr_* for the TWC pass.
+        self.twc_separate = bool(twc_separate)
+        if self.twc_separate and related_mode != "twa":
+            raise ValueError("A separate TWC view needs related_mode='twa'.")
         self.seed = int(seed)
         self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
         if related_mode not in RELATED_MODES:
@@ -196,6 +202,7 @@ class ViT5VQADataCollator:
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
         o2r_all, r2o_all, groups, text_ids, words = [], [], [], [], []
         answer_labels, answer_ids = [], []
+        view_ids, view_maps, view_chars, view_masks = [], [], [], []
         slots = 2 * word_count if with_related else word_count
         for sample, item in zip(batch, info):
             count = len(item["texts"])
@@ -205,9 +212,18 @@ class ViT5VQADataCollator:
                 item[key] = torch.cat(
                     [item[key], item[key].new_zeros(word_count - count, item[key].shape[-1])]
                 )
-            related = None
+            related = view = None
             if with_related:
                 related, o2r, r2o = self._related(item, sample)
+                if self.twc_separate:
+                    view = related  # TWA-augmented copy: TWC only
+                    related = (list(item["texts"]) if item["placeholder"]
+                               else self.corrector.correct(item["texts"]))
+                    v_ids, v_map, v_chars, v_mask = self._encode_ocr_text(view, word_count, offset=word_count)
+                    view_ids.append(torch.tensor(ids + v_ids, dtype=torch.long))
+                    view_maps.append(torch.tensor(mapping + v_map, dtype=torch.long))
+                    view_chars.append(torch.cat([chars, v_chars]))
+                    view_masks.append(torch.cat([mask, v_mask]))
                 rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(
                     related, word_count, offset=word_count
                 )
@@ -237,7 +253,7 @@ class ViT5VQADataCollator:
                 if not item["placeholder"]:
                     slot_texts[:count] = item["texts"]
                     if related is not None:
-                        slot_texts[word_count:word_count + count] = related
+                        slot_texts[word_count:word_count + count] = view if view is not None else related
                 text_ids.append(torch.tensor([_text_id(t) if t is not None else -1 for t in slot_texts]))
             if answer_targets:
                 # Positive = an OCR entry made only of answer words (entries can hold
@@ -277,6 +293,15 @@ class ViT5VQADataCollator:
                 twc_o2r=torch.stack(o2r_all),
                 twc_r2o=torch.stack(r2o_all),
                 twc_group_ids=torch.stack(groups),
+            )
+        if self.twc_separate:
+            view_padded = pad_sequence(view_ids, batch_first=True, padding_value=self.pad_id)
+            result.update(
+                twc_ocr_input_ids=view_padded,
+                twc_ocr_attention_mask=(view_padded != self.pad_id).long(),
+                twc_ocr_to_word_map=pad_sequence(view_maps, batch_first=True, padding_value=-1),
+                twc_ocr_char_ids=torch.stack(view_chars),
+                twc_ocr_char_mask=torch.stack(view_masks),
             )
         if lexical or answer_targets:
             result["twc_text_ids"] = torch.stack(text_ids)

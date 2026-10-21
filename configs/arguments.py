@@ -51,6 +51,9 @@ class ModelArguments:
     twc_temperature_init: float = field(
         default=0.07, metadata={"help": "Initial (learnable) TWC temperature τ; 0.07 = CLIP/TWA."}
     )
+    twc_view: str = field(
+        default="shared", metadata={"help": "shared | separate (decoder reads the correction, TWC its own augmented copy)."}
+    )
     twc_adv_probability: float = field(
         default=0.35, metadata={"help": "TWA augmentation probability of each OCR word's related copy (TWA: 0.35)."}
     )

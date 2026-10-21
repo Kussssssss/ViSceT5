@@ -1040,3 +1040,33 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     assert taus and 0.3 < taus[0] < 0.5
     batch = build_collator(model, tokenizer, corrector, training=True)
     assert batch.cfg.twc_adv_probability == 0.7
+
+
+@pytest.mark.parametrize("feature", ["fused", "lexical"])
+def test_twc_separate_view(make_model, tokenizer, samples, feature):
+    # "sữa" is a dictionary word here, so at p=1.0 it always gets character noise.
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}),
+                             label_list=[0.9, 0.9])
+    model = make_model(use_twc=True, twc_objective="lexical", twc_loss="bce", twc_feature=feature,
+                       twc_queue_size=0, twc_related_train="twa", twc_view="separate", twc_adv_probability=1.0)
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    assert collator.related_mode == "twa" and collator.twc_separate
+    batch = collator(samples)
+    eval_batch = build_collator(model, tokenizer, corrector, training=False)(samples)
+    # The decoder input is exactly the test-time input (deterministic correction) ...
+    for key in ("ocr_input_ids", "ocr_to_word_map", "ocr_char_ids"):
+        torch.testing.assert_close(batch[key], eval_batch[key])
+    # ... while TWC gets its own augmented copy (100% here: it differs from the correction).
+    assert "twc_ocr_input_ids" in batch and not torch.equal(batch["twc_ocr_char_ids"], batch["ocr_char_ids"])
+    outputs = model(**batch)
+    assert torch.isfinite(outputs["loss"]) and torch.isfinite(outputs["twc_loss"])
+    (outputs["loss"] + outputs["twc_loss"]).backward()
+    assert model.twc_logit_scale.grad is not None
+    model.eval()
+    with torch.no_grad():
+        model.generate(**{k: v for k, v in batch.items() if k != "labels"}, num_beams=1, max_new_tokens=2)
+
+
+def test_twc_view_validation():
+    with pytest.raises(ValueError):
+        OpenViVQAConfig(use_twc=True, twc_objective="answer", twc_view="separate")

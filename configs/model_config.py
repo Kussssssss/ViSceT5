@@ -46,6 +46,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_feature_norm: Optional[str] = None,
         clip_late_adapter: Optional[bool] = None,
         twc_temperature_init: float = 0.07,
+        twc_view: str = "shared",
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -157,6 +158,16 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_temperature_init = float(twc_temperature_init)
         if not 0.01 <= self.twc_temperature_init <= 100:
             raise ValueError("twc_temperature_init must lie in [0.01, 100] (the logit-scale clamp).")
+        # Which related copy lexical TWC contrasts (with twc_related_train=twa):
+        # shared   = the one the decoder reads (TWA-augmented at train, corrected at test);
+        # separate = the decoder always reads the deterministic correction (as at test) and
+        #            TWC runs an extra encoder pass on its own TWA-augmented copy, so the
+        #            augmentation rate no longer changes the VQA input.
+        self.twc_view = str(twc_view)
+        if self.twc_view not in ("shared", "separate"):
+            raise ValueError("twc_view must be shared|separate.")
+        if self.use_twc and self.twc_view == "separate" and twc_objective != "lexical":
+            raise ValueError("twc_view=separate is for the lexical (TWA) objective only.")
         self.twc_objective = str(twc_objective)
         self.twc_answer_weight = float(twc_answer_weight)
         # Related OCR copy at TRAIN time. correct = the deterministic correction used at test

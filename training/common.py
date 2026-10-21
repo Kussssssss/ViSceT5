@@ -138,4 +138,5 @@ def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
         seed=seed,
         twc_lexical=lexical,
         twc_answer=answer,
+        twc_separate=mode == "twa" and config.twc_view == "separate",
     )

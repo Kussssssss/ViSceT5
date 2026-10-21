@@ -241,8 +241,10 @@ class OpenViVQAModel(PreTrainedModel):
         attention_mask=None,
         ocr_attention_mask=None,
         return_lexical=False,
+        image_features=None,
     ):
         """Encode [question, image patches, OCR] once for loss and generation.
+        image_features: precomputed (tokens, mask) to reuse CLIP across two passes.
 
         Returns (encoder outputs, fused mask, start index of the OCR block)
         [+ token-level lexical OCR features when return_lexical].
@@ -254,7 +256,8 @@ class OpenViVQAModel(PreTrainedModel):
         pieces = [self.get_input_embeddings()(input_ids)]
         masks = [attention_mask]
         if self.config.ablation_use_image:
-            image_tokens, image_mask = self._encode_image(pixel_values, input_ids, attention_mask)
+            image_tokens, image_mask = (image_features if image_features is not None
+                                        else self._encode_image(pixel_values, input_ids, attention_mask))
             pieces.append(image_tokens)
             masks.append(image_mask)
         ocr_offset = sum(piece.shape[1] for piece in pieces)
@@ -479,10 +482,20 @@ class OpenViVQAModel(PreTrainedModel):
         twc_text_ids=None,
         twc_answer_labels=None,
         twc_answer_text_ids=None,
+        twc_ocr_input_ids=None,
+        twc_ocr_attention_mask=None,
+        twc_ocr_to_word_map=None,
+        twc_ocr_char_ids=None,
+        twc_ocr_char_mask=None,
         ocr_words=None,
     ):
         if ocr_attention_mask is None:
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
+        view_pass = (self.config.use_twc and twc_o2r is not None and twc_ocr_input_ids is not None
+                     and hasattr(self, "twc_logit_scale"))
+        image = None
+        if view_pass and self.config.ablation_use_image and self.config.twc_feature == "fused":
+            image = self._encode_image(pixel_values, input_ids, attention_mask)  # CLIP once, two passes
         encoded, mask, ocr_offset, lexical = self.encode(
             input_ids,
             pixel_values,
@@ -495,6 +508,7 @@ class OpenViVQAModel(PreTrainedModel):
             attention_mask,
             ocr_attention_mask,
             return_lexical=True,
+            image_features=image,
         )
         result = {"encoder_outputs": encoded, "attention_mask": mask}
         if labels is not None or decoder_input_ids is not None:
@@ -517,12 +531,27 @@ class OpenViVQAModel(PreTrainedModel):
                 ocr_to_word_map, ocr_attention_mask, twc_answer_labels, twc_text_ids, twc_answer_text_ids,
             )
         if self.config.use_twc and twc_o2r is not None and hasattr(self, "twc_logit_scale"):
-            if self.config.twc_feature == "lexical":
+            word_map, token_mask = ocr_to_word_map, ocr_attention_mask
+            if view_pass:
+                # Separate TWC view: same question/image/boxes, TWA-augmented related copy.
+                word_map = twc_ocr_to_word_map
+                token_mask = (twc_ocr_attention_mask if twc_ocr_attention_mask is not None
+                              else (twc_ocr_input_ids != self.config.pad_token_id).long())
+                if self.config.twc_feature == "lexical":
+                    _, _, tokens = self._encode_ocr(ocr_info, twc_ocr_input_ids, token_mask, word_map,
+                                                    twc_ocr_char_ids, twc_ocr_char_mask)
+                else:
+                    view, _, view_offset = self.encode(
+                        input_ids, pixel_values, ocr_info, twc_ocr_input_ids, word_map, twc_ocr_char_ids,
+                        twc_ocr_char_mask, ocr_word_mask, attention_mask, token_mask, image_features=image,
+                    )
+                    tokens = view.last_hidden_state[:, view_offset : view_offset + twc_ocr_input_ids.shape[1]]
+            elif self.config.twc_feature == "lexical":
                 tokens = lexical
             else:
                 tokens = encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_input_ids.shape[1]]
             result["twc_loss"], result["twc_acc"] = self._twc(
-                tokens, ocr_to_word_map, ocr_attention_mask, twc_o2r, twc_r2o, twc_group_ids,
+                tokens, word_map, token_mask, twc_o2r, twc_r2o, twc_group_ids,
                 twc_text_ids,
             )
         return result
@@ -545,7 +574,7 @@ class OpenViVQAModel(PreTrainedModel):
         **generation_kwargs,
     ):
         for name in ("twc_o2r", "twc_r2o", "twc_group_ids", "twc_text_ids", "twc_answer_labels",
-                     "twc_answer_text_ids", "ocr_words", "labels"):
+                     "twc_answer_text_ids", "ocr_words", "labels", *('twc_ocr_input_ids', 'twc_ocr_attention_mask', 'twc_ocr_to_word_map', 'twc_ocr_char_ids', 'twc_ocr_char_mask')):
             generation_kwargs.pop(name, None)
         if encoder_outputs is None:
             encoder_outputs, attention_mask, _ = self.encode(
