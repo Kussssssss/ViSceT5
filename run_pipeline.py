@@ -5,7 +5,7 @@ Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG, USE_TWC,
             TWC_WEIGHT, TWC_LOSS, TWC_FEATURE, TWC_QUEUE_SIZE, TWC_QUEUE_START,
             TWC_MASK_SAME_TEXT, TWC_OBJECTIVE, TWC_ANSWER_WEIGHT, TWC_RELATED_TRAIN, OCR_FEATURE_NORM, CLIP_LATE_ADAPTER,
-            TWC_TEMPERATURE, TWC_ADV_PROBABILITY, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
+            TWC_TEMPERATURE, TWC_ADV_PROBABILITY, TWC_VIEW, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE.
 """
@@ -47,6 +47,7 @@ def training_arguments():
         "CLIP_LATE_ADAPTER": "clip_late_adapter",
         "TWC_TEMPERATURE": "twc_temperature_init",
         "TWC_ADV_PROBABILITY": "twc_adv_probability",
+        "TWC_VIEW": "twc_view",
         "LEARNING_RATE": "learning_rate",
         "NEW_MODULE_LR": "new_module_learning_rate",
         "SCALAR_LR": "scalar_learning_rate",
