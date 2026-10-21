@@ -17,8 +17,8 @@ python training/finetune.py configs/finetune.yaml --smoke_test True
 
 Dataset configuration lives in `configs/data/`. Training prepares the configured
 dataset when its CSV cache is unavailable. Data preparation scripts, OCR features,
-and vocabulary utilities are retained; the VQA collator does not require auxiliary
-dictionary files.
+and vocabulary utilities are retained. OCR augmentation uses the dictionaries in
+`configs/data/` (`term_vocab.txt`, `viet_vocab.txt`, and optional `eng_vocab.txt`).
 
 With `model_name_or_path: null`, the model initializes its ViT5 and CLIP
 backbones from their configured weights. Use `--model_name_or_path PATH` to start
@@ -83,11 +83,27 @@ It produces `ocr_input_ids`, `ocr_attention_mask`, `ocr_to_word_map`,
 and optional answer `labels`. A batch must be entirely labelled or entirely
 unlabelled.
 
+`use_ocr_aug_finetune: true` in the training YAML restores related OCR correction
+from the legacy fine-tuning path. Original and augmented text pass separately
+through the **same** OCR encoder/GroupAttention, with independent subword maps,
+character tensors and masks. Their completed OCR features are concatenated only
+after encoding. Image/region joint attention runs once, and both text views reuse
+its visual features and original boxes; no encoder weights or regions are duplicated.
+The collator returns the augmented inputs in `ocr_aug`.
+
+Correction preserves known words, numbers and special strings; unknown entries
+are matched using Vietnamese tone/consonant rules and Levenshtein distance.
+The vocabulary is static: QA questions/answers are not used to build it. Candidate
+ties and optional probability sampling are deterministic across train/evaluation.
+The augmentation setting is saved in model config and reused during evaluation.
+Older checkpoints default to origin only; the training YAML explicitly enables
+augmentation. No new parameters are added, but the fused sequence is longer.
+
 `OpenViVQAModel.encode()` builds the fused encoder memory. `forward()` computes the
 answer loss, and `generate()` can reuse that memory. `VQATrainer` performs evaluation
 generation from the same encoder result and writes `train_metrics.jsonl`.
 
-The fused sequence is `[question embeddings, updated image patches, OCR features, mean updated patch token]`.
+With augmentation, the fused sequence is `[question embeddings, updated image patches, OCR origin features, OCR augmented features, mean updated patch token]`.
 Visual Search, ConvNeXt, ROI crops and crop tokens have been removed.
 `models/modules/visual_search.py` is retained only as reference source and is not
 imported by the active model or module package. Image and OCR features enter the

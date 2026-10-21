@@ -2,6 +2,7 @@ dataset_name: "ViTextVQA"
 data_dir: "./datasets"
 ablation_use_qaclip: true
 ablation_use_ocr: true
+use_ocr_aug_finetune: true
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"

@@ -5,6 +5,7 @@ import re
 import torch
 from PIL import Image, ImageOps
 from torch.nn.utils.rnn import pad_sequence
+from data.ocr_augmentation import OCRTextAugmenter
 
 from data.vocab import (
     COMBINED_CHARS,
@@ -36,6 +37,15 @@ class ViT5VQADataCollator:
             raise ValueError("The tokenizer must define an unknown token.")
         if config.char_num < len(COMBINED_CHARS):
             raise ValueError("char_num must cover the OCR character vocabulary.")
+        self.augmenter = (
+            OCRTextAugmenter(
+                config.ocr_aug_vocab_dir,
+                config.adv_probability_finetune,
+                config.editlen,
+            )
+            if config.use_ocr_aug_finetune
+            else None
+        )
 
     @staticmethod
     def _box_iou(first, second):
@@ -148,6 +158,7 @@ class ViT5VQADataCollator:
             self.seq_max, ((max(len(item["texts"]) for item in info) + 7) // 8) * 8
         )
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
+        augmented = []
         for item in info:
             count = len(item["texts"])
             ids, mapping, chars, mask = self._encode_ocr_text(item["texts"], word_count)
@@ -156,6 +167,10 @@ class ViT5VQADataCollator:
             char_ids.append(chars)
             char_masks.append(mask)
             word_masks.append(torch.arange(word_count) < count)
+            if self.augmenter is not None:
+                related = self.augmenter(item["texts"])
+                item["augmented_texts"] = related
+                augmented.append(self._encode_ocr_text(related, word_count))
             for key in ("boxes", "det_features", "rec_features"):
                 item[key] = torch.cat(
                     [
@@ -180,6 +195,23 @@ class ViT5VQADataCollator:
             "ocr_char_mask": torch.stack(char_masks),
             "ocr_word_mask": torch.stack(word_masks).long(),
         }
+        if augmented:
+            aug_ids = pad_sequence(
+                [entry[0] for entry in augmented],
+                batch_first=True,
+                padding_value=self.pad_id,
+            )
+            result["ocr_aug"] = {
+                "input_ids": aug_ids,
+                "attention_mask": (aug_ids != self.pad_id).long(),
+                "to_word_map": pad_sequence(
+                    [entry[1] for entry in augmented],
+                    batch_first=True,
+                    padding_value=-1,
+                ),
+                "char_ids": torch.stack([entry[2] for entry in augmented]),
+                "char_mask": torch.stack([entry[3] for entry in augmented]),
+            }
         # Unlabelled inference batches do not create an all-ignored decoder loss.
         answers = [sample.get("answer") for sample in batch]
         if all(answer is not None and str(answer).strip() for answer in answers):
