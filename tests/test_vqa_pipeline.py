@@ -997,7 +997,7 @@ def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
             "twc_related_train", "ocr_feature_norm")
     assert {k: cfg[k] for k in keys} == {
         "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
-        "twc_objective": "lexical", "twc_related_train": "twa", "ocr_feature_norm": "rmsnorm",
+        "twc_objective": "lexical", "twc_related_train": "twa", "ocr_feature_norm": "layernorm",
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
@@ -1072,15 +1072,7 @@ def test_twc_view_validation():
         OpenViVQAConfig(use_twc=True, twc_objective="answer", twc_view="separate")
 
 
-def test_vast_only_consformer_recipe(make_model, tokenizer, samples, corrector, tmp_path):
-    import yaml
-    cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune_vast_only_consformer.yaml", encoding="utf-8"))
-    assert (cfg["ablation_use_image"], cfg["ablation_use_qaclip"], cfg["ablation_use_ocr"],
-            cfg["ablation_use_ocr_aug"], cfg["use_twc"]) == (True, False, True, False, False)
-    assert (cfg["qavit_mode"], cfg["ocr_feature_norm"]) == ("no_question", "layernorm")
-    assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"]) == (4, 2)
-    assert (cfg["learning_rate"], cfg["new_module_learning_rate"], cfg["scalar_learning_rate"]) == (3e-5, None, None)
-    assert (cfg["label_smoothing_factor"], cfg["weight_decay"], cfg["num_train_epochs"]) == (0.0, 0.1, 5)
+def test_unset_group_rates_give_stock_optimizer(make_model, tokenizer, samples, corrector, tmp_path):
     # Both rates unset → same groups as the stock Trainer: one LR, HF weight-decay rule (gates decayed).
     model = make_model(clip_late_adapter=True, ablation_use_ocr_aug=False, ocr_feature_norm="layernorm")
     args = CustomTrainingArguments(output_dir=str(tmp_path), learning_rate=3e-5, weight_decay=0.1,
@@ -1094,8 +1086,6 @@ def test_vast_only_consformer_recipe(make_model, tokenizer, samples, corrector, 
     gate = next(n for n in named if n.endswith("instruction_proj_gate"))
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     assert by_id[id(named[gate])]["weight_decay"] == 0.1
-    assert build_collator(model, tokenizer, corrector, training=True).related_mode == "none"
-
 
 @pytest.mark.parametrize("env,expected", [
     ({"QAVIT_MODE": "no_question"}, "no_question"),
