@@ -9,6 +9,8 @@ import thêm trong kernel trộn hai phiên bản (ImportError: reset_sessions .
   # liệt kê checkpoint (điểm val từng epoch), tải checkpoint được chọn, ghi đường dẫn ra JSON
   python scripts/hf_io.py prepare --repo USER/REPO --dir OUTPUT_DIR --ckpt best --info_out info.json
   python scripts/hf_io.py upload_predictions --repo USER/REPO --dir PRED_DIR --path_in_repo predictions --files a.csv
+  # đẩy các checkpoint-N local chưa có trên Hub (train lỡ chạy khi thiếu HF_TOKEN) để resume từ Hub
+  python scripts/hf_io.py upload_checkpoints --repo USER/REPO --dir OUTPUT_DIR
 
 --ckpt nhận:
   best              model tốt nhất ở thư mục gốc (trainer.save_model sau load_best_model_at_end)
@@ -159,9 +161,31 @@ def upload(a, token):
             print(f"↑ {a.repo}/{a.path_in_repo}/{f}")
 
 
+def upload_checkpoints(a, token):
+    """Push local checkpoint-N folders (full: weights + optimizer/scheduler/RNG state) that are not
+    on the Hub yet, so a run trained without HF_TOKEN can be resumed from the Hub."""
+    if not token:
+        sys.exit("❌ Thiếu HF_TOKEN → chạy cell token (Colab Secrets / notebook_login) trước.")
+    local = sorted(glob.glob(os.path.join(a.dir, "checkpoint-*")), key=lambda p: _step(os.path.basename(p)))
+    local = [p for p in local if os.path.exists(os.path.join(p, "model.safetensors"))]
+    if not local:
+        sys.exit(f"❌ Không có checkpoint-* nào trong {a.dir} (runtime Colab đã bị reset?).")
+    api = HfApi(token=token)
+    api.create_repo(repo_id=a.repo, repo_type="model", exist_ok=True)
+    remote = set(api.list_repo_files(a.repo, token=token))
+    for folder in local:
+        name = os.path.basename(folder)
+        complete = os.path.exists(os.path.join(folder, "optimizer.pt"))
+        if f"{name}/model.safetensors" in remote and (not complete or f"{name}/optimizer.pt" in remote):
+            print(f"= {name} đã có trên {a.repo}")
+            continue
+        api.upload_folder(folder_path=folder, path_in_repo=name, repo_id=a.repo, repo_type="model")
+        print(f"↑ {a.repo}/{name}" + ("" if complete else "  (⚠️ thiếu optimizer.pt → không resume được)"))
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["prepare", "download_best", "upload_predictions"])
+    ap.add_argument("action", choices=["prepare", "download_best", "upload_predictions", "upload_checkpoints"])
     ap.add_argument("--repo", required=True)
     ap.add_argument("--dir", required=True)
     ap.add_argument("--ckpt", default="best", help="best | latest | epochN | checkpoint-N")
@@ -175,6 +199,8 @@ def main():
         a.action = "prepare"
     if a.action == "prepare":
         prepare(a, token)
+    elif a.action == "upload_checkpoints":
+        upload_checkpoints(a, token)
     else:
         upload(a, token)
 
