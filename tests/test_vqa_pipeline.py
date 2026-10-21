@@ -1070,3 +1070,28 @@ def test_twc_separate_view(make_model, tokenizer, samples, feature):
 def test_twc_view_validation():
     with pytest.raises(ValueError):
         OpenViVQAConfig(use_twc=True, twc_objective="answer", twc_view="separate")
+
+
+def test_vast_only_consformer_recipe(make_model, tokenizer, samples, corrector, tmp_path):
+    import yaml
+    cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune_vast_only_consformer.yaml", encoding="utf-8"))
+    assert (cfg["ablation_use_image"], cfg["ablation_use_qaclip"], cfg["ablation_use_ocr"],
+            cfg["ablation_use_ocr_aug"], cfg["use_twc"]) == (True, False, True, False, False)
+    assert (cfg["clip_late_adapter"], cfg["ocr_feature_norm"]) == (True, "layernorm")
+    assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"]) == (4, 2)
+    assert (cfg["learning_rate"], cfg["new_module_learning_rate"], cfg["scalar_learning_rate"]) == (3e-5, None, None)
+    assert (cfg["label_smoothing_factor"], cfg["weight_decay"], cfg["num_train_epochs"]) == (0.0, 0.1, 5)
+    # Both rates unset → same groups as the stock Trainer: one LR, HF weight-decay rule (gates decayed).
+    model = make_model(clip_late_adapter=True, ablation_use_ocr_aug=False, ocr_feature_norm="layernorm")
+    args = CustomTrainingArguments(output_dir=str(tmp_path), learning_rate=3e-5, weight_decay=0.1,
+                                   report_to="none", use_cpu=True, remove_unused_columns=False)
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer,
+                         train_dataset=ViT5VQADataset(pd.DataFrame(samples)),
+                         data_collator=build_collator(model, tokenizer, corrector, training=True))
+    optimizer = trainer.create_optimizer()
+    assert {g["lr"] for g in optimizer.param_groups} == {3e-5}
+    named = dict(model.named_parameters())
+    gate = next(n for n in named if n.endswith("instruction_proj_gate"))
+    by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
+    assert by_id[id(named[gate])]["weight_decay"] == 0.1
+    assert build_collator(model, tokenizer, corrector, training=True).related_mode == "none"
