@@ -65,6 +65,20 @@ Không nhân bản visual entry theo số subword trước attention. Ảnh có 
 OCR và OCR có thể attend ảnh. Gradient xuyên suốt nhánh này và question encoder;
 backbone CLIP vẫn freeze như trước. Tất cả feature đưa vào ViT5 có chiều d_model.
 
+Geometry bias bổ sung cho ba lớp attention:
+
+- Patch bbox normalized theo grid của CLIP (14×14 ở 224/16), đúng row-major order,
+  không có CLS. Buffer này được tạo lại, không phải parameter trong checkpoint.
+- Với cặp query/key: dùng độ lệch tâm x/y, log tỉ lệ width/height (clamp [-5,5]),
+  IoU và tỉ lệ diện tích query được giao. Tính geometry FP32, tránh chia/log bằng 0.
+- Mỗi lớp có MLP riêng `6 → 32 → num_heads`, ReLU giữa hai Linear; chỉ cộng bias
+  vào hai khối image→OCR và OCR→image, không ép đối xứng. Hai khối cùng modality
+  có geometry bias=0. Đây là geometry mềm, không hard-mask OCR theo ROI.
+- Weight/bias Linear cuối bằng 0; Linear đầu random. Khi warm-start từ baseline
+  joint attention `baa69d0`, bias ban đầu bằng 0 và mọi trọng số cũ được giữ.
+- Gộp padding vào float additive mask trước softmax; không xuất attention weights
+  trong train. Không thêm cờ ablation hay thay đổi loss/LR/batch size.
+
 Encoder ViT5 nhận chuỗi ghép: question embeddings, image tokens sau joint attention,
 OCR features hoàn chỉnh, một token trung bình của image tokens đã cập nhật. Attention mask được ghép
 cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
@@ -100,6 +114,8 @@ không resume optimizer của kiến trúc cũ vì danh sách parameter đã tha
 Checkpoint baseline khởi tạo random ba attention mới; RMSNorm và T5Norm visual
 mới khởi tạo scale=1. Ba norm riêng det/rec/bbox cũ được thay thế, không nạp vào
 hai norm visual mới. Linear det/rec/bbox và tok/char norm cũ vẫn được nạp.
+Checkpoint joint-attention trước geometry chỉ thiếu các geometry MLP mới; output
+của chúng được khởi tạo bằng 0. Dùng optimizer mới khi chuyển từ checkpoint đó.
 Các checkpoint cũ chứa head hoặc metadata của những mục tiêu đã bỏ không phải
 checkpoint chuẩn của luồng mới; các tensor batch cũ cũng đã đổi sang API OCR ở trên.
 
@@ -114,5 +130,7 @@ loss/backward, cached generation, checkpoint sharding và train/evaluate/resume.
 Tests nhánh mới kiểm tra fusion trước subword mapping, công thức sum/norm,
 mask padding (cả khi không có OCR hợp lệ), gradient hai chiều image/region và
 khởi tạo attention còn thiếu khi warm-start từ baseline.
+Geometry tests kiểm tra thứ tự patch, quan hệ có hướng, bias=0 khớp baseline,
+padding và bias tác động đúng hai khối khác modality, checkpoint có/không geometry.
 Việc này xác minh luồng mã; chất lượng nghiên cứu và tài nguyên GPU cần được đo
 qua thí nghiệm trên dataset và backbone thực tế.
