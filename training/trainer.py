@@ -61,7 +61,8 @@ class VQATrainer(Seq2SeqTrainer):
         """Three parameter groups (each keeps its own LR under the shared warmup/cosine schedule):
         pretrained (ViT5, CLIP adapter projections) = learning_rate; randomly initialised
         modules = new_module_learning_rate; scalars (TWC temperatures, adapter gates) =
-        scalar_learning_rate without weight decay (as CLIP's logit scale)."""
+        scalar_learning_rate without weight decay (as CLIP's logit scale). Unset rates fall back
+        to learning_rate (and scalars to the usual weight-decay rule), i.e. the stock optimizer."""
         if self.optimizer is not None:
             return self.optimizer
         args = self.args
@@ -75,7 +76,9 @@ class VQATrainer(Seq2SeqTrainer):
         for name, parameter in self.model.named_parameters():
             if not parameter.requires_grad:
                 continue
-            if name.split(".")[-1] in SCALARS:
+            # scalar_learning_rate unset: scalars are ordinary parameters (base LR, HF weight-decay
+            # rule), so with both rates unset the groups equal the stock Trainer's (old code).
+            if name.split(".")[-1] in SCALARS and getattr(args, "scalar_learning_rate", None) is not None:
                 kind, weight_decay = "scalar", 0.0
             else:
                 kind = "new" if name.split(".")[0] in NEW_MODULES else "pretrained"

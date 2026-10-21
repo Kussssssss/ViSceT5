@@ -1,0 +1,71 @@
+# Công thức của run Vast only_consformer (commit 7b99d60, test EM 31.72 / train lại trên Colab 31.23):
+# ảnh (CLIP đóng băng + adapter cổng ở 6 lớp cuối) + câu hỏi + toàn bộ OCR qua Consformer (LayerNorm),
+# không OCR Augmentation, không TWC, batch 4x2, lr 3e-5 cho mọi tham số, không label smoothing.
+# Dùng bằng TRAIN_CONFIG=configs/finetune_vast_only_consformer.yaml (xem notebooks/twc_colab.ipynb).
+dataset_name: "ViTextVQA"
+data_dir: "./datasets"
+# ViSceT5 = CLIP không nhận câu hỏi + SceSpaVis + kênh sửa OCR (+ TWC khi use_twc=true).
+ablation_use_image: true
+ablation_use_qaclip: false
+ablation_use_ocr: true
+ablation_use_ocr_aug: false   # only Consformer
+# Công thức của run t1 (commit c6e2118, test EM 30.89): CLIP đóng băng hoàn toàn, RMSNorm,
+# TWC TWA nguyên bản (BCE trên đầu ra encoder, related = tăng cường TWA), batch 8x1, LS 0.1.
+clip_late_adapter: true   # code cũ: 6 lớp cuối CLIP có adapter cổng học được
+ocr_feature_norm: "layernorm"   # code cũ
+use_twc: false
+twc_weight: 1.0
+twc_temperature_init: 0.1    # τ khởi tạo (vẫn học được); 0.07 = CLIP/TWA
+twc_adv_probability: 0.5     # tỷ lệ từ OCR bị tăng cường cho TWC: 0.5 = nửa positive giữ nguyên (1.0), nửa semi-positive (0.9); 0.35 = pretrain TWA
+twc_view: "separate"         # decoder luôn đọc bản sửa (như lúc test); TWC dùng bản tăng cường riêng qua một lượt encoder phụ
+twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
+twc_feature: "fused"         # fused = đầu ra encoder (t1); lexical = đặc trưng OCR trước fusion
+twc_queue_size: 0            # 0 = chỉ trong batch (t1); >0 = bộ nhớ cross-batch (cần infonce)
+twc_queue_start: 1000        # số forward train trước khi đọc bộ nhớ
+twc_mask_same_text: false    # false = nhãn TWA nguyên bản (t1); true = bỏ ứng viên trùng chữ khỏi negative
+twc_objective: "lexical"     # lexical: gốc ↔ related (TWA, t1) | answer: câu hỏi ↔ từ OCR của đáp án | both
+twc_answer_weight: 0.1       # trọng số loss answer-grounded
+twc_related_train: "twa"     # twa = tăng cường TWA (từ đúng → nhiễu ký tự, từ sai → sửa) với tỷ lệ twc_adv_probability; correct = chỉ sửa, như lúc test
+
+output_dir: "./output/finetune"
+logging_dir: "./output/finetune/logs"
+model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
+resume_from_checkpoint: null
+resume_checkpoint_id: ""
+
+seed: 42
+num_train_epochs: 5
+per_device_train_batch_size: 4   # code cũ: 4 x 2
+per_device_eval_batch_size: 8
+gradient_accumulation_steps: 2   # batch hiệu dụng 8
+learning_rate: 0.00003   # một learning rate cho mọi tham số, như code cũ
+new_module_learning_rate: null   # null = learning_rate
+scalar_learning_rate: null   # null = learning_rate, có weight decay như code cũ
+weight_decay: 0.1
+warmup_ratio: 0.1
+lr_scheduler_type: "cosine"
+
+logging_steps: 100
+eval_strategy: "epoch"
+save_strategy: "epoch"
+save_total_limit: 2
+
+# Đặt tự động theo dataset trong training/finetune.py: ViTextVQA/ViOCRVQA → em_f1
+# (trung bình EM và F1 trên val), OpenViVQA → cider. Không chọn theo loss.
+metric_for_best_model: "em_f1"
+greater_is_better: true
+load_best_model_at_end: true
+remove_unused_columns: false
+predict_with_generate: true
+
+# 0 = CE thường, khớp công thức của run Vast cũ (code cũ bỏ qua giá trị này) để so sánh công bằng.
+label_smoothing_factor: 0.0   # code cũ bỏ qua giá trị 0.1 (dùng CE thường)
+optim: "adamw_torch"
+dataloader_num_workers: 4
+dataloader_pin_memory: true
+disable_tqdm: false
+fp16: false
+report_to: "none"
+
+generation_max_length: 56
+generation_num_beams: 4
