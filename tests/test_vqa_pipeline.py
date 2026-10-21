@@ -29,7 +29,12 @@ from configs.arguments import CustomTrainingArguments, DataArguments, ModelArgum
 from configs.model_config import OpenViVQAConfig
 from data.dataset import ViT5VQADataset
 from models.modules.qa_clip import QACLIPEncoder
-from models.modules.ocr_image_fusion import OCRImageFusion, JointAttentionLayer
+from models.modules.ocr_image_fusion import (
+    OCRImageFusion,
+    JointAttentionLayer,
+    GeometryBias,
+    relative_geometry,
+)
 from models.openvivqa_model import OpenViVQAModel
 from training.common import (
     PROJECT_ROOT,
@@ -55,6 +60,11 @@ def test_memory_audit_uses_same_batch_and_real_optimizer(
         audit, "load_dataframes", lambda *args: {"train": pd.DataFrame(samples)}
     )
     batch_path = tmp_path / "audit-batch.pt"
+    initial_geometry = {
+        name: parameter.detach().clone()
+        for name, parameter in model.named_parameters()
+        if ".geometry_bias." in name
+    }
     output = tmp_path / "memory-audit"
     arguments = [
         "--output_dir",
@@ -85,6 +95,11 @@ def test_memory_audit_uses_same_batch_and_real_optimizer(
     assert report["groups"]["ocr_encoder"]["with_gradient"] > 0
     assert report["groups"]["qa_clip"]["with_gradient"] > 0
     assert report["groups"]["image_ocr_fusion"]["optimizer_state_bytes"] > 0
+    for name, initial in initial_geometry.items():
+        assert report["parameters"][name]["optimizer_state_bytes"] > 0
+        # The first Linear starts with zero gradients through the zero output
+        # projection, then must begin learning after that projection updates.
+        assert not torch.equal(initial, model.get_parameter(name).detach())
     assert "visual_search" not in report["groups"]
     missing = [
         n
@@ -532,7 +547,10 @@ def test_region_fusion_precedes_subword_mapping_and_text_sum(model, tokenizer, s
     finally:
         for hook in hooks:
             hook.remove()
-    image_in, visual_in, image_mask, word_mask = captured["joint_input"]
+    image_in, visual_in, image_mask, word_mask, ocr_boxes = captured["joint_input"]
+    torch.testing.assert_close(
+        ocr_boxes, torch.stack([item["boxes"] for item in batch["ocr_info"]])
+    )
     image_out, visual_out = captured["joint_output"]
     assert visual_in.shape == (2, batch["ocr_word_mask"].shape[1], model.d_model)
     assert visual_in.shape[1] != batch["ocr_input_ids"].shape[1]
@@ -575,23 +593,44 @@ def test_region_fusion_precedes_subword_mapping_and_text_sum(model, tokenizer, s
 
 
 def test_joint_attention_masks_regions_and_preserves_two_way_gradients():
-    fusion = OCRImageFusion(32, 4, 1e-6).eval()
+    fusion = OCRImageFusion(32, 4, 1e-6, image_grid_size=(2, 2)).eval()
+    with torch.no_grad():
+        for layer in fusion.layers:
+            layer.geometry_bias.output.weight.normal_(std=0.1)
     images = torch.randn(2, 4, 32, requires_grad=True)
     regions = torch.randn(2, 5, 32, requires_grad=True)
     image_mask = torch.ones(2, 4, dtype=torch.long)
     word_mask = torch.tensor([[1, 1, 0, 0, 0], [0, 0, 0, 0, 0]])
-    image_out, region_out = fusion(images, regions, image_mask, word_mask)
+    boxes = torch.tensor(
+        [
+            [
+                [0.0, 0.0, 0.5, 0.5],
+                [0.5, 0.5, 1.0, 1.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0, 0.0],
+            ]
+        ]
+        * 2
+    )
+    image_out, region_out = fusion(images, regions, image_mask, word_mask, boxes)
     changed = regions.detach().clone()
     changed[~word_mask.bool()] = float("nan")
-    masked_image, masked_regions = fusion(images, changed, image_mask, word_mask)
+    changed_boxes = boxes.clone().masked_fill(
+        ~word_mask.bool().unsqueeze(-1), float("nan")
+    )
+    masked_image, masked_regions = fusion(
+        images, changed, image_mask, word_mask, changed_boxes
+    )
     torch.testing.assert_close(image_out, masked_image)
     torch.testing.assert_close(region_out, masked_regions)
     assert torch.isfinite(image_out).all() and torch.isfinite(region_out).all()
     assert not region_out[~word_mask.bool()].any()
     padded_regions = torch.cat((regions, torch.randn(2, 3, 32)), dim=1)
     padded_mask = torch.cat((word_mask, torch.zeros(2, 3, dtype=torch.long)), dim=1)
+    padded_boxes = torch.cat((boxes, torch.full((2, 3, 4), float("nan"))), dim=1)
     padded_image, padded_output = fusion(
-        images, padded_regions, image_mask, padded_mask
+        images, padded_regions, image_mask, padded_mask, padded_boxes
     )
     torch.testing.assert_close(image_out, padded_image)
     torch.testing.assert_close(region_out, padded_output[:, :5])
@@ -602,6 +641,111 @@ def test_joint_attention_masks_regions_and_preserves_two_way_gradients():
     assert grad_regions[word_mask.bool()].abs().sum() > 0
     assert not grad_regions[~word_mask.bool()].any()
     assert grad_images.abs().sum() > 0
+
+
+def test_geometry_patch_order_and_directed_relations():
+    fusion = OCRImageFusion(32, 4, 1e-6, image_grid_size=(2, 2))
+    patches = fusion.patch_boxes.unsqueeze(0)
+    torch.testing.assert_close(
+        patches[0],
+        torch.tensor(
+            [
+                [0.0, 0.0, 0.5, 0.5],
+                [0.5, 0.0, 1.0, 0.5],
+                [0.0, 0.5, 0.5, 1.0],
+                [0.5, 0.5, 1.0, 1.0],
+            ]
+        ),
+    )
+    geometry = relative_geometry(patches, patches)
+    torch.testing.assert_close(
+        geometry[0, 0, 0], torch.tensor([0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+    )
+    torch.testing.assert_close(
+        geometry[0, 0, 3], torch.tensor([0.5, 0.5, 0.0, 0.0, 0.0, 0.0])
+    )
+    full_image = torch.tensor([[[0.0, 0.0, 1.0, 1.0]]])
+    patch_to_image = relative_geometry(patches, full_image)
+    image_to_patch = relative_geometry(full_image, patches)
+    assert patch_to_image[0, 0, 0, 5] == 1
+    assert image_to_patch[0, 0, 0, 5] == 0.25
+    degenerate = torch.zeros(1, 2, 4)
+    assert torch.isfinite(relative_geometry(degenerate, patches)).all()
+
+
+def test_zero_geometry_matches_baseline_and_only_cross_modal_scores_change():
+    fusion = OCRImageFusion(32, 4, 1e-6, image_grid_size=(2, 2)).eval()
+    images, regions = torch.randn(2, 4, 32), torch.randn(2, 3, 32)
+    image_mask = torch.ones(2, 4, dtype=torch.long)
+    word_mask = torch.tensor([[1, 1, 0], [1, 1, 1]])
+    boxes = torch.tensor(
+        [[[0.0, 0.0, 0.5, 0.5], [0.5, 0.5, 1.0, 1.0], [0.0, 0.0, 1.0, 1.0]]] * 2
+    )
+    valid = torch.cat((image_mask, word_mask), dim=1).bool()
+    reference = torch.cat((images, regions), dim=1).masked_fill(~valid.unsqueeze(-1), 0)
+    for layer in fusion.layers:
+        normalized = layer.norm(reference)
+        attended, _ = layer.attention(
+            normalized,
+            normalized,
+            normalized,
+            key_padding_mask=~valid,
+            need_weights=False,
+        )
+        reference = (reference + attended).masked_fill(~valid.unsqueeze(-1), 0)
+    with torch.no_grad():
+        actual = torch.cat(fusion(images, regions, image_mask, word_mask, boxes), dim=1)
+    torch.testing.assert_close(actual, reference, rtol=1e-5, atol=1e-6)
+
+    layer = fusion.layers[0]
+    with torch.no_grad():
+        layer.geometry_bias.input.weight.zero_()
+        layer.geometry_bias.input.bias.zero_()
+        layer.geometry_bias.input.weight[0, 4] = 1  # expose IoU
+        layer.geometry_bias.output.weight[:, 0] = 4
+    with patch.object(
+        layer.attention, "forward", wraps=layer.attention.forward
+    ) as attention:
+        left, _ = fusion(images, regions, image_mask, word_mask, boxes)
+    bias = attention.call_args.kwargs["attn_mask"].reshape(2, 4, 7, 7)
+    assert not bias[:, :, :4, :4].any()
+    assert not bias[1, :, 4:, 4:].any()
+    assert bias[0, 0, 0, 4] == 4
+    assert bias[0, 0, 0, 5] == 0
+    assert torch.isneginf(bias[0, :, :, 6]).all()
+    swapped_boxes = boxes.roll(1, dims=1)
+    right, _ = fusion(images, regions, image_mask, word_mask, swapped_boxes)
+    assert not torch.allclose(left, right)
+
+
+def test_joint_checkpoint_warm_start_preserves_baseline_and_zero_initializes_geometry(
+    model, tmp_path
+):
+    state = model.state_dict()
+    new_keys = {name for name in state if ".geometry_bias." in name}
+    baseline = {name: value for name, value in state.items() if name not in new_keys}
+    model.save_pretrained(tmp_path, safe_serialization=False, state_dict=baseline)
+    original_init = GeometryBias.__init__
+
+    def poison_skipped_geometry(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if not hf_modeling_utils._init_weights:
+            with torch.no_grad():
+                for parameter in self.parameters():
+                    parameter.fill_(float("nan"))
+
+    with patch.object(GeometryBias, "__init__", poison_skipped_geometry):
+        restored, info = OpenViVQAModel.from_pretrained(
+            tmp_path, output_loading_info=True
+        )
+    assert set(info["missing_keys"]) == new_keys
+    assert not info["unexpected_keys"]
+    assert all(torch.isfinite(p).all() for p in restored.parameters())
+    for name, value in baseline.items():
+        torch.testing.assert_close(value, restored.state_dict()[name], rtol=0, atol=0)
+    for layer in restored.image_ocr_fusion.layers:
+        assert not layer.geometry_bias.output.weight.any()
+        assert not layer.geometry_bias.output.bias.any()
 
 
 def test_baseline_warm_start_initializes_missing_fusion_weights(model, tmp_path):

@@ -6,10 +6,14 @@
 > learnable = 259,632,774. Nhánh OCR-image joint attention thêm ròng 7,088,640
 > parameter (ba attention/pre-norm, thay ba norm OCR bằng hai norm fusion):
 > total = 352,520,838; frozen = 85,799,424; learnable = 266,721,414.
+> Geometry bias mới thêm 1,860 parameter trainable với 12 heads:
+> total = 352,522,698; frozen = 85,799,424; learnable = 266,723,274.
 > Chuỗi encoder hiện tại dài `229 + L_ocr`. Công cụ profile đã được cập nhật cho
 > kiến trúc mới; để tái hiện phép đo lịch sử dưới đây, dùng script ở commit `722f9fe`.
 > Joint attention bổ sung dùng chuỗi `196 + W_ocr` (có padding), trước khi
 > mapping OCR từ entry-level sang subword-level. Chưa đo VRAM trên GPU cho nhánh này.
+> Geometry dùng additive attention mask riêng theo batch/head, có thể thay đổi kernel
+> và activation memory; số parameter bổ sung không đại diện cho chi phí VRAM thực.
 
 Baseline được kiểm tra là `d642998`, ngay trước commit refactor QAClip `b5f62ea`.
 Bản đối chiếu là `aaa8a75`, đã chuyển attention sang `[visual, question]`.

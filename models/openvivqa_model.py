@@ -15,7 +15,11 @@ from transformers.models.t5.modeling_t5 import T5LayerNorm
 from configs.model_config import OpenViVQAConfig
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding
-from models.modules.ocr_image_fusion import JointAttentionLayer, OCRImageFusion
+from models.modules.ocr_image_fusion import (
+    GeometryBias,
+    JointAttentionLayer,
+    OCRImageFusion,
+)
 from models.modules.qa_clip import QACLIPEncoder
 
 
@@ -73,7 +77,10 @@ class OpenViVQAModel(PreTrainedModel):
                 layer_norm_epsilon=norm_eps,
             ),
         )
-        self.image_ocr_fusion = OCRImageFusion(self.d_model, heads, norm_eps)
+        patch_grid = self.qa_clip.config.image_size // self.qa_clip.config.patch_size
+        self.image_ocr_fusion = OCRImageFusion(
+            self.d_model, heads, norm_eps, image_grid_size=(patch_grid, patch_grid)
+        )
         self.char_embedding = nn.Embedding(config.char_num, self.d_model)
         self.char_position_embedding = nn.Embedding(config.char_max_num, self.d_model)
         self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=norm_eps)
@@ -105,7 +112,7 @@ class OpenViVQAModel(PreTrainedModel):
         self.post_init()
 
     def _init_weights(self, module):
-        if isinstance(module, JointAttentionLayer):
+        if isinstance(module, (GeometryBias, JointAttentionLayer)):
             module.reset_parameters()
         elif isinstance(module, nn.RMSNorm):
             module.reset_parameters()
@@ -214,7 +221,7 @@ class OpenViVQAModel(PreTrainedModel):
             )
         visual = self.semantic_ocr_embedding.project_visual(info, word_mask)
         image_tokens, visual = self.image_ocr_fusion(
-            image_tokens, visual, image_mask, word_mask
+            image_tokens, visual, image_mask, word_mask, boxes
         )
         text_features, _ = self.ocr_encoder(ids, token_mask)
         features, _ = self.semantic_ocr_embedding(

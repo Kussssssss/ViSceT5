@@ -61,6 +61,21 @@ them to subwords before adding the original normalized tok/char features. The
 image patches and mean patch token both use the updated image features. The
 OCR-lite baseline bypasses this interaction and keeps its previous behavior.
 
+Each joint-attention layer now adds a learned geometry bias only to image→OCR
+and OCR→image logits. Normalized image patch boxes follow CLIP's row-major grid;
+OCR boxes stay at entry level. Six pairwise values (center dx/dy, log width/height
+ratios, IoU and query coverage) feed a `Linear(6,32) → ReLU → Linear(32,heads)`
+MLP in each layer. Its last Linear starts at zero, preserving the previous
+attention behavior when warm-starting from the same weights. Geometry and padding
+share an additive attention mask; image→image/OCR→OCR get no geometry bias.
+No additional experiment flags are needed: the configured full OCR branch uses it.
+The geometry MLPs add 1,860 learnable parameters with 12 heads. Added masks can
+change GPU kernel selection and activation memory; GPU VRAM must be measured.
+
+The joint-attention baseline before geometry is commit `baa69d0`. Its checkpoint
+can be used with `--model_name_or_path PATH` and a fresh optimizer. Only the new
+geometry weights are missing on this warm-start; existing weights are retained.
+
 The collator filters and normalizes the original OCR entries while retaining the
 alignment between text, boxes, detection features, and recognition features.
 It produces `ocr_input_ids`, `ocr_attention_mask`, `ocr_to_word_map`,
