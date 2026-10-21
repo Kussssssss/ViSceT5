@@ -23,6 +23,12 @@ class ModelArguments:
     ablation_use_ocr: bool = field(
         default=True, metadata={"help": "Whether to use OCR Consformer"}
     )
+    use_ocr_aug_finetune: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Encode original and related OCR separately, then concatenate; unset preserves checkpoint config."
+        },
+    )
 
 
 @dataclass

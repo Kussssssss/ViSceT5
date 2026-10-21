@@ -1,7 +1,8 @@
 # Bản đồ mã nghiên cứu ViSceT5
 
 Luồng hiện hành huấn luyện trực tiếp VQA bằng cross-entropy trên câu trả lời.
-Các mục tiêu ITM, MLM, TWC và việc sinh OCR related/augmented đã được loại bỏ.
+Các mục tiêu ITM, MLM, TWC đã được loại bỏ. OCR related/augmented được khôi phục
+riêng cho fine-tuning, với hai lượt encode độc lập dùng chung trọng số.
 Các trọng số backbone ViT5 và CLIP dùng để khởi tạo mô hình. Nhánh Visual Search
 và ConvNeXtV2 đã được loại bỏ khỏi kiến trúc.
 `models/modules/visual_search.py` vẫn được giữ làm source tham khảo, không import
@@ -34,6 +35,16 @@ L là số subword được pad trong batch; W là số entry được pad, khô
 pad đến cùng W. `labels` là token câu trả lời; padding = -100. Batch inference
 không có câu trả lời không tạo `labels`.
 
+Khi `use_ocr_aug_finetune=true`, collator tạo thêm `ocr_aug` gồm `input_ids`,
+`attention_mask`, `to_word_map`, `char_ids`, `char_mask` riêng cho chuỗi augmented.
+Số subword có thể khác origin, nhưng mỗi entry augmented vẫn tương ứng một bbox
+gốc. Hai chuỗi dùng chung `ocr_word_mask`, box/det/rec; không nhân đôi vùng OCR.
+`data/ocr_augmentation.py` khôi phục sửa từ theo dấu/phụ âm/edit distance từ collator
+cũ; dùng RapidFuzz để tính cùng khoảng cách Levenshtein. Từ đã hợp lệ, số và chuỗi
+đặc biệt được giữ. Chỉ dùng từ điển tĩnh trong `ocr_aug_vocab_dir`, không đọc câu
+hỏi/đáp án để xây vocabulary. Thứ tự chọn ứng viên và sampling theo xác suất được
+cố định để train/evaluation nhất quán.
+
 ## Luồng mô hình
 
 `models/openvivqa_model.py` chứa `OpenViVQAModel` và ba bước công khai:
@@ -58,8 +69,10 @@ Nhánh OCR đầy đủ trên `research/ocr-image-joint-attention`:
 3. Attention dùng `ocr_word_mask` để loại padding khỏi keys/values, đồng thời zero
    output padding sau mỗi lớp. Tách lại image/region features bằng độ dài image gốc.
 4. OCR visual qua T5LayerNorm ở entry-level, rồi gather về subword bằng
-   `ocr_to_word_map`. OCR Consformer vẫn encode subwords qua GroupAttention như cũ;
-   cộng visual mới với tok/char qua hai T5Norm riêng. Output OCR padding được zero.
+   mapping riêng của từng chuỗi. OCR Consformer/GroupAttention được gọi lần lượt
+   cho origin và augmented, dùng chung module nhưng không chia sẻ attention/prior
+   giữa hai lượt. Mỗi chuỗi cộng visual với tok/char qua hai T5Norm riêng theo
+   công thức cũ, rồi mới concat hai output OCR. Padding mỗi chuỗi được zero.
 
 Không nhân bản visual entry theo số subword trước attention. Ảnh có thể attend
 OCR và OCR có thể attend ảnh. Gradient xuyên suốt nhánh này và question encoder;
@@ -80,7 +93,8 @@ Geometry bias bổ sung cho ba lớp attention:
   trong train. Không thêm cờ ablation hay thay đổi loss/LR/batch size.
 
 Encoder ViT5 nhận chuỗi ghép: question embeddings, image tokens sau joint attention,
-OCR features hoàn chỉnh, một token trung bình của image tokens đã cập nhật. Attention mask được ghép
+OCR origin hoàn chỉnh, OCR augmented hoàn chỉnh (khi bật), một token trung bình
+của image tokens đã cập nhật. Attention mask được ghép
 cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 
 ## Module và ablation
@@ -92,6 +106,7 @@ cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 | `models/modules/ocr_spatial.py` | Semantic OCR embedding và spatial utilities |
 | `models/modules/ocr_image_fusion.py` | Ba lớp residual self-attention cho ảnh/OCR entry-level |
 | `models/modules/ocr_encoder_feature.py` | Đọc OCR features và chuẩn hóa box |
+| `data/ocr_augmentation.py` | Sửa OCR theo từ điển cho nhánh augmented fine-tuning |
 
 Tắt QACLIP nghĩa là bỏ instruction câu hỏi, vẫn chạy CLIP. Tắt OCR module nghĩa là dùng encoder lite
 cho text/character/box, vẫn nhận thông tin OCR. Đây là các baseline ablation
@@ -119,6 +134,12 @@ của chúng được khởi tạo bằng 0. Dùng optimizer mới khi chuyển 
 Các checkpoint cũ chứa head hoặc metadata của những mục tiêu đã bỏ không phải
 checkpoint chuẩn của luồng mới; các tensor batch cũ cũng đã đổi sang API OCR ở trên.
 
+YAML fine-tuning bật `use_ocr_aug_finetune=true`; checkpoint lưu cờ này và các
+thiết lập augmentation trong config để evaluation xây cùng collator. Checkpoint
+không có cờ mặc định chỉ dùng origin. Augmentation không thêm parameter; tăng
+độ dài memory ViT5 và thêm lượt OCR encoder. Batch cache của memory audit tạo
+trước khi bật augmentation cần được tạo lại để có `ocr_aug`.
+
 `run_pipeline.py`, các shell launcher và notebook Colab chỉ gọi luồng VQA.
 Các tiện ích chuẩn bị dữ liệu/vocabulary được giữ để phục vụ nghiên cứu tiếp.
 
@@ -132,5 +153,8 @@ mask padding (cả khi không có OCR hợp lệ), gradient hai chiều image/re
 khởi tạo attention còn thiếu khi warm-start từ baseline.
 Geometry tests kiểm tra thứ tự patch, quan hệ có hướng, bias=0 khớp baseline,
 padding và bias tác động đúng hai khối khác modality, checkpoint có/không geometry.
+Augmentation tests kiểm tra mapping riêng khi số subword đổi, hai lượt OCR encoder,
+visual fusion chạy một lần, origin không bị ảnh hưởng bởi augmented trước concat,
+backward, cached generation và lưu/nạp config bật/tắt augmentation.
 Việc này xác minh luồng mã; chất lượng nghiên cứu và tài nguyên GPU cần được đo
 qua thí nghiệm trên dataset và backbone thực tế.

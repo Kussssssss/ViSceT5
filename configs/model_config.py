@@ -29,6 +29,10 @@ class OpenViVQAConfig(PretrainedConfig):
         clip_vision_name: str = "openai/clip-vit-base-patch16",
         ablation_use_qaclip: bool = True,
         ablation_use_ocr: bool = True,
+        use_ocr_aug_finetune: bool = False,
+        ocr_aug_vocab_dir: str = "configs/data",
+        adv_probability_finetune: float = 1.0,
+        editlen: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
         decoder_start_token_id: Optional[int] = None,
@@ -82,6 +86,10 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_vision_name = clip_vision_name
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
         self.ablation_use_ocr = bool(ablation_use_ocr)
+        self.use_ocr_aug_finetune = bool(use_ocr_aug_finetune)
+        self.ocr_aug_vocab_dir = str(ocr_aug_vocab_dir)
+        self.adv_probability_finetune = float(adv_probability_finetune)
+        self.editlen = int(editlen)
 
         self.qa_clip_d_text = qa_clip_d_text
         self.pad_token_id = pad_token_id

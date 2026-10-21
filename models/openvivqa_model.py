@@ -181,6 +181,35 @@ class OpenViVQAModel(PreTrainedModel):
         features = self.char_embedding(ids) + self.char_position_embedding(positions)
         return self.ocr_char_layernorm((features * mask.unsqueeze(-1)).mean(dim=-2))
 
+    def _encode_ocr_branch(
+        self, ids, token_mask, word_map, char_ids, char_mask, word_mask, boxes, visual
+    ):
+        """Encode one text view with an independent GroupAttention forward pass."""
+        char_features = self._char_features(char_ids, char_mask)
+        if self.config.ablation_use_ocr:
+            text_features, _ = self.ocr_encoder(ids, token_mask)
+            features, _ = self.semantic_ocr_embedding(
+                visual, text_features, char_features, word_map, token_mask
+            )
+            return features, token_mask
+        valid = (word_map >= 0) & token_mask.bool()
+        indices = word_map.clamp(0, char_ids.shape[1] - 1)
+        tokens = self.get_input_embeddings()(ids)
+        features = tokens.new_zeros(*char_features.shape)
+        counts = tokens.new_zeros(*char_features.shape[:2], 1)
+        features.scatter_add_(
+            1, indices.unsqueeze(-1).expand_as(tokens), tokens * valid.unsqueeze(-1)
+        )
+        counts.scatter_add_(
+            1, indices.unsqueeze(-1), valid.unsqueeze(-1).to(tokens.dtype)
+        )
+        text = self.ocr_lite_text_ln(features / counts.clamp_min(1) + char_features)
+        text = self.ocr_lite_text_proj(text)
+        text = text + self.ocr_lite_text_ff(text)
+        box_features = self.ocr_lite_box_proj(boxes)
+        box_features = box_features + self.ocr_lite_box_ff(box_features)
+        return (text + box_features) * word_mask.unsqueeze(-1), word_mask
+
     def _encode_ocr(
         self,
         info,
@@ -192,42 +221,39 @@ class OpenViVQAModel(PreTrainedModel):
         word_mask,
         image_tokens,
         image_mask,
+        ocr_aug=None,
     ):
-        char_features = self._char_features(char_ids, char_mask)
-        valid = (word_map >= 0) & token_mask.bool()
-        indices = word_map.clamp(0, char_ids.shape[1] - 1)
         boxes = torch.stack([item["boxes"] for item in info]).to(
             ids.device, self.target_dtype
         )
-        if not self.config.ablation_use_ocr:
-            tokens = self.get_input_embeddings()(ids)
-            features = tokens.new_zeros(*char_features.shape)
-            counts = tokens.new_zeros(*char_features.shape[:2], 1)
-            features.scatter_add_(
-                1, indices.unsqueeze(-1).expand_as(tokens), tokens * valid.unsqueeze(-1)
+        visual = None
+        if self.config.ablation_use_ocr:
+            visual = self.semantic_ocr_embedding.project_visual(info, word_mask)
+            image_tokens, visual = self.image_ocr_fusion(
+                image_tokens, visual, image_mask, word_mask, boxes
             )
-            counts.scatter_add_(
-                1, indices.unsqueeze(-1), valid.unsqueeze(-1).to(tokens.dtype)
-            )
-            text = self.ocr_lite_text_ln(features / counts.clamp_min(1) + char_features)
-            text = self.ocr_lite_text_proj(text)
-            text = text + self.ocr_lite_text_ff(text)
-            box_features = self.ocr_lite_box_proj(boxes)
-            box_features = box_features + self.ocr_lite_box_ff(box_features)
-            return (
-                image_tokens,
-                (text + box_features) * word_mask.unsqueeze(-1),
+        features, mask = self._encode_ocr_branch(
+            ids, token_mask, word_map, char_ids, char_mask, word_mask, boxes, visual
+        )
+        if self.config.use_ocr_aug_finetune:
+            if ocr_aug is None:
+                raise ValueError(
+                    "Augmented OCR inputs are missing; rebuild the batch with the current collator."
+                )
+            aug = {name: value.to(ids.device) for name, value in ocr_aug.items()}
+            augmented, aug_mask = self._encode_ocr_branch(
+                aug["input_ids"],
+                aug["attention_mask"],
+                aug["to_word_map"],
+                aug["char_ids"],
+                aug["char_mask"],
                 word_mask,
+                boxes,
+                visual,
             )
-        visual = self.semantic_ocr_embedding.project_visual(info, word_mask)
-        image_tokens, visual = self.image_ocr_fusion(
-            image_tokens, visual, image_mask, word_mask, boxes
-        )
-        text_features, _ = self.ocr_encoder(ids, token_mask)
-        features, _ = self.semantic_ocr_embedding(
-            visual, text_features, char_features, word_map, token_mask
-        )
-        return image_tokens, features, token_mask
+            features = torch.cat((features, augmented), dim=1)
+            mask = torch.cat((mask, aug_mask), dim=1)
+        return image_tokens, features, mask
 
     def encode(
         self,
@@ -241,6 +267,7 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_word_mask,
         attention_mask=None,
         ocr_attention_mask=None,
+        ocr_aug=None,
     ):
         """Encode once; the same fused memory serves decoder loss and generation."""
         device = input_ids.device
@@ -267,6 +294,7 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_word_mask,
             image_tokens,
             image_mask,
+            ocr_aug,
         )
         summary = image_tokens.mean(dim=1, keepdim=True)
         sequences = [
@@ -310,6 +338,7 @@ class OpenViVQAModel(PreTrainedModel):
         labels=None,
         decoder_input_ids=None,
         decoder_attention_mask=None,
+        ocr_aug=None,
     ):
         encoded, mask = self.encode(
             input_ids,
@@ -322,6 +351,7 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_word_mask,
             attention_mask,
             ocr_attention_mask,
+            ocr_aug,
         )
         result = {"encoder_outputs": encoded, "attention_mask": mask}
         if labels is not None or decoder_input_ids is not None:
@@ -350,6 +380,7 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_word_mask=None,
         attention_mask=None,
         ocr_attention_mask=None,
+        ocr_aug=None,
         encoder_outputs=None,
         generation_config=None,
         **generation_kwargs,
@@ -366,6 +397,7 @@ class OpenViVQAModel(PreTrainedModel):
                 ocr_word_mask,
                 attention_mask,
                 ocr_attention_mask,
+                ocr_aug,
             )
         return self.vit5.generate(
             encoder_outputs=encoder_outputs,

@@ -28,6 +28,7 @@ from transformers import (
 from configs.arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from configs.model_config import OpenViVQAConfig
 from data.dataset import ViT5VQADataset
+from data.ocr_augmentation import OCRTextAugmenter
 from models.modules.qa_clip import QACLIPEncoder
 from models.modules.ocr_image_fusion import (
     OCRImageFusion,
@@ -263,6 +264,103 @@ def test_collator_preserves_original_alignment(model, tokenizer, samples):
             torch.testing.assert_close(value, again[key])
 
 
+def test_related_ocr_restores_finetune_correction_without_changing_valid_words(
+    tmp_path,
+):
+    (tmp_path / "term_vocab.txt").write_text("cà phê\ntrà\nsữa\n", encoding="utf-8")
+    augmenter = OCRTextAugmenter(tmp_path)
+    original = ["ca phê", "cà phê", "tra", "123", "a123", "https://example.vn", "<unk>"]
+    expected = ["cà phê", "cà phê", "trà", "123", "a123", "https://example.vn", "<unk>"]
+    assert augmenter(original) == expected
+    assert augmenter(original) == expected
+    assert OCRTextAugmenter(tmp_path, probability=0)(original) == original
+
+
+@pytest.mark.parametrize("full_ocr", [True, False])
+def test_origin_and_augmented_ocr_encode_separately_with_independent_mapping(
+    model, tokenizer, samples, tmp_path, full_ocr
+):
+    model.config.use_ocr_aug_finetune = True
+    model.config.ablation_use_ocr = full_ocr
+    (tmp_path / "term_vocab.txt").write_text("cà phê\ntrà\nsữa\n", encoding="utf-8")
+    model.config.ocr_aug_vocab_dir = str(tmp_path)
+    collator = build_collator(model, tokenizer)
+    # Force different subword counts to exercise alignment, not vocabulary quality.
+    collator.augmenter = lambda texts: [
+        "trà" if text == "cà phê" else text for text in texts
+    ]
+    batch = collator([samples[0], {**samples[1], "ocr_path": None}])
+    aug = batch["ocr_aug"]
+    assert batch["ocr_input_ids"].shape[1] == 4 and aug["input_ids"].shape[1] == 3
+    assert batch["ocr_to_word_map"][0].tolist() == [0, 0, 1, 2]
+    assert aug["to_word_map"][0].tolist() == [0, 1, 2]
+    assert aug["to_word_map"][1].tolist() == [0, -1, -1]
+    assert batch["ocr_info"][0]["texts"] == ["cà phê", "123", "sữa"]
+    assert batch["ocr_info"][0]["augmented_texts"] == ["trà", "123", "sữa"]
+    assert batch["ocr_info"][0]["boxes"].shape[0] == batch["ocr_word_mask"].shape[1]
+    assert not torch.equal(batch["ocr_char_ids"], aug["char_ids"])
+    again = collator([samples[0], {**samples[1], "ocr_path": None}])
+    for name in aug:
+        torch.testing.assert_close(aug[name], again["ocr_aug"][name])
+    model.eval()
+    with (
+        patch.object(
+            model.ocr_encoder, "forward", wraps=model.ocr_encoder.forward
+        ) as encoder,
+        patch.object(
+            model.image_ocr_fusion, "forward", wraps=model.image_ocr_fusion.forward
+        ) as fusion,
+        patch.object(
+            model.semantic_ocr_embedding,
+            "forward",
+            wraps=model.semantic_ocr_embedding.forward,
+        ) as semantic,
+    ):
+        output = model(**batch)
+    assert encoder.call_count == (2 if full_ocr else 0)
+    assert fusion.call_count == (1 if full_ocr else 0)
+    if full_ocr:
+        torch.testing.assert_close(
+            encoder.call_args_list[0].args[0], batch["ocr_input_ids"]
+        )
+        torch.testing.assert_close(encoder.call_args_list[1].args[0], aug["input_ids"])
+        torch.testing.assert_close(
+            semantic.call_args_list[0].args[0], semantic.call_args_list[1].args[0]
+        )
+        torch.testing.assert_close(
+            semantic.call_args_list[1].args[3], aug["to_word_map"]
+        )
+    length = 8 + 4 + (4 + 3 if full_ocr else 2 * batch["ocr_word_mask"].shape[1]) + 1
+    assert output["attention_mask"].shape == (2, length)
+    assert torch.isfinite(output["loss"])
+    output["loss"].backward()
+    assert all(
+        torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None
+    )
+    inputs = {name: value for name, value in batch.items() if name != "labels"}
+    with torch.no_grad():
+        direct = model.generate(**inputs)
+        encoded, mask = model.encode(**inputs)
+        cached = model.generate(encoder_outputs=encoded, attention_mask=mask)
+        changed = {name: value.clone() for name, value in aug.items()}
+        changed["input_ids"].fill_(3)
+        changed["char_ids"].fill_(1)
+        branch_results = []
+        original_branch = model._encode_ocr_branch
+
+        def capture_branch(*args):
+            result = original_branch(*args)
+            branch_results.append(result[0].clone())
+            return result
+
+        with patch.object(model, "_encode_ocr_branch", side_effect=capture_branch):
+            model(**batch)
+            model(**{**batch, "ocr_aug": changed})
+        torch.testing.assert_close(branch_results[0], branch_results[2])
+        assert not torch.allclose(branch_results[1], branch_results[3])
+    torch.testing.assert_close(direct, cached)
+
+
 def test_collator_unlabelled_and_missing_features(model, tokenizer, samples, tmp_path):
     collator = build_collator(model, tokenizer)
     unlabelled = [{**sample, "answer": "", "ocr_path": None} for sample in samples]
@@ -448,7 +546,9 @@ def test_image_encoder_only_returns_patches_without_attention_export(
     assert forward.call_args.kwargs["text_emb"].shape[1] == (3 if use_question else 0)
 
 
-def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
+@pytest.mark.parametrize("augmentation", [False, True])
+def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path, augmentation):
+    model.config.use_ocr_aug_finetune = augmentation
     model.eval()
     batch = build_collator(model, tokenizer)(samples)
     with torch.no_grad():
@@ -457,6 +557,7 @@ def test_checkpoint_roundtrip(model, tokenizer, samples, tmp_path):
     tokenizer.save_pretrained(tmp_path)
     model.image_processor.save_pretrained(tmp_path / "image_processor")
     restored, restored_tokenizer = load_model_and_tokenizer(str(tmp_path))
+    assert restored.config.use_ocr_aug_finetune == augmentation
     restored.eval()
     with torch.no_grad():
         actual = restored(**build_collator(restored, restored_tokenizer)(samples))[
@@ -917,6 +1018,7 @@ def test_config_yaml_cli_overrides():
         ],
     )
     assert not model_args.ablation_use_qaclip and train_args.smoke_test
+    assert model_args.use_ocr_aug_finetune is True
     assert train_args.num_train_epochs == 2
 
 

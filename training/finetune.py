@@ -58,6 +58,8 @@ def main(args_list=None):
     model, tokenizer = load_model_and_tokenizer(checkpoint)
     for name in ("ablation_use_qaclip", "ablation_use_ocr"):
         setattr(model.config, name, getattr(model_args, name))
+    if model_args.use_ocr_aug_finetune is not None:
+        model.config.use_ocr_aug_finetune = model_args.use_ocr_aug_finetune
     if training_args.should_log:
         print_parameter_summary(model)
 
