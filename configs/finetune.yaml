@@ -2,12 +2,12 @@ dataset_name: "ViTextVQA"
 data_dir: "./datasets"
 # ViSceT5 = CLIP không nhận câu hỏi + SceSpaVis + kênh sửa OCR (+ TWC khi use_twc=true).
 ablation_use_image: true
-ablation_use_qaclip: false
+ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
 ablation_use_ocr_aug: true
 # Công thức của run t1 (commit c6e2118, test EM 30.89): CLIP đóng băng hoàn toàn, RMSNorm,
 # TWC TWA nguyên bản (BCE trên đầu ra encoder, related = tăng cường TWA), batch 8x1, LS 0.1.
-clip_late_adapter: false       # true = adapter có cổng ở 6 lớp cuối CLIP như code trước refactor
+qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
 ocr_feature_norm: "rmsnorm"     # rmsnorm = bản refactor (t1); layernorm = code trước refactor
 use_twc: false
 twc_weight: 1.0

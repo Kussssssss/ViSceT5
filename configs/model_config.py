@@ -146,10 +146,12 @@ class OpenViVQAConfig(PretrainedConfig):
         # layernorm = pre-refactor code (the Vast/old runs); rmsnorm = refactor. None (configs
         # saved before this switch existed) = rmsnorm, so those checkpoints still load as trained.
         self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")
-        # Pre-refactor CLIP: the late 6 layers are QA-ViT layers even without a question
-        # (empty instruction), so their gated instruction_out_proj (init = out_proj, gate 0)
-        # stays trainable — a small trained adapter on frozen CLIP. The refactor dropped it
-        # (plain frozen CLIP). None (older configs) = off, so refactor checkpoints load as trained.
+        # QA-ViT has two halves, set together by qavit_mode (training arguments):
+        #   ablation_use_qaclip = the question is fed to the late 6 CLIP layers (qavit_mode=question);
+        #   clip_late_adapter   = those QA-ViT layers exist WITHOUT the question (qavit_mode=no_question):
+        #     only their gated instruction_out_proj (init = out_proj, gate 0) acts, on frozen CLIP —
+        #     what the pre-refactor code ran with QA-ViT "off". Both False = plain CLIP (qavit_mode=off).
+        # None (older configs) = False, so refactor checkpoints load as trained.
         self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")

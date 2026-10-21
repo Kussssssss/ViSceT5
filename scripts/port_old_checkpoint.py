@@ -13,8 +13,8 @@ training, not from the code that is run.
 Mapping (old → new):
   * vit5.*, qa_clip.*, ocr_encoder.*, semantic_ocr_embedding.*, char_position_embedding,
     ocr_char_layernorm: same names and shapes. The new model is built with the pre-refactor
-    switches (ocr_feature_norm=layernorm, clip_late_adapter=True), so the OCR LayerNorms
-    and the gated late-CLIP adapter exist and load as trained.
+    switches (ocr_feature_norm=layernorm, QA-ViT without question = clip_late_adapter=True), so the
+    OCR LayerNorms and the gated QA-ViT projections of the late CLIP layers exist and load as trained.
   * char_embedding: the old collator indexed 128 characters from 0 ('a') and sent every
     unknown character to id 1 ('b'); the new vocabulary has '<unk>' and '@' in front. Rows
     are copied per character; '<unk>' and '@' (unknown to the old code) get the old row 1.
@@ -114,7 +114,7 @@ def main():
     if real_missing or unexpected:
         sys.exit(f"❌ incomplete port: missing={real_missing[:20]} unexpected={unexpected[:20]}")
     gates = [float(v) for k, v in ported.items() if k.endswith("instruction_proj_gate")]
-    print(f"late-CLIP adapter gates (trained): {[round(g, 4) for g in gates]}")
+    print(f"QA-ViT gates of the late CLIP layers (trained): {[round(g, 4) for g in gates]}")
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)

@@ -57,8 +57,12 @@ class ModelArguments:
     twc_adv_probability: float = field(
         default=0.35, metadata={"help": "TWA augmentation probability of each OCR word's related copy (TWA: 0.35)."}
     )
-    clip_late_adapter: bool = field(
-        default=True, metadata={"help": "Keep the gated adapter of the late CLIP layers (pre-refactor CLIP)."}
+    qavit_mode: Optional[str] = field(
+        default=None,
+        metadata={"help": "QA-ViT in the late 6 CLIP layers (CLIP itself stays frozen): off = plain CLIP; "
+                          "no_question = QA-ViT layers with an empty question, only the gated projection "
+                          "learns (pre-refactor code with QA-ViT 'off'); question = full QA-ViT. "
+                          "None = from ablation_use_qaclip (question / off)."},
     )
     ocr_feature_norm: str = field(
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
