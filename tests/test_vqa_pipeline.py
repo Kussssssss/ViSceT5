@@ -757,15 +757,9 @@ def _reference_twc(logits, o2r_blocks, r2o_blocks, groups, words):
         result[:, ignore] = -1.0
         return result
 
-    o2r = torch.block_diag(*o2r_blocks)
-    r2o = torch.block_diag(*r2o_blocks)
-    g = groups.reshape(-1)
-    m = o2r.size(0)
-    samp = torch.arange(m) // words
-    inherit = (g.unsqueeze(1) == g.unsqueeze(0)) & (g.unsqueeze(1) >= 0) & (samp.unsqueeze(1) != samp.unsqueeze(0))
-    o2r = torch.where(inherit, torch.diagonal(o2r).clone().unsqueeze(0).expand(m, m), o2r)
-    r2o = torch.where(inherit, torch.diagonal(r2o).clone().unsqueeze(0).expand(m, m), r2o)
-    o2r_l, r2o_l = create_batch_labels(o2r), create_batch_labels(r2o)
+    # TWA loss_accuracy.create_batch_labels: block-diagonal, cross-sample = 0, PAD rows/cols = -1.
+    o2r_l = create_batch_labels(torch.block_diag(*o2r_blocks))
+    r2o_l = create_batch_labels(torch.block_diag(*r2o_blocks))
     mask = o2r_l != -1
     loss_i = torch.nn.functional.binary_cross_entropy_with_logits(logits[mask], o2r_l[mask])
     loss_t = torch.nn.functional.binary_cross_entropy_with_logits(logits.t()[mask], r2o_l[mask])
@@ -779,8 +773,7 @@ def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer
     # Same image asked twice: same (image, text) groups, different per-sample augmentation.
     pair = [samples[0], {**samples[0], "question": "hiệu gì"}]
     batch = build_collator(model, tokenizer, corrector, training=True)(pair)
-    # Same image + same text in both samples → cross-sample inheritance is exercised.
-    assert (batch["twc_group_ids"][0][:3] == batch["twc_group_ids"][1][:3]).all()
+    # Same image asked twice: TWA still treats every cross-sample pair as a negative (0).
     words = batch["twc_o2r"].shape[1]
     hidden = torch.randn(2, 40, 32)
     offset = 5
@@ -799,7 +792,7 @@ def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer
     feats = feats / counts.clamp_min(1e-9).unsqueeze(-1)
     norm = lambda x: x / x.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     orig, rel = norm(feats[:, :words]).reshape(-1, 32), norm(feats[:, words:]).reshape(-1, 32)
-    logits = model.twc_logit_scale.exp() * orig @ rel.t()
+    logits = model.twc_logit_scale.exp() * orig @ rel.t()  # no clamp, as TWA
     reference = _reference_twc(logits, batch["twc_o2r"], batch["twc_r2o"], batch["twc_group_ids"], words)
     torch.testing.assert_close(loss, reference, rtol=1e-5, atol=1e-6)
     assert 0 <= float(accuracy) <= 1
@@ -996,17 +989,17 @@ def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
-            "twc_related_train", "ocr_feature_norm")
+            "ocr_feature_norm", "ocr_related", "ocr_aug_mode", "ocr_lattice_keep")
     assert {k: cfg[k] for k in keys} == {
         "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
-        "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
+        "twc_objective": "lexical", "ocr_feature_norm": "layernorm",
+        "ocr_related": "augment", "ocr_aug_mode": "lattice", "ocr_lattice_keep": "all",
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
-    assert cfg["ocr_aug_mode"] == "lattice"
-    model = make_model(use_twc=True, ocr_aug_mode="lattice", ocr_lattice_keep="all", **{k: cfg[k] for k in keys})
+    model = make_model(use_twc=True, twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector, training=True)
-    assert collator.related_mode == "correct" and collator.lattice and collator.twc_lexical
+    assert collator.related_mode == "twa" and collator.lattice and collator.twc_lexical
     outputs = model(**collator(samples))
     assert torch.isfinite(outputs["twc_loss"]) and "twc_answer_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")

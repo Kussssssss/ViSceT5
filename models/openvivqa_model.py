@@ -428,21 +428,13 @@ class OpenViVQAModel(PreTrainedModel):
         features = self._pool_words(tokens, word_map, token_mask, 2 * words)
         original = features[:, :words].reshape(batch * words, -1)
         related = features[:, words:].reshape(batch * words, -1)
-        scale = self.twc_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
+        # TWA: logits = exp(logit_scale) · cos (learnable temperature, no clamp).
+        scale = self.twc_logit_scale.exp()
         logits = scale * original @ related.t()  # [B·W, B·W], mọi cặp trong batch
 
-        # Nhãn: block-diagonal theo mẫu (khác ảnh = âm); cặp khác mẫu nhưng cùng
-        # (ảnh, chữ) kế thừa nhãn đường chéo của đối tác; hàng/cột PAD = -1.
+        # Nhãn như TWA create_batch_labels: block-diagonal theo mẫu (cặp khác mẫu = 0),
+        # hàng/cột PAD = -1 (bên dưới).
         o2r, r2o = torch.block_diag(*o2r.float()), torch.block_diag(*r2o.float())
-        group = groups.reshape(-1)
-        sample = torch.arange(group.numel(), device=group.device) // words
-        inherit = (
-            (group.unsqueeze(1) == group.unsqueeze(0))
-            & (group.unsqueeze(1) >= 0)
-            & (sample.unsqueeze(1) != sample.unsqueeze(0))
-        )
-        o2r = torch.where(inherit, o2r.diagonal().unsqueeze(0).expand_as(o2r), o2r)
-        r2o = torch.where(inherit, r2o.diagonal().unsqueeze(0).expand_as(r2o), r2o)
         pair_text = None
         if text_ids is not None:
             pair_text = torch.stack(
