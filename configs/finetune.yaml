@@ -18,7 +18,7 @@ twc_temperature_init: 0.1    # τ khởi tạo (vẫn học được); 0.07 = CL
 twc_adv_probability: 0.6     # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
 twc_view: "separate"         # decoder luôn đọc bản sửa (như lúc test); TWC dùng bản tăng cường riêng qua một lượt encoder phụ
 twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
-twc_feature: "lexical"         # đặc trưng chữ (ConsFormer + ký tự) của hai lượt riêng: gốc ↔ bản sửa
+twc_feature: "fused"          # như TWA: đầu ra ViT5 encoder tại vị trí OCR gốc / related; lexical = đặc trưng chữ trước encoder
 twc_queue_size: 0            # 0 = chỉ trong batch (t1); >0 = bộ nhớ cross-batch (cần infonce)
 twc_queue_start: 1000        # số forward train trước khi đọc bộ nhớ
 twc_mask_same_text: false    # false = nhãn TWA nguyên bản (t1); true = bỏ ứng viên trùng chữ khỏi negative
