@@ -33,7 +33,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ablation_use_ocr_aug: bool = True,
         use_twc: bool = False,
         twc_weight: float = 1.0,
-        twc_adv_probability: float = 0.35,
+        twc_adv_probability: float = 0.4,
         twc_label_list: Optional[List[float]] = None,
         twc_loss: str = "infonce",
         twc_feature: str = "lexical",
@@ -174,11 +174,17 @@ class OpenViVQAConfig(PretrainedConfig):
         #   lattice = ConsFormer runs separately on the original and the corrected sequence; only
         #             the words the correction changed (~13%) are inserted, right after their
         #             original word, with a learned type embedding (original / corrected).
-        # None (older configs) = concat.
+        #   separate = independent ConsFormer passes, both complete sequences into ViT5.
+        # None (older configs) = concat; keep legacy checkpoint behavior.
         self.ocr_aug_mode = str(ocr_aug_mode or "concat")
-        if self.ocr_aug_mode not in ("concat", "lattice"):
-            raise ValueError("ocr_aug_mode must be concat|lattice.")
-        # Related OCR copy in lattice mode — ONE copy shared by OCR Augmentation, its ConsFormer
+        if self.ocr_aug_mode not in ("concat", "separate", "lattice"):
+            raise ValueError("ocr_aug_mode must be concat|separate|lattice.")
+        # separate: independent ConsFormer passes, full concatenation before ViT5;
+        # TWC reads the same multimodal encoder outputs as the VQA decoder.
+        if self.use_twc and self.ablation_use_ocr_aug and self.ocr_aug_mode == "separate":
+            if self.twc_feature != "fused" or twc_view != "shared":
+                raise ValueError("ocr_aug_mode=separate needs twc_feature=fused and twc_view=shared.")
+        # Related OCR copy in separate/lattice mode — ONE copy shared by OCR Augmentation, its ConsFormer
         # pass and TWC, built by the SAME procedure at train and test (fixed per-sample seed):
         #   correct = deterministic correction (~13% of words change);
         #   augment = TWA keep/correct/noise with probability twc_adv_probability (valid word →

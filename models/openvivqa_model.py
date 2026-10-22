@@ -208,11 +208,16 @@ class OpenViVQAModel(PreTrainedModel):
             features = self.ocr_lite_text_proj(self.ocr_lite_text_ln(tokens))
             features = features * token_mask.unsqueeze(-1).to(features.dtype)
             return features, token_mask, features
+        text_features, _ = self.ocr_encoder(ids, token_mask)
+        return self._fuse_ocr(info, text_features, token_mask, word_map, char_ids, char_mask)
+
+    def _fuse_ocr(self, info, text_features, token_mask, word_map, char_ids, char_mask):
+        """Add aligned character/box/det/rec features after textual encoding."""
         char_features = self._char_features(char_ids, char_mask)
         valid = (word_map >= 0) & token_mask.bool()
         indices = word_map.clamp(0, char_ids.shape[1] - 1)
-        boxes = torch.stack([item["boxes"] for item in info]).to(ids.device, self.target_dtype)
-        text_features, _ = self.ocr_encoder(ids, token_mask)
+        device = text_features.device
+        boxes = torch.stack([item["boxes"] for item in info]).to(device, self.target_dtype)
         results, lexical = [], []
         for batch_index, item in enumerate(info):
             mapping = indices[batch_index]
@@ -221,8 +226,8 @@ class OpenViVQAModel(PreTrainedModel):
                 "width": item["width"],
                 "height": item["height"],
                 "boxes": boxes[batch_index][mapping] * keep,
-                "det": item["det_features"].to(ids.device, self.target_dtype)[mapping] * keep,
-                "rec": item["rec_features"].to(ids.device, self.target_dtype)[mapping] * keep,
+                "det": item["det_features"].to(device, self.target_dtype)[mapping] * keep,
+                "rec": item["rec_features"].to(device, self.target_dtype)[mapping] * keep,
             }
             features, text_only = self.semantic_ocr_embedding(
                 [token_info],
@@ -232,6 +237,43 @@ class OpenViVQAModel(PreTrainedModel):
             results.append(features.squeeze(0))
             lexical.append(text_only.squeeze(0))  # RMSNorm(ConsFormer) + RMSNorm(chars)
         return torch.stack(results), token_mask, torch.stack(lexical)
+
+    @staticmethod
+    def _ocr_pair_layout(word_map, token_mask, rel_word_map, rel_token_mask, words):
+        """Keep padding invalid and place related entries in slots W..2W-1."""
+        return (
+            torch.cat([word_map, torch.where(rel_word_map >= 0, rel_word_map + words, rel_word_map)], dim=1),
+            torch.cat([token_mask, rel_token_mask], dim=1),
+        )
+
+    def _encode_ocr_separate(self, info, ids, token_mask, word_map, char_ids, char_mask,
+                             ocr_rel_input_ids=None, ocr_rel_attention_mask=None,
+                             ocr_rel_to_word_map=None, ocr_rel_char_ids=None, ocr_rel_char_mask=None):
+        """Encode both complete text views independently, then fuse aligned OCR features."""
+        if any(value is None for value in (ocr_rel_input_ids, ocr_rel_to_word_map,
+                                           ocr_rel_char_ids, ocr_rel_char_mask)):
+            raise ValueError("ocr_aug_mode=separate needs the ocr_rel_* batch fields.")
+        if ocr_rel_attention_mask is None:
+            ocr_rel_attention_mask = (ocr_rel_input_ids != self.config.pad_token_id).long()
+        mapping, mask = self._ocr_pair_layout(word_map, token_mask, ocr_rel_to_word_map,
+                                              ocr_rel_attention_mask, char_ids.shape[1])
+        if not self.config.ablation_use_ocr:
+            original, _, lexical_o = self._encode_ocr(info, ids, token_mask, word_map, char_ids, char_mask)
+            related, _, lexical_r = self._encode_ocr(info, ocr_rel_input_ids, ocr_rel_attention_mask,
+                                                    ocr_rel_to_word_map, ocr_rel_char_ids, ocr_rel_char_mask)
+            return torch.cat([original, related], dim=1), mask, torch.cat([lexical_o, lexical_r], dim=1)
+        original, _ = self.ocr_encoder(ids, token_mask)
+        related, _ = self.ocr_encoder(ocr_rel_input_ids, ocr_rel_attention_mask)
+        paired_info = [
+            {**item, **{key: torch.cat([item[key], item[key]], dim=0)
+                       for key in ("boxes", "det_features", "rec_features")}}
+            for item in info
+        ]
+        return self._fuse_ocr(
+            paired_info, torch.cat([original, related], dim=1), mask, mapping,
+            torch.cat([char_ids, ocr_rel_char_ids], dim=1),
+            torch.cat([char_mask, ocr_rel_char_mask], dim=1),
+        )
 
     def _encode_ocr_lattice(self, info, ids, token_mask, word_map, char_ids, char_mask,
                             ocr_rel_input_ids=None, ocr_rel_attention_mask=None, ocr_rel_to_word_map=None,
@@ -289,7 +331,12 @@ class OpenViVQAModel(PreTrainedModel):
             pieces.append(image_tokens)
             masks.append(image_mask)
         ocr_offset = sum(piece.shape[1] for piece in pieces)
-        if self.config.ablation_use_ocr_aug and self.config.ocr_aug_mode == "lattice":
+        if self.config.ablation_use_ocr_aug and self.config.ocr_aug_mode == "separate":
+            ocr_features, ocr_mask, lexical = self._encode_ocr_separate(
+                ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map, ocr_char_ids, ocr_char_mask,
+                **lattice,
+            )
+        elif self.config.ablation_use_ocr_aug and self.config.ocr_aug_mode == "lattice":
             ocr_features, ocr_mask, lexical = self._encode_ocr_lattice(
                 ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map, ocr_char_ids, ocr_char_mask,
                 **lattice,
@@ -558,6 +605,16 @@ class OpenViVQAModel(PreTrainedModel):
             **lattice,
         )
         result = {"encoder_outputs": encoded, "attention_mask": mask}
+        # Layout of the complete OCR block in the SAME encoder memory used by VQA.
+        twc_word_map, twc_token_mask = ocr_to_word_map, ocr_attention_mask
+        ocr_length = ocr_input_ids.shape[1]
+        if self.config.ablation_use_ocr_aug and self.config.ocr_aug_mode == "separate":
+            rel_mask = (ocr_rel_attention_mask if ocr_rel_attention_mask is not None
+                        else (ocr_rel_input_ids != self.config.pad_token_id).long())
+            twc_word_map, twc_token_mask = self._ocr_pair_layout(
+                ocr_to_word_map, ocr_attention_mask, ocr_rel_to_word_map, rel_mask, ocr_char_ids.shape[1]
+            )
+            ocr_length += ocr_rel_input_ids.shape[1]
         if labels is not None or decoder_input_ids is not None:
             decoded = self.vit5(
                 encoder_outputs=encoded,
@@ -574,11 +631,11 @@ class OpenViVQAModel(PreTrainedModel):
             result["twc_answer_loss"], result["twc_answer_acc"] = self._twc_answer(
                 encoded.last_hidden_state[:, :questions],
                 attention_mask if attention_mask is not None else (input_ids != self.config.pad_token_id).long(),
-                encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_input_ids.shape[1]],
-                ocr_to_word_map, ocr_attention_mask, twc_answer_labels, twc_text_ids, twc_answer_text_ids,
+                encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_length],
+                twc_word_map, twc_token_mask, twc_answer_labels, twc_text_ids, twc_answer_text_ids,
             )
         if self.config.use_twc and twc_o2r is not None and hasattr(self, "twc_logit_scale"):
-            word_map, token_mask = ocr_to_word_map, ocr_attention_mask
+            word_map, token_mask = twc_word_map, twc_token_mask
             if view_pass:
                 # Separate TWC view: same question/image/boxes, TWA-augmented related copy.
                 word_map = twc_ocr_to_word_map
@@ -593,6 +650,8 @@ class OpenViVQAModel(PreTrainedModel):
                         twc_ocr_char_mask, ocr_word_mask, attention_mask, token_mask, image_features=image,
                     )
                     tokens = view.last_hidden_state[:, view_offset : view_offset + twc_ocr_input_ids.shape[1]]
+            elif self.config.ocr_aug_mode == "separate":
+                tokens = encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_length]
             elif lattice:
                 # Lexical features of the two separate passes: original slots 0..W-1, corrected W..2W-1.
                 words = ocr_char_ids.shape[1]

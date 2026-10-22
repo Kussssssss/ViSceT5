@@ -6,24 +6,22 @@ ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
 ablation_use_ocr_aug: true
 ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
-ocr_aug_mode: "lattice"       # lattice: ConsFormer chạy riêng bản gốc / bản sửa, chỉ chèn ~13% từ được sửa sau từ gốc; concat: ghép 2 nửa 1 lượt
-# Công thức của run t1 (commit c6e2118, test EM 30.89): CLIP đóng băng hoàn toàn, RMSNorm,
-# TWC TWA nguyên bản (BCE trên đầu ra encoder, related = tăng cường TWA), batch 8x1, LS 0.1.
+ocr_aug_mode: "separate"      # hai lượt ConsFormer riêng; concat toàn bộ Origin + Related rồi cộng feature OCR
 qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
-use_twc: false
+use_twc: true
 twc_weight: 1.0
 twc_temperature_init: 0.1    # τ khởi tạo (vẫn học được); 0.07 = CLIP/TWA
-twc_adv_probability: 0.6     # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
-twc_view: "separate"         # decoder luôn đọc bản sửa (như lúc test); TWC dùng bản tăng cường riêng qua một lượt encoder phụ
+twc_adv_probability: 0.4     # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
+twc_view: "shared"           # VQA và TWC dùng chung một lượt ViT5 encoder, cùng Origin + Related
 twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
-twc_feature: "lexical"         # đặc trưng chữ (ConsFormer + ký tự) của hai lượt riêng: gốc ↔ bản sửa
+twc_feature: "fused"         # Origin ↔ Related lấy từ output ViT5 encoder sau khi fusion image/question/OCR
 twc_queue_size: 0            # 0 = chỉ trong batch (t1); >0 = bộ nhớ cross-batch (cần infonce)
 twc_queue_start: 1000        # số forward train trước khi đọc bộ nhớ
 twc_mask_same_text: false    # false = nhãn TWA nguyên bản (t1); true = bỏ ứng viên trùng chữ khỏi negative
-twc_objective: "lexical"     # lexical: gốc ↔ related (TWA, t1) | answer: câu hỏi ↔ từ OCR của đáp án | both
+twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feature quyết định vị trí lấy feature
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
-twc_related_train: "correct" # bản related lúc train = bản sửa xác định như lúc test (đồng bộ train/test); twa = tăng cường TWA
+twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"

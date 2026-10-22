@@ -2,11 +2,10 @@
 
 Two ways to build the related copy of an OCR word list (same length, same order):
 
-* ``correct``: deterministic correction channel (used at inference, and in training
-  when TWC is off). Specials/numbers/in-lexicon words are kept; other words are
+* ``correct``: deterministic correction channel. Specials/numbers/in-lexicon words are kept; other words are
   replaced by the best lexicon candidate (tone shift → tone change → edit distance
   ≤ ``edit_distance`` with the same base form or initial consonant).
-* ``augment``: TWA augmentation for the TWC loss (Jin et al., MM'22 §3.4), ported from
+* ``augment``: TWA augmentation (train and test in separate mode; Jin et al., MM'22 §3.4), ported from
   the previous pretrain collator (``_findRelatedOCR_adr``): with probability ``p`` an
   in-lexicon word gets one character edit (label 0.9) and an out-of-lexicon word is
   corrected (label 0.9); untouched words are positives (1.0). Words with the same text
@@ -14,7 +13,6 @@ Two ways to build the related copy of an OCR word list (same length, same order)
 """
 
 import json
-import random
 import re
 import unicodedata
 from collections import defaultdict
@@ -188,7 +186,6 @@ class OCRCorrector:
 
     def augment(self, words, probability, rng):
         """TWA augmentation → (related, o2r, r2o) with n×n label lists (no padding)."""
-        n = len(words)
         related, diag_o2r, diag_r2o = [], [], []
         semi_o2r, semi_r2o = self.label_list[1], self.label_list[0]
         for word in words:
