@@ -55,6 +55,10 @@ class ModelArguments:
         default="concat", metadata={"help": "OCR Augmentation: concat (one ConsFormer pass over both halves) | "
                                             "lattice (separate passes, only changed words inserted after the original)."}
     )
+    ocr_lattice_keep: str = field(
+        default="all", metadata={"help": "lattice: insert every related word after its original (all) "
+                                         "or only the words the related copy changed (changed)."}
+    )
     ocr_related: str = field(
         default="correct", metadata={"help": "lattice: related copy = correct (deterministic) | augment "
                                              "(TWA keep/correct/noise at twc_adv_probability), same at train and test."}

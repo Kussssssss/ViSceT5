@@ -1182,3 +1182,31 @@ def test_lattice_augmented_related_is_identical_at_train_and_test(make_model, to
     assert torch.isclose(a["twc_o2r"][0].diagonal(), torch.tensor(0.9)).any()
     outputs = model(**a)
     assert torch.isfinite(outputs["twc_loss"])
+
+
+@pytest.mark.parametrize("keep", ["all", "changed"])
+def test_lattice_keep(make_model, tokenizer, keep):
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["cà phê sữa"], "answer": ["sữa"]}),
+                             label_list=[0.9, 0.9])
+    import os, tempfile
+    from PIL import Image as _Image
+    root = tempfile.mkdtemp()
+    image, ocr = os.path.join(root, "i.png"), os.path.join(root, "o.npy")
+    _Image.new("RGB", (40, 32)).save(image)
+    texts = ["cà", "phê", "sua"]  # only "sua" is corrected (→ "sữa")
+    np.save(ocr, {"texts": texts, "boxes": np.tile(np.array([[0, 0, 8, 8]], np.float32), (3, 1)),
+                  "det_features": np.ones((3, 4), np.float32), "rec_features": np.ones((3, 4), np.float32),
+                  "scores": np.ones(3, np.float32), "width": 40, "height": 32})
+    sample = {"image_path": image, "ocr_path": ocr, "question": "biển ghi gì", "answer": "sữa"}
+    model = make_model(ocr_aug_mode="lattice", ocr_lattice_keep=keep)
+    batch = build_collator(model, tokenizer, corrector, training=False)([sample])
+    W = batch["ocr_char_ids"].shape[1]
+    order = []
+    for s in batch["ocr_lattice_word_map"][0].tolist():
+        if s >= 0 and (not order or order[-1] != s):
+            order.append(s)
+    if keep == "all":  # cà cà' phê phê' sua sữa'
+        assert order == [0, W, 1, W + 1, 2, W + 2]
+    else:              # cà phê sua sữa'
+        assert order == [0, 1, 2, W + 2]
+    assert torch.isfinite(model(**batch)["loss"])
