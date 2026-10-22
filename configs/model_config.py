@@ -48,6 +48,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_temperature_init: float = 0.07,
         twc_view: str = "shared",
         ocr_aug_mode: Optional[str] = None,
+        ocr_related: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -177,10 +178,19 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ocr_aug_mode = str(ocr_aug_mode or "concat")
         if self.ocr_aug_mode not in ("concat", "lattice"):
             raise ValueError("ocr_aug_mode must be concat|lattice.")
+        # Related OCR copy in lattice mode — ONE copy shared by OCR Augmentation, its ConsFormer
+        # pass and TWC, built by the SAME procedure at train and test (fixed per-sample seed):
+        #   correct = deterministic correction (~13% of words change);
+        #   augment = TWA keep/correct/noise with probability twc_adv_probability (valid word →
+        #             character noise, invalid word → correction, else kept).
+        # None (older configs) = correct.
+        self.ocr_related = str(ocr_related or "correct")
+        if self.ocr_related not in ("correct", "augment"):
+            raise ValueError("ocr_related must be correct|augment.")
         if self.use_twc and self.ablation_use_ocr_aug and self.ocr_aug_mode == "lattice" and (
-                twc_objective != "lexical" or twc_feature != "lexical" or twc_related_train != "correct"):
+                twc_objective != "lexical" or twc_feature != "lexical"):
             raise ValueError("With ocr_aug_mode=lattice, TWC contrasts the two separate passes: use "
-                             "twc_objective=lexical, twc_feature=lexical, twc_related_train=correct.")
+                             "twc_objective=lexical and twc_feature=lexical.")
         self.twc_view = str(twc_view)
         if self.twc_view not in ("shared", "separate"):
             raise ValueError("twc_view must be shared|separate.")

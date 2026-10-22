@@ -63,8 +63,8 @@ class ViT5VQADataCollator:
         # lattice: the corrected copy goes in its own sequence (own ConsFormer pass); only the words
         # it changes are inserted after their original word (ocr_lattice_index / _word_map).
         self.lattice = related_mode != "none" and getattr(config, "ocr_aug_mode", "concat") == "lattice"
-        if self.lattice and related_mode != "correct":
-            raise ValueError("ocr_aug_mode=lattice uses the deterministic correction (related_mode='correct').")
+        if self.lattice and self.twc_separate:
+            raise ValueError("ocr_aug_mode=lattice shares one related copy; no separate TWC view.")
         self.seed = int(seed)
         self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
         if related_mode not in RELATED_MODES:
@@ -157,7 +157,10 @@ class ViT5VQADataCollator:
             return related, None, None
         # TWA: cố định theo mẫu (như seed tăng cường cố định của TWA) → tái lập được,
         # độc lập số worker DataLoader và PYTHONHASHSEED.
-        rng = random.Random(_stable_hash(f"{self.seed}|{sample['image_path']}|{sample['question']}"))
+        # Lattice: the same copy must come out at train and at test → a seed that does not depend
+        # on the training seed (TWA builds its related copy with a fixed seed for every split).
+        seed = 13 if self.lattice else self.seed
+        rng = random.Random(_stable_hash(f"{seed}|{sample['image_path']}|{sample['question']}"))
         return self.corrector.augment(texts, self.cfg.twc_adv_probability, rng)
 
     def _encode_ocr_text(self, texts, word_count, offset=0):

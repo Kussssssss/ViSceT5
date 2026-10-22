@@ -28,7 +28,7 @@ ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use
                       "ablation_use_ocr_aug", "use_twc", "twc_weight", "twc_loss", "twc_feature",
                       "twc_queue_size", "twc_queue_start", "twc_mask_same_text", "twc_objective",
                       "twc_answer_weight", "twc_related_train", "ocr_feature_norm",
-                      "twc_temperature_init", "twc_adv_probability", "twc_view", "ocr_aug_mode")
+                      "twc_temperature_init", "twc_adv_probability", "twc_view", "ocr_aug_mode", "ocr_related")
 
 
 QAVIT_MODES = ("off", "no_question", "question")
