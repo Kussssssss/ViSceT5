@@ -15,7 +15,8 @@ except ImportError:
 
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
-               "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "twc_answer_query")
+               "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "twc_answer_query",
+               "ocr_type_embedding")
 SCALARS = ("twc_logit_scale", "twc_answer_logit_scale", "instruction_proj_gate")
 
 

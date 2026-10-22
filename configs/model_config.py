@@ -47,6 +47,7 @@ class OpenViVQAConfig(PretrainedConfig):
         clip_late_adapter: Optional[bool] = None,
         twc_temperature_init: float = 0.07,
         twc_view: str = "shared",
+        ocr_aug_mode: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -165,6 +166,21 @@ class OpenViVQAConfig(PretrainedConfig):
         # separate = the decoder always reads the deterministic correction (as at test) and
         #            TWC runs an extra encoder pass on its own TWA-augmented copy, so the
         #            augmentation rate no longer changes the VQA input.
+        # How OCR Augmentation adds the corrected reading (deterministic correction, same at
+        # train and test):
+        #   concat  = one ConsFormer pass over [original | corrected] (every word twice, ~87% of
+        #             the second half identical to the first; both halves attend to each other);
+        #   lattice = ConsFormer runs separately on the original and the corrected sequence; only
+        #             the words the correction changed (~13%) are inserted, right after their
+        #             original word, with a learned type embedding (original / corrected).
+        # None (older configs) = concat.
+        self.ocr_aug_mode = str(ocr_aug_mode or "concat")
+        if self.ocr_aug_mode not in ("concat", "lattice"):
+            raise ValueError("ocr_aug_mode must be concat|lattice.")
+        if self.use_twc and self.ablation_use_ocr_aug and self.ocr_aug_mode == "lattice" and (
+                twc_objective != "lexical" or twc_feature != "lexical" or twc_related_train != "correct"):
+            raise ValueError("With ocr_aug_mode=lattice, TWC contrasts the two separate passes: use "
+                             "twc_objective=lexical, twc_feature=lexical, twc_related_train=correct.")
         self.twc_view = str(twc_view)
         if self.twc_view not in ("shared", "separate"):
             raise ValueError("twc_view must be shared|separate.")
