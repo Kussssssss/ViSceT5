@@ -708,6 +708,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "rmsnorm",  # the fixture model; resume re-applies the architecture flags
         "--qavit_mode",
         "off",
+        "--ablation_use_ocr_aug",
+        "False",  # the fixture model has no OCR-Aug (and so no lattice type embedding)
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -996,14 +998,15 @@ def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
             "twc_related_train", "ocr_feature_norm")
     assert {k: cfg[k] for k in keys} == {
-        "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
-        "twc_objective": "lexical", "twc_related_train": "twa", "ocr_feature_norm": "layernorm",
+        "twc_loss": "bce", "twc_feature": "lexical", "twc_queue_size": 0, "twc_mask_same_text": False,
+        "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
-    model = make_model(use_twc=True, **{k: cfg[k] for k in keys})
+    assert cfg["ocr_aug_mode"] == "lattice"
+    model = make_model(use_twc=True, ocr_aug_mode="lattice", **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector, training=True)
-    assert collator.related_mode == "twa" and collator.twc_lexical and not collator.twc_answer
+    assert collator.related_mode == "correct" and collator.lattice and collator.twc_lexical
     outputs = model(**collator(samples))
     assert torch.isfinite(outputs["twc_loss"]) and "twc_answer_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
@@ -1101,3 +1104,59 @@ def test_qavit_mode_from_env(monkeypatch, env, expected):
         monkeypatch.setenv(key, value)
     arguments = run_pipeline.training_arguments()
     assert arguments[len(arguments) - 1 - arguments[::-1].index("--qavit_mode") + 1] == expected
+
+
+
+def test_ocr_lattice(make_model, tokenizer):
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["cà phê sữa"], "answer": ["sữa"]}),
+                             label_list=[0.9, 0.9])
+    import numpy as np
+    from PIL import Image as _Image
+    import tempfile, os
+    root = tempfile.mkdtemp()
+    image, ocr = os.path.join(root, "i.png"), os.path.join(root, "o.npy")
+    _Image.new("RGB", (40, 32)).save(image)
+    texts = ["cà", "phe", "sua", "123"]  # "phe"/"sua" are corrected (→ "phê"/"sữa"), the rest kept
+    np.save(ocr, {"texts": texts, "boxes": np.tile(np.array([[0, 0, 8, 8]], np.float32), (4, 1)),
+                  "det_features": np.ones((4, 4), np.float32), "rec_features": np.ones((4, 4), np.float32),
+                  "scores": np.ones(4, np.float32), "width": 40, "height": 32})
+    sample = {"image_path": image, "ocr_path": ocr, "question": "biển ghi gì", "answer": "sữa"}
+    model = make_model(ocr_aug_mode="lattice", use_twc=True, twc_objective="lexical", twc_loss="bce",
+                       twc_feature="lexical", twc_queue_size=0, twc_related_train="correct")
+    train = build_collator(model, tokenizer, corrector, training=True)
+    batch = train([sample, sample])
+    related = corrector.correct([t for t in texts])
+    changed = [i for i, (a, b) in enumerate(zip(texts, related)) if a != b]
+    assert changed  # the fixture really exercises corrections
+    # Original sequence alone (W slots), corrected sequence in its own tensors.
+    W = batch["ocr_char_ids"].shape[1]
+    assert batch["ocr_info"][0]["boxes"].shape[0] == W and batch["ocr_rel_char_ids"].shape[1] == W
+    # Lattice: every original slot, plus slot W+i right after slot i for changed words only.
+    slots = [s for s in batch["ocr_lattice_word_map"][0].tolist() if s >= 0]
+    order = []
+    for s in slots:
+        if not order or order[-1] != s:
+            order.append(s)
+    expected = []
+    for i in range(len(texts)):
+        expected += [i] + ([W + i] if i in changed else [])
+    assert order == expected
+    # Train and test see exactly the same lattice input.
+    test = build_collator(model, tokenizer, corrector, training=False)([sample, sample])
+    for key in ("ocr_input_ids", "ocr_rel_input_ids", "ocr_lattice_index", "ocr_lattice_word_map"):
+        torch.testing.assert_close(batch[key], test[key])
+    assert "twc_o2r" in batch and "twc_o2r" not in test
+    outputs = model(**batch)
+    L = batch["input_ids"].shape[1] + (4 if model.config.ablation_use_image else 0) + batch["ocr_lattice_index"].shape[1]
+    assert outputs["attention_mask"].shape[1] == L
+    (outputs["loss"] + outputs["twc_loss"]).backward()
+    assert model.ocr_type_embedding.weight.grad is not None
+    model.eval()
+    with torch.no_grad():
+        model.generate(**{k: v for k, v in test.items() if k != "labels"}, num_beams=1, max_new_tokens=2)
+
+
+def test_lattice_validation():
+    with pytest.raises(ValueError):
+        OpenViVQAConfig(use_twc=True, ocr_aug_mode="lattice", twc_objective="lexical",
+                        twc_feature="fused", twc_related_train="correct")

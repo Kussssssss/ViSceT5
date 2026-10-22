@@ -51,6 +51,10 @@ class ModelArguments:
     twc_temperature_init: float = field(
         default=0.07, metadata={"help": "Initial (learnable) TWC temperature τ; 0.07 = CLIP/TWA."}
     )
+    ocr_aug_mode: str = field(
+        default="concat", metadata={"help": "OCR Augmentation: concat (one ConsFormer pass over both halves) | "
+                                            "lattice (separate passes, only changed words inserted after the original)."}
+    )
     twc_view: str = field(
         default="shared", metadata={"help": "shared | separate (decoder reads the correction, TWC its own augmented copy)."}
     )

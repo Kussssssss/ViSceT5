@@ -41,7 +41,8 @@ from training.common import build_collator, build_corrector, load_dataframes, lo
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_KEYS = ["input_ids", "attention_mask", "pixel_values", "ocr_info", "ocr_input_ids",
-              "ocr_attention_mask", "ocr_to_word_map", "ocr_char_ids", "ocr_char_mask", "ocr_word_mask"]
+              "ocr_attention_mask", "ocr_to_word_map", "ocr_char_ids", "ocr_char_mask", "ocr_word_mask",
+              *('ocr_rel_input_ids', 'ocr_rel_attention_mask', 'ocr_rel_to_word_map', 'ocr_rel_char_ids', 'ocr_rel_char_mask', 'ocr_lattice_index', 'ocr_lattice_word_map')]
 CMAP = matplotlib.colormaps["YlOrRd"]
 
 
@@ -126,7 +127,8 @@ def draw_chips(ax, title, words, weights, vmax, changed=None, max_words=90):
 
 def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png):
     L_q = batch["input_ids"].size(1)
-    L_ocr = batch["ocr_input_ids"].size(1)
+    lattice = "ocr_lattice_word_map" in batch  # OCR block = lattice (original + changed corrections)
+    L_ocr = batch["ocr_lattice_index"].size(1) if lattice else batch["ocr_input_ids"].size(1)
     S = vec.shape[0]
     L_img = S - L_q - L_ocr
     total = float(vec.sum()) or 1.0
@@ -140,11 +142,11 @@ def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png)
 
     # OCR: token → từ (ocr_to_word_map), nửa đầu gốc, nửa sau bản sửa
     ocr_vec = vec[L_q + L_img:]
-    wmap = batch["ocr_to_word_map"][0].tolist()
+    wmap = (batch["ocr_lattice_word_map"] if lattice else batch["ocr_to_word_map"])[0].tolist()
     words = batch["ocr_words"][0]
     orig, rel = words["orig"], words["rel"]
     n = len(orig)  # entry OCR thật (không gồm PAD)
-    slots = batch["ocr_char_ids"].shape[1]  # W hoặc 2W (nửa related bắt đầu ở W)
+    slots = batch["ocr_char_ids"].shape[1] * (2 if lattice else 1)  # W hoặc 2W (nửa related bắt đầu ở W)
     half = slots // 2 if rel is not None else slots
     w_att = np.zeros(slots)
     for t, wi in enumerate(wmap[:len(ocr_vec)]):

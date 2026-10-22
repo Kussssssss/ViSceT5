@@ -60,6 +60,11 @@ class ViT5VQADataCollator:
         self.twc_separate = bool(twc_separate)
         if self.twc_separate and related_mode != "twa":
             raise ValueError("A separate TWC view needs related_mode='twa'.")
+        # lattice: the corrected copy goes in its own sequence (own ConsFormer pass); only the words
+        # it changes are inserted after their original word (ocr_lattice_index / _word_map).
+        self.lattice = related_mode != "none" and getattr(config, "ocr_aug_mode", "concat") == "lattice"
+        if self.lattice and related_mode != "correct":
+            raise ValueError("ocr_aug_mode=lattice uses the deterministic correction (related_mode='correct').")
         self.seed = int(seed)
         self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
         if related_mode not in RELATED_MODES:
@@ -203,6 +208,7 @@ class ViT5VQADataCollator:
         o2r_all, r2o_all, groups, text_ids, words = [], [], [], [], []
         answer_labels, answer_ids = [], []
         view_ids, view_maps, view_chars, view_masks = [], [], [], []
+        rel_token_ids, rel_word_maps, rel_char_ids, rel_char_masks, lattice_order = [], [], [], [], []
         slots = 2 * word_count if with_related else word_count
         for sample, item in zip(batch, info):
             count = len(item["texts"])
@@ -224,14 +230,31 @@ class ViT5VQADataCollator:
                     view_maps.append(torch.tensor(mapping + v_map, dtype=torch.long))
                     view_chars.append(torch.cat([chars, v_chars]))
                     view_masks.append(torch.cat([mask, v_mask]))
-                rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(
-                    related, word_count, offset=word_count
-                )
-                ids, mapping = ids + rel_ids, mapping + rel_map
-                chars, mask = torch.cat([chars, rel_chars]), torch.cat([mask, rel_mask])
-                valid = torch.cat([valid, valid])
-                for key in ("boxes", "det_features", "rec_features"):
-                    item[key] = torch.cat([item[key], item[key]])
+                if self.lattice:
+                    rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(related, word_count)
+                    rel_token_ids.append(torch.tensor(rel_ids, dtype=torch.long))
+                    rel_word_maps.append(torch.tensor(rel_map, dtype=torch.long))
+                    rel_char_ids.append(rel_chars)
+                    rel_char_masks.append(rel_mask)
+                    tokens_of = {}, {}
+                    for part, part_map in enumerate((mapping, rel_map)):
+                        for position, word in enumerate(part_map):
+                            tokens_of[part].setdefault(word, []).append(position)
+                    order = []  # (part, position, slot): original tokens, then the changed correction
+                    for index in range(count):
+                        order += [(0, t, index) for t in tokens_of[0].get(index, [])]
+                        if related[index] != item["texts"][index]:
+                            order += [(1, t, word_count + index) for t in tokens_of[1].get(index, [])]
+                    lattice_order.append(order)
+                else:
+                    rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(
+                        related, word_count, offset=word_count
+                    )
+                    ids, mapping = ids + rel_ids, mapping + rel_map
+                    chars, mask = torch.cat([chars, rel_chars]), torch.cat([mask, rel_mask])
+                    valid = torch.cat([valid, valid])
+                    for key in ("boxes", "det_features", "rec_features"):
+                        item[key] = torch.cat([item[key], item[key]])
                 if lexical:
                     # PAD và placeholder <unk> = -1 (không phải mẫu tương phản).
                     full_o2r = torch.full((word_count, word_count), -1.0)
@@ -293,6 +316,25 @@ class ViT5VQADataCollator:
                 twc_o2r=torch.stack(o2r_all),
                 twc_r2o=torch.stack(r2o_all),
                 twc_group_ids=torch.stack(groups),
+            )
+        if self.lattice:
+            rel_padded = pad_sequence(rel_token_ids, batch_first=True, padding_value=self.pad_id)
+            original_length = ids.shape[1]
+            width = max(1, max(len(order) for order in lattice_order))
+            index = torch.full((len(batch), width), -1, dtype=torch.long)
+            slots_map = torch.full((len(batch), width), -1, dtype=torch.long)
+            for row, order in enumerate(lattice_order):
+                for column, (part, position, slot) in enumerate(order):
+                    index[row, column] = position + (original_length if part else 0)
+                    slots_map[row, column] = slot
+            result.update(
+                ocr_rel_input_ids=rel_padded,
+                ocr_rel_attention_mask=(rel_padded != self.pad_id).long(),
+                ocr_rel_to_word_map=pad_sequence(rel_word_maps, batch_first=True, padding_value=-1),
+                ocr_rel_char_ids=torch.stack(rel_char_ids),
+                ocr_rel_char_mask=torch.stack(rel_char_masks),
+                ocr_lattice_index=index,
+                ocr_lattice_word_map=slots_map,
             )
         if self.twc_separate:
             view_padded = pad_sequence(view_ids, batch_first=True, padding_value=self.pad_id)
