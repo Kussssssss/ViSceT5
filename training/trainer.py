@@ -169,8 +169,8 @@ class VQATrainer(Seq2SeqTrainer):
             logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
             base = getattr(self.model, "module", self.model)
             for name, key in (("twc_logit_scale", "twc_tau"), ("twc_answer_logit_scale", "twc_answer_tau")):
-                if hasattr(base, name):  # learned temperature τ = 1 / exp(clamped logit scale)
-                    theta = float(getattr(base, name).detach().clamp(-4.6052, 4.6052))
+                if hasattr(base, name):  # learned temperature τ = 1 / exp(logit scale)
+                    theta = float(getattr(base, name).detach())
                     logs[key] = round(float(torch.exp(torch.tensor(-theta))), 4)
             self._twc_sum = {}
             self._twc_count = 0

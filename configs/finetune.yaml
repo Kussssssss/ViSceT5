@@ -5,26 +5,22 @@ ablation_use_image: true
 ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
 ablation_use_ocr_aug: true
-ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
-ocr_aug_mode: "lattice"       # lattice: ConsFormer chạy riêng bản gốc / bản related, token related chèn ngay sau từ gốc; concat: ghép 2 nửa 1 lượt
-ocr_lattice_keep: "all"       # all: chèn đủ mọi từ của bản related; changed: chỉ từ bị đổi
+ocr_related: "augment"       # một bản related (keep/correct/noise theo twc_adv_probability) dùng chung cho OCR-Aug, ConsFormer và TWC; cùng quy trình lúc train và test
+ocr_aug_mode: "lattice"      # ConsFormer chạy riêng bản gốc / bản related; mỗi từ related chèn ngay sau từ gốc trong input ViT5
+ocr_lattice_keep: "all"      # chèn đủ mọi từ của bản related
 # Công thức của run t1 (commit c6e2118, test EM 30.89): CLIP đóng băng hoàn toàn, RMSNorm,
 # TWC TWA nguyên bản (BCE trên đầu ra encoder, related = tăng cường TWA), batch 8x1, LS 0.1.
 qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
-ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
+ocr_feature_norm: "layernorm"   # Consformer như code trước refactor
 use_twc: false
 twc_weight: 1.0
-twc_temperature_init: 0.1    # τ khởi tạo (vẫn học được); 0.07 = CLIP/TWA
-twc_adv_probability: 0.6     # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
-twc_view: "separate"         # decoder luôn đọc bản sửa (như lúc test); TWC dùng bản tăng cường riêng qua một lượt encoder phụ
-twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
-twc_feature: "fused"          # như TWA: đầu ra ViT5 encoder tại vị trí OCR gốc / related; lexical = đặc trưng chữ trước encoder
-twc_queue_size: 0            # 0 = chỉ trong batch (t1); >0 = bộ nhớ cross-batch (cần infonce)
-twc_queue_start: 1000        # số forward train trước khi đọc bộ nhớ
-twc_mask_same_text: false    # false = nhãn TWA nguyên bản (t1); true = bỏ ứng viên trùng chữ khỏi negative
-twc_objective: "lexical"     # lexical: gốc ↔ related (TWA, t1) | answer: câu hỏi ↔ từ OCR của đáp án | both
-twc_answer_weight: 0.1       # trọng số loss answer-grounded
-twc_related_train: "correct" # bản related lúc train = bản sửa xác định như lúc test (đồng bộ train/test); twa = tăng cường TWA
+twc_temperature_init: 0.1    # τ khởi tạo (học được); notebook đặt bằng TWC_TAU
+twc_adv_probability: 0.6     # p của bản related: từ đúng → nhiễu ký tự, từ sai → sửa; notebook đặt bằng TWC_AUG_P
+twc_loss: "bce"             # TWA: sigmoid BCE hai chiều trên các ô != -1
+twc_feature: "fused"         # TWA: đặc trưng sau encoder (ViT5) tại vị trí OCR gốc / related
+twc_queue_size: 0           # TWA: chỉ so trong batch
+twc_mask_same_text: false   # TWA: nhãn như create_batch_labels
+twc_objective: "lexical"     # TWA: từ OCR gốc ↔ từ related (nhãn 1.0 giữ nguyên / 0.9 bị đổi, cùng chữ trong ảnh kế thừa)
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
