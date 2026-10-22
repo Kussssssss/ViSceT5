@@ -24,14 +24,8 @@ from training.trainer import VQATrainer
 from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
 
-ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr",
-                      "ablation_use_ocr_aug", "use_twc", "twc_weight", "twc_loss", "twc_feature",
-                      "twc_queue_size", "twc_queue_start", "twc_mask_same_text", "twc_objective",
-                      "twc_answer_weight", "twc_related_train", "ocr_feature_norm",
-                      "twc_temperature_init", "twc_adv_probability", "twc_view", "ocr_aug_mode", "ocr_related", "ocr_lattice_keep")
-
-
-QAVIT_MODES = ("off", "no_question", "question")
+ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "use_twc",
+                      "twc_weight", "twc_adv_probability", "twc_temperature_init", "ocr_feature_norm")
 
 
 def main(args_list=None):
@@ -90,22 +84,15 @@ def main(args_list=None):
             print(f"[HF] resume skipped ({type(error).__name__}: {error})")
 
     flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS}
-    # One QA-ViT switch → its two config fields (question fed / layers without question).
-    mode = model_args.qavit_mode or ("question" if model_args.ablation_use_qaclip else "off")
-    if mode not in QAVIT_MODES:
-        raise ValueError(f"qavit_mode must be one of {QAVIT_MODES}, got {mode!r}.")
-    flags["ablation_use_qaclip"] = mode == "question"
-    flags["clip_late_adapter"] = mode == "no_question"
     checkpoint = model_args.model_name_or_path or training_args.resume_from_checkpoint
     model, tokenizer = load_model_and_tokenizer(checkpoint, overrides=flags)
     if training_args.should_log:
-        print("Architecture:", {"qavit_mode": mode,
-                                **{name: getattr(model.config, name) for name in ARCHITECTURE_FLAGS}},
+        print("Architecture:", {name: getattr(model.config, name) for name in ARCHITECTURE_FLAGS},
               "| best checkpoint by:", best_metric)
         print_parameter_summary(model)
 
     corrector = None
-    if model.config.ablation_use_ocr_aug:
+    if model.config.use_twc:
         corrector = build_corrector(
             model.config, frames["train"], data_args.term_vocab_path, data_args.viet_vocab_path
         )
@@ -115,8 +102,7 @@ def main(args_list=None):
         tokenizer=tokenizer,
         train_dataset=ViT5VQADataset(frames["train"]),
         eval_dataset=ViT5VQADataset(frames["validation"]),
-        data_collator=build_collator(model, tokenizer, corrector, training=True,
-                                     seed=training_args.seed),
+        data_collator=build_collator(model, tokenizer, corrector, training=True),
         eval_data_collator=build_collator(model, tokenizer, corrector, training=False),
         compute_metrics=build_compute_metrics(tokenizer)
         if training_args.predict_with_generate

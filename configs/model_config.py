@@ -20,6 +20,14 @@ COMBINED_CHARS = CHAR_SPECIAL_TOKENS + list(dict.fromkeys(VIET_ALPHA + DIGITS_PU
 DEFAULT_CHAR_NUM = len(COMBINED_CHARS)
 
 
+# Switches of older code. Their "off" values match this code; any other value is refused.
+LEGACY_FIELDS = (
+    "clip_late_adapter", "ablation_use_ocr_aug", "ocr_aug_mode", "ocr_related", "ocr_lattice_keep",
+    "twc_loss", "twc_feature", "twc_queue_size", "twc_queue_start", "twc_mask_same_text",
+    "twc_objective", "twc_answer_weight", "twc_related_train", "twc_view",
+)
+
+
 class OpenViVQAConfig(PretrainedConfig):
     model_type = "openvivqa"
 
@@ -30,26 +38,12 @@ class OpenViVQAConfig(PretrainedConfig):
         ablation_use_qaclip: bool = False,
         ablation_use_ocr: bool = True,
         ablation_use_image: bool = True,
-        ablation_use_ocr_aug: bool = True,
         use_twc: bool = False,
         twc_weight: float = 1.0,
         twc_adv_probability: float = 0.35,
         twc_label_list: Optional[List[float]] = None,
-        twc_loss: str = "infonce",
-        twc_feature: str = "lexical",
-        twc_queue_size: int = 16384,
-        twc_queue_start: int = 1000,
-        twc_mask_same_text: bool = True,
-        twc_objective: str = "answer",
-        twc_answer_weight: float = 0.1,
-        twc_related_train: str = "correct",
-        ocr_feature_norm: Optional[str] = None,
-        clip_late_adapter: Optional[bool] = None,
         twc_temperature_init: float = 0.07,
-        twc_view: str = "shared",
-        ocr_aug_mode: Optional[str] = None,
-        ocr_related: Optional[str] = None,
-        ocr_lattice_keep: Optional[str] = None,
+        ocr_feature_norm: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -98,128 +92,47 @@ class OpenViVQAConfig(PretrainedConfig):
             "vs_margin",
         ):
             kwargs.pop(name, None)
+        legacy = {name: kwargs.pop(name, None) for name in LEGACY_FIELDS}
+        if (legacy["clip_late_adapter"] or legacy["ablation_use_ocr_aug"]
+                or legacy["twc_objective"] in ("answer", "both")):
+            raise ValueError(
+                "This configuration comes from older code (QA-ViT without question, OCR Augmentation "
+                "as a separate module, or answer TWC), which this code no longer builds; "
+                "use commit bf74388 for it."
+            )
         super().__init__(**kwargs)
 
         self.vit5_name = vit5_name
         self.clip_vision_name = clip_vision_name
+        # QA-ViT: the question goes into the late CLIP layers through the learned adapter.
+        # False = plain frozen CLIP, no question and no adapter.
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
+        # Consformer (SceSpaVis): ConsFormer + characters + box/det/rec. False = text-only OCR.
         self.ablation_use_ocr = bool(ablation_use_ocr)
         # Bỏ ảnh: CLIP không được dựng, encoder chỉ nhận [câu hỏi, OCR].
         self.ablation_use_image = bool(ablation_use_image)
-        # Kênh sửa OCR: nối bản OCR đã sửa (related) sau bản gốc.
-        self.ablation_use_ocr_aug = bool(ablation_use_ocr_aug)
-        # TWC (TWA, Jin et al. MM'22): loss phụ khi train, cần nửa related → cần OCR-Aug.
+        # TWC (TWA, Jin et al. MM'22): the related OCR copy (TWA augmentation, OCR Augmentation)
+        # enters the encoder after the original OCR, at train and at test; the auxiliary loss
+        # contrasts the encoder outputs of the two copies during training.
         self.use_twc = bool(use_twc)
         self.twc_weight = float(twc_weight)
+        # TWA adv_pro: probability that a word of the related copy is changed
+        # (in-lexicon word → one character edit, other word → lexicon correction).
         self.twc_adv_probability = float(twc_adv_probability)
-        # [o2r, r2o] cho cặp bị tăng cường (nhiễu ký tự / sửa từ); cặp giữ nguyên = 1.0.
+        if not 0.0 <= self.twc_adv_probability <= 1.0:
+            raise ValueError("twc_adv_probability must lie in [0, 1].")
+        # TWA label_list: [o2r, r2o] of a changed word; an unchanged word = 1.0.
         self.twc_label_list = list(twc_label_list) if twc_label_list is not None else [0.9, 0.9]
-        self.ocr_edit_distance = int(ocr_edit_distance)
-        # infonce: softmax over all in-batch candidates with soft multi-positive targets
-        #          (TWA paper Eq. 4–6); bce: sigmoid BCE averaged over all cells (TWA code).
-        self.twc_loss = str(twc_loss)
-        # lexical: OCR features before fusion (ConsFormer text + characters, no box/det/rec);
-        # fused: multimodal encoder output. The related copy shares box/det/rec with its
-        # original, so on fused features a pair can be matched by layout alone.
-        self.twc_feature = str(twc_feature)
-        if self.twc_loss not in ("infonce", "bce") or self.twc_feature not in ("lexical", "fused"):
-            raise ValueError("twc_loss must be infonce|bce and twc_feature lexical|fused.")
-        # Cross-batch memory (XBM, Wang et al. CVPR'20): FIFO of detached word features
-        # from previous steps, used as extra negatives for the softmax TWC. A batch of 8
-        # gives ~300 candidates; 16384 entries cover the last ~55 steps. 0 = in-batch only.
-        # The memory is read only after twc_queue_start training forwards, once features
-        # drift slowly (it is filled from the start, so it is full when first read).
-        self.twc_queue_size = int(twc_queue_size)
-        self.twc_queue_start = int(twc_queue_start)
-        # A candidate whose text (original or related) equals the query's original or related
-        # text is never a negative: identical strings get identical lexical features, so
-        # pushing them apart is a false negative. Within an image same-text pairs stay
-        # positives (TWA label inheritance); every other text collision is ignored.
-        self.twc_mask_same_text = bool(twc_mask_same_text)
-        if self.twc_queue_size < 0 or self.twc_queue_start < 0:
-            raise ValueError("twc_queue_size and twc_queue_start must be >= 0.")
-        if self.use_twc and self.twc_queue_size > 0 and self.twc_loss != "infonce" and twc_objective != "answer":
-            raise ValueError("The TWC memory adds negatives to the softmax loss; use twc_loss=infonce.")
-        # answer : question ↔ OCR words of the answer (answer-grounded contrast on the fused
-        #          encoder output; candidates = every OCR word of the batch, original and
-        #          corrected copies). Supervises WHERE the answer is, which the decoder copies.
-        # lexical: original ↔ related copy of each OCR word (TWA word-level contrast).
-        # both   : sum of the two (weights twc_answer_weight and twc_weight).
+        # Initial TWC temperature τ (learnable: logit scale = exp(θ), θ0 = log(1/τ)); TWA: 0.07.
+        self.twc_temperature_init = float(twc_temperature_init)
+        if self.twc_temperature_init <= 0:
+            raise ValueError("twc_temperature_init must be positive.")
         # Norm of each OCR stream (box/det/rec/token/char) in SemanticOCREmbedding.
-        # layernorm = pre-refactor code (the Vast/old runs); rmsnorm = refactor. None (configs
-        # saved before this switch existed) = rmsnorm, so those checkpoints still load as trained.
+        # layernorm = pre-refactor code; None (configs saved before the field) = rmsnorm.
         self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")
-        # QA-ViT has two halves, set together by qavit_mode (training arguments):
-        #   ablation_use_qaclip = the question is fed to the late 6 CLIP layers (qavit_mode=question);
-        #   clip_late_adapter   = those QA-ViT layers exist WITHOUT the question (qavit_mode=no_question):
-        #     only their gated instruction_out_proj (init = out_proj, gate 0) acts, on frozen CLIP —
-        #     what the pre-refactor code ran with QA-ViT "off". Both False = plain CLIP (qavit_mode=off).
-        # None (older configs) = False, so refactor checkpoints load as trained.
-        self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
-        # Initial TWC temperature τ (learnable: logit scale = exp(θ), θ0 = log(1/τ)).
-        # 0.07 = CLIP/TWA; a larger τ starts with a softer similarity → logit mapping.
-        self.twc_temperature_init = float(twc_temperature_init)
-        if not 0.01 <= self.twc_temperature_init <= 100:
-            raise ValueError("twc_temperature_init must lie in [0.01, 100] (the logit-scale clamp).")
-        # Which related copy lexical TWC contrasts (with twc_related_train=twa):
-        # shared   = the one the decoder reads (TWA-augmented at train, corrected at test);
-        # separate = the decoder always reads the deterministic correction (as at test) and
-        #            TWC runs an extra encoder pass on its own TWA-augmented copy, so the
-        #            augmentation rate no longer changes the VQA input.
-        # How OCR Augmentation adds the corrected reading (deterministic correction, same at
-        # train and test):
-        #   concat  = one ConsFormer pass over [original | corrected] (every word twice, ~87% of
-        #             the second half identical to the first; both halves attend to each other);
-        #   lattice = ConsFormer runs separately on the original and the corrected sequence; only
-        #             the words the correction changed (~13%) are inserted, right after their
-        #             original word, with a learned type embedding (original / corrected).
-        # None (older configs) = concat.
-        self.ocr_aug_mode = str(ocr_aug_mode or "concat")
-        if self.ocr_aug_mode not in ("concat", "lattice"):
-            raise ValueError("ocr_aug_mode must be concat|lattice.")
-        # Related OCR copy in lattice mode — ONE copy shared by OCR Augmentation, its ConsFormer
-        # pass and TWC, built by the SAME procedure at train and test (fixed per-sample seed):
-        #   correct = deterministic correction (~13% of words change);
-        #   augment = TWA keep/correct/noise with probability twc_adv_probability (valid word →
-        #             character noise, invalid word → correction, else kept).
-        # None (older configs) = correct.
-        self.ocr_related = str(ocr_related or "correct")
-        # Which related words the lattice inserts after their original word:
-        #   all     = every word (the related copy is complete in the T5 input, as in its ConsFormer pass);
-        #   changed = only words whose related text differs from the original.
-        # None (configs before this switch) = changed, so those checkpoints predict as trained.
-        self.ocr_lattice_keep = str(ocr_lattice_keep or "changed")
-        if self.ocr_lattice_keep not in ("all", "changed"):
-            raise ValueError("ocr_lattice_keep must be all|changed.")
-        if self.ocr_related not in ("correct", "augment"):
-            raise ValueError("ocr_related must be correct|augment.")
-        if self.use_twc and self.ablation_use_ocr_aug and self.ocr_aug_mode == "lattice":
-            # fused (TWA: the multimodal encoder output at the original / related OCR positions)
-            # needs every related word in the encoder input; lexical = the two ConsFormer passes.
-            if twc_objective != "lexical":
-                raise ValueError("With ocr_aug_mode=lattice, use twc_objective=lexical.")
-            if twc_feature == "fused" and self.ocr_lattice_keep != "all":
-                raise ValueError("twc_feature=fused with a lattice needs ocr_lattice_keep=all "
-                                 "(every related word must be in the encoder input).")
-        self.twc_view = str(twc_view)
-        if self.twc_view not in ("shared", "separate"):
-            raise ValueError("twc_view must be shared|separate.")
-        if self.use_twc and self.twc_view == "separate" and twc_objective != "lexical":
-            raise ValueError("twc_view=separate is for the lexical (TWA) objective only.")
-        self.twc_objective = str(twc_objective)
-        self.twc_answer_weight = float(twc_answer_weight)
-        # Related OCR copy at TRAIN time. correct = the deterministic correction used at test
-        # (train/test identical input); twa = TWA augmentation (noise / correction, p=0.35),
-        # which feeds the VQA loss a related half it never sees at test.
-        self.twc_related_train = str(twc_related_train)
-        if self.twc_objective not in ("answer", "lexical", "both"):
-            raise ValueError("twc_objective must be answer|lexical|both.")
-        if self.twc_related_train not in ("correct", "twa"):
-            raise ValueError("twc_related_train must be correct|twa.")
-        if self.use_twc and self.twc_objective != "answer" and not self.ablation_use_ocr_aug:
-            raise ValueError("Lexical TWC pairs each OCR word with its related copy: needs ablation_use_ocr_aug=True.")
+        self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
         self.pad_token_id = pad_token_id
