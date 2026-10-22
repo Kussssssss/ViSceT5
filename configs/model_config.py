@@ -31,7 +31,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ablation_use_ocr: bool = True,
         use_ocr_aug_finetune: bool = False,
         ocr_aug_vocab_dir: str = "configs/data",
-        adv_probability_finetune: float = 1.0,
+        adv_probability_finetune: float = 0.5,
         editlen: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
