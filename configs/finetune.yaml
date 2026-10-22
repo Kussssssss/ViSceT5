@@ -6,7 +6,8 @@ ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
 ablation_use_ocr_aug: true
 ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
-ocr_aug_mode: "lattice"       # lattice: ConsFormer chạy riêng bản gốc / bản sửa, chỉ chèn ~13% từ được sửa sau từ gốc; concat: ghép 2 nửa 1 lượt
+ocr_aug_mode: "lattice"       # lattice: ConsFormer chạy riêng bản gốc / bản related, token related chèn ngay sau từ gốc; concat: ghép 2 nửa 1 lượt
+ocr_lattice_keep: "all"       # all: chèn đủ mọi từ của bản related; changed: chỉ từ bị đổi
 # Công thức của run t1 (commit c6e2118, test EM 30.89): CLIP đóng băng hoàn toàn, RMSNorm,
 # TWC TWA nguyên bản (BCE trên đầu ra encoder, related = tăng cường TWA), batch 8x1, LS 0.1.
 qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)

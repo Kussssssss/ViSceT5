@@ -63,6 +63,7 @@ class ViT5VQADataCollator:
         # lattice: the corrected copy goes in its own sequence (own ConsFormer pass); only the words
         # it changes are inserted after their original word (ocr_lattice_index / _word_map).
         self.lattice = related_mode != "none" and getattr(config, "ocr_aug_mode", "concat") == "lattice"
+        self.lattice_keep_all = getattr(config, "ocr_lattice_keep", "changed") == "all"
         if self.lattice and self.twc_separate:
             raise ValueError("ocr_aug_mode=lattice shares one related copy; no separate TWC view.")
         self.seed = int(seed)
@@ -246,7 +247,7 @@ class ViT5VQADataCollator:
                     order = []  # (part, position, slot): original tokens, then the changed correction
                     for index in range(count):
                         order += [(0, t, index) for t in tokens_of[0].get(index, [])]
-                        if related[index] != item["texts"][index]:
+                        if self.lattice_keep_all or related[index] != item["texts"][index]:
                             order += [(1, t, word_count + index) for t in tokens_of[1].get(index, [])]
                     lattice_order.append(order)
                 else:

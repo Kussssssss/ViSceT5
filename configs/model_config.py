@@ -49,6 +49,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_view: str = "shared",
         ocr_aug_mode: Optional[str] = None,
         ocr_related: Optional[str] = None,
+        ocr_lattice_keep: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -185,6 +186,13 @@ class OpenViVQAConfig(PretrainedConfig):
         #             character noise, invalid word → correction, else kept).
         # None (older configs) = correct.
         self.ocr_related = str(ocr_related or "correct")
+        # Which related words the lattice inserts after their original word:
+        #   all     = every word (the related copy is complete in the T5 input, as in its ConsFormer pass);
+        #   changed = only words whose related text differs from the original.
+        # None (configs before this switch) = changed, so those checkpoints predict as trained.
+        self.ocr_lattice_keep = str(ocr_lattice_keep or "changed")
+        if self.ocr_lattice_keep not in ("all", "changed"):
+            raise ValueError("ocr_lattice_keep must be all|changed.")
         if self.ocr_related not in ("correct", "augment"):
             raise ValueError("ocr_related must be correct|augment.")
         if self.use_twc and self.ablation_use_ocr_aug and self.ocr_aug_mode == "lattice" and (
