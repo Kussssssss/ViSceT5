@@ -109,20 +109,10 @@ def build_corrector(config, train_frame, term_vocab_path="configs/data/term_voca
     )
 
 
-def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
-    """The related copy (if OCR-Aug is on) is the deterministic correction, at train and at
-    test. Only training with lexical TWC and twc_related_train=twa uses TWA augmentation.
-    Training with TWC also emits the TWC targets (lexical pairs and/or answer words)."""
+def build_collator(model, tokenizer, corrector=None, training=False):
+    """With TWC the related OCR copy is built by the same TWA procedure at train and at test;
+    only training also emits the TWC labels."""
     config = model.config
-    twc = training and config.use_twc
-    lexical = twc and config.twc_objective in ("lexical", "both")
-    answer = twc and config.twc_objective in ("answer", "both")
-    mode = "none"
-    if config.ablation_use_ocr_aug and config.ocr_aug_mode == "lattice":
-        # One related copy for OCR-Aug, ConsFormer and TWC, identical at train and test.
-        mode = "twa" if config.ocr_related == "augment" else "correct"
-    elif config.ablation_use_ocr_aug:
-        mode = "twa" if (lexical and config.twc_related_train == "twa") else "correct"
     ocr_config = {
         "ocr_embedding": {
             **DEFAULT_OCR_CONFIG["ocr_embedding"],
@@ -137,10 +127,6 @@ def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
         Vision_Encode_Ocr_Feature(ocr_config),
         config,
         corrector=corrector,
-        related_mode=mode,
-        seed=seed,
-        twc_lexical=lexical,
-        twc_answer=answer,
-        twc_separate=(mode == "twa" and config.twc_view == "separate"
-                      and config.ocr_aug_mode != "lattice" and training),
+        related=config.use_twc,
+        twc_labels=training and config.use_twc,
     )

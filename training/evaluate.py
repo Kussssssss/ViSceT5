@@ -38,7 +38,7 @@ def main(args_list=None):
     dataset = ViT5VQADataset(frames[args.split])
     if not len(dataset):
         raise ValueError(f"The {args.split} split is empty.")
-    corrector = build_corrector(model.config, frames["train"]) if model.config.ablation_use_ocr_aug else None
+    corrector = build_corrector(model.config, frames["train"]) if model.config.use_twc else None
     collator = build_collator(model, tokenizer, corrector, training=False)
     trainer = VQATrainer(
         model=model,

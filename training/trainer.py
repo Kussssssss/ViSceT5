@@ -15,17 +15,15 @@ except ImportError:
 
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
-               "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "twc_answer_query",
-               "ocr_type_embedding")
-SCALARS = ("twc_logit_scale", "twc_answer_logit_scale", "instruction_proj_gate")
+               "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj")
+SCALARS = ("twc_logit_scale", "instruction_proj_gate")
 
 
 class VQATrainer(Seq2SeqTrainer):
     """Seq2SeqTrainer + TWC auxiliary loss.
 
-    eval_data_collator: collator for evaluation/prediction. Training may use TWA
-    augmentation for the related OCR copy, but evaluation must see the same
-    deterministic correction as inference.
+    eval_data_collator: collator for evaluation/prediction (same OCR input as training,
+    without the TWC labels).
     """
 
     def __init__(self, *args, eval_data_collator=None, **kwargs):
@@ -60,8 +58,8 @@ class VQATrainer(Seq2SeqTrainer):
 
     def create_optimizer(self):
         """Three parameter groups (each keeps its own LR under the shared warmup/cosine schedule):
-        pretrained (ViT5, CLIP adapter projections) = learning_rate; randomly initialised
-        modules = new_module_learning_rate; scalars (TWC temperatures, adapter gates) =
+        pretrained (ViT5, QA-ViT projections) = learning_rate; randomly initialised
+        modules = new_module_learning_rate; scalars (TWC temperature, QA-ViT gates) =
         scalar_learning_rate without weight decay (as CLIP's logit scale). Unset rates fall back
         to learning_rate (and scalars to the usual weight-decay rule), i.e. the stock optimizer."""
         if self.optimizer is not None:
@@ -106,17 +104,12 @@ class VQATrainer(Seq2SeqTrainer):
             if self.label_smoother
             else outputs["loss"]
         )
-        config = getattr(model, "module", model).config
-        terms = [(name, weight) for name, weight in (("twc", config.twc_weight),
-                                                     ("twc_answer", config.twc_answer_weight))
-                 if f"{name}_loss" in outputs]
-        for name, weight in terms:
-            loss = loss + weight * outputs[f"{name}_loss"]
+        if "twc_loss" in outputs:
+            loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
             if model.training:
-                for key in (f"{name}_loss", f"{name}_acc"):
+                for key in ("twc_loss", "twc_acc"):
                     self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
-        if terms and model.training:
-            self._twc_count += 1
+                self._twc_count += 1
         return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -168,10 +161,8 @@ class VQATrainer(Seq2SeqTrainer):
         if self._twc_count and "loss" in logs:  # training log: mean TWC since last log
             logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
             base = getattr(self.model, "module", self.model)
-            for name, key in (("twc_logit_scale", "twc_tau"), ("twc_answer_logit_scale", "twc_answer_tau")):
-                if hasattr(base, name):  # learned temperature τ = 1 / exp(logit scale)
-                    theta = float(getattr(base, name).detach())
-                    logs[key] = round(float(torch.exp(torch.tensor(-theta))), 4)
+            if hasattr(base, "twc_logit_scale"):  # learned temperature τ = 1 / exp(logit scale)
+                logs["twc_tau"] = round(float(torch.exp(-base.twc_logit_scale.detach())), 4)
             self._twc_sum = {}
             self._twc_count = 0
         super().log(logs)

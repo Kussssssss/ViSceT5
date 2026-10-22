@@ -1,6 +1,5 @@
 """Build deterministic image/question/OCR batches for answer generation."""
 
-import hashlib
 import random
 import re
 
@@ -17,30 +16,20 @@ from data.vocab import (
     _normalize_text,
 )
 
-RELATED_MODES = ("none", "correct", "twa")
-
-
-def _stable_hash(text):
-    return int.from_bytes(hashlib.md5(text.encode("utf-8")).digest()[:8], "little")
-
-
-def _text_id(text):
-    return _stable_hash(text) & 0x3FFFFFFF
+# TWA builds the related copy of every sample with random.Random(13) (findRelatedOCR*).
+TWA_SEED = 13
 
 
 class ViT5VQADataCollator:
     """OCR features stay aligned with their original image and text entries.
 
-    related_mode:
-      none    — OCR gốc (W entry).
-      correct — thêm bản OCR đã sửa (kênh sửa OCR, xác định) → 2W entry.
-      twa     — thêm bản tăng cường kiểu TWA + nhãn TWC (chỉ dùng khi train với TWC).
-    Nửa related đứng sau nửa gốc và dùng chung box/det/rec của entry gốc tương ứng.
+    related: also build the related OCR copy (TWA augmentation, same procedure at train and
+    test) as its own sequence ocr_rel_* (word slots 0..W-1, sharing box/det/rec with the
+    original word). twc_labels: emit the TWC labels twc_o2r / twc_r2o (training).
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
-                 corrector=None, related_mode="none", seed=42, twc_lexical=None, twc_answer=False,
-                 twc_separate=False):
+                 corrector=None, related=False, twc_labels=False):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -50,30 +39,13 @@ class ViT5VQADataCollator:
         self.char_max_num = config.char_max_num
         self.seq_max = config.ocr_max_scene_text
         self.corrector = corrector
-        self.related_mode = related_mode
-        # TWC targets (training only). twc_lexical: original↔related labels (TWA); default =
-        # on exactly in twa mode, as before. twc_answer: which OCR words belong to the answer.
-        self.twc_lexical = (related_mode == "twa") if twc_lexical is None else bool(twc_lexical)
-        self.twc_answer = bool(twc_answer)
-        # twc_separate: the model input gets the deterministic correction; the TWA-augmented
-        # copy (with the TWC labels) is emitted separately as twc_ocr_* for the TWC pass.
-        self.twc_separate = bool(twc_separate)
-        if self.twc_separate and related_mode != "twa":
-            raise ValueError("A separate TWC view needs related_mode='twa'.")
-        # lattice: the corrected copy goes in its own sequence (own ConsFormer pass); only the words
-        # it changes are inserted after their original word (ocr_lattice_index / _word_map).
-        self.lattice = related_mode != "none" and getattr(config, "ocr_aug_mode", "concat") == "lattice"
-        self.lattice_keep_all = getattr(config, "ocr_lattice_keep", "changed") == "all"
-        if self.lattice and self.twc_separate:
-            raise ValueError("ocr_aug_mode=lattice shares one related copy; no separate TWC view.")
-        self.seed = int(seed)
+        self.related = bool(related)
+        self.twc_labels = bool(twc_labels)
         self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
-        if related_mode not in RELATED_MODES:
-            raise ValueError(f"related_mode must be one of {RELATED_MODES}.")
-        if related_mode != "none" and corrector is None:
+        if self.related and corrector is None:
             raise ValueError("The related OCR copy needs an OCRCorrector.")
-        if self.twc_lexical and related_mode == "none":
-            raise ValueError("Lexical TWC labels need a related OCR copy.")
+        if self.twc_labels and not self.related:
+            raise ValueError("TWC labels need the related OCR copy.")
         if self.seq_max < 1 or self.char_max_num < 1:
             raise ValueError("OCR word and character limits must be positive.")
         if self.pad_id is None:
@@ -146,25 +118,15 @@ class ViT5VQADataCollator:
         info.update(texts=texts, width=raw["width"], height=raw["height"], placeholder=not keep)
         return info
 
-    def _related(self, item, sample):
-        """Related copy (+ TWC labels in twa mode). The <unk> placeholder is never edited."""
+    def _related(self, item):
+        """Related copy + TWC labels (TWA findRelatedOCR_adr). The <unk> placeholder of an image
+        without OCR is never edited and gets no labels (all -1, as TWA's PAD)."""
         texts = item["texts"]
         if item["placeholder"]:
             return list(texts), None, None
-        if self.related_mode == "correct":
-            related = self.corrector.correct(texts)
-            if self.twc_lexical:
-                return (related, *self.corrector.pair_labels(texts, related))
-            return related, None, None
-        # TWA: cố định theo mẫu (như seed tăng cường cố định của TWA) → tái lập được,
-        # độc lập số worker DataLoader và PYTHONHASHSEED.
-        # Lattice: the same copy must come out at train and at test → a seed that does not depend
-        # on the training seed (TWA builds its related copy with a fixed seed for every split).
-        seed = 13 if self.lattice else self.seed
-        rng = random.Random(_stable_hash(f"{seed}|{sample['image_path']}|{sample['question']}"))
-        return self.corrector.augment(texts, self.cfg.twc_adv_probability, rng)
+        return self.corrector.augment(texts, self.cfg.twc_adv_probability, random.Random(TWA_SEED))
 
-    def _encode_ocr_text(self, texts, word_count, offset=0):
+    def _encode_ocr_text(self, texts, word_count):
         char_ids = torch.zeros(word_count, self.char_max_num, dtype=torch.long)
         char_mask = torch.zeros_like(char_ids, dtype=torch.float)
         token_ids, word_map = [], []
@@ -173,7 +135,7 @@ class ViT5VQADataCollator:
             if not ids:
                 ids = [self.tokenizer.unk_token_id]
             token_ids.extend(ids)
-            word_map.extend([offset + index] * len(ids))
+            word_map.extend([index] * len(ids))
             for position, char in enumerate(text[: self.char_max_num]):
                 char_ids[index, position] = self.char_set.get(
                     char, self.char_set["<unk>"]
@@ -206,97 +168,38 @@ class ViT5VQADataCollator:
         word_count = min(
             self.seq_max, ((max(len(item["texts"]) for item in info) + 7) // 8) * 8
         )
-        with_related = self.related_mode != "none"
-        lexical, answer_targets = self.twc_lexical, self.twc_answer
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
-        o2r_all, r2o_all, groups, text_ids, words = [], [], [], [], []
-        answer_labels, answer_ids = [], []
-        view_ids, view_maps, view_chars, view_masks = [], [], [], []
-        rel_token_ids, rel_word_maps, rel_char_ids, rel_char_masks, lattice_order = [], [], [], [], []
-        slots = 2 * word_count if with_related else word_count
-        for sample, item in zip(batch, info):
+        rel_token_ids, rel_word_maps, rel_char_ids, rel_char_masks = [], [], [], []
+        o2r_all, r2o_all, words = [], [], []
+        for item in info:
             count = len(item["texts"])
             ids, mapping, chars, mask = self._encode_ocr_text(item["texts"], word_count)
-            valid = torch.arange(word_count) < count
             for key in ("boxes", "det_features", "rec_features"):
                 item[key] = torch.cat(
                     [item[key], item[key].new_zeros(word_count - count, item[key].shape[-1])]
                 )
-            related = view = None
-            if with_related:
-                related, o2r, r2o = self._related(item, sample)
-                if self.twc_separate:
-                    view = related  # TWA-augmented copy: TWC only
-                    related = (list(item["texts"]) if item["placeholder"]
-                               else self.corrector.correct(item["texts"]))
-                    v_ids, v_map, v_chars, v_mask = self._encode_ocr_text(view, word_count, offset=word_count)
-                    view_ids.append(torch.tensor(ids + v_ids, dtype=torch.long))
-                    view_maps.append(torch.tensor(mapping + v_map, dtype=torch.long))
-                    view_chars.append(torch.cat([chars, v_chars]))
-                    view_masks.append(torch.cat([mask, v_mask]))
-                if self.lattice:
-                    rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(related, word_count)
-                    rel_token_ids.append(torch.tensor(rel_ids, dtype=torch.long))
-                    rel_word_maps.append(torch.tensor(rel_map, dtype=torch.long))
-                    rel_char_ids.append(rel_chars)
-                    rel_char_masks.append(rel_mask)
-                    tokens_of = {}, {}
-                    for part, part_map in enumerate((mapping, rel_map)):
-                        for position, word in enumerate(part_map):
-                            tokens_of[part].setdefault(word, []).append(position)
-                    order = []  # (part, position, slot): original tokens, then the changed correction
-                    for index in range(count):
-                        order += [(0, t, index) for t in tokens_of[0].get(index, [])]
-                        if self.lattice_keep_all or related[index] != item["texts"][index]:
-                            order += [(1, t, word_count + index) for t in tokens_of[1].get(index, [])]
-                    lattice_order.append(order)
-                else:
-                    rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(
-                        related, word_count, offset=word_count
-                    )
-                    ids, mapping = ids + rel_ids, mapping + rel_map
-                    chars, mask = torch.cat([chars, rel_chars]), torch.cat([mask, rel_mask])
-                    valid = torch.cat([valid, valid])
-                    for key in ("boxes", "det_features", "rec_features"):
-                        item[key] = torch.cat([item[key], item[key]])
-                if lexical:
-                    # PAD và placeholder <unk> = -1 (không phải mẫu tương phản).
+            related = None
+            if self.related:
+                related, o2r, r2o = self._related(item)
+                rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(related, word_count)
+                rel_token_ids.append(torch.tensor(rel_ids, dtype=torch.long))
+                rel_word_maps.append(torch.tensor(rel_map, dtype=torch.long))
+                rel_char_ids.append(rel_chars)
+                rel_char_masks.append(rel_mask)
+                if self.twc_labels:
+                    # PAD và placeholder <unk> = -1 (không phải mẫu tương phản), như TWA.
                     full_o2r = torch.full((word_count, word_count), -1.0)
                     full_r2o = torch.full((word_count, word_count), -1.0)
-                    group = torch.full((word_count,), -1, dtype=torch.long)
                     if o2r is not None:
                         full_o2r[:count, :count] = torch.tensor(o2r)
                         full_r2o[:count, :count] = torch.tensor(r2o)
-                        group[:count] = torch.tensor(
-                            [_stable_hash(f"{sample['image_path']}|{text}") & 0x3FFFFFFF
-                             for text in item["texts"]]
-                        )
                     o2r_all.append(full_o2r)
                     r2o_all.append(full_r2o)
-                    groups.append(group)
-            if lexical or answer_targets:
-                # Hash of every OCR slot's text (original half, related half); -1 = PAD/placeholder.
-                slot_texts = [None] * slots
-                if not item["placeholder"]:
-                    slot_texts[:count] = item["texts"]
-                    if related is not None:
-                        slot_texts[word_count:word_count + count] = view if view is not None else related
-                text_ids.append(torch.tensor([_text_id(t) if t is not None else -1 for t in slot_texts]))
-            if answer_targets:
-                # Positive = an OCR entry made only of answer words (entries can hold
-                # several words, e.g. "cà phê"); the answer string itself also counts.
-                answer_text = _normalize_text(str(sample.get("answer") or ""), lowercase=True)
-                answer_words = set(answer_text.split())
-                answer_labels.append(torch.tensor(
-                    [-1.0 if t is None else float(bool(t.split()) and set(t.split()) <= answer_words)
-                     for t in slot_texts]
-                ))
-                answer_ids.append(sorted({_text_id(w) for w in answer_words | ({answer_text} if answer_text else set())}))
             token_ids.append(torch.tensor(ids, dtype=torch.long))
             word_maps.append(torch.tensor(mapping, dtype=torch.long))
             char_ids.append(chars)
             char_masks.append(mask)
-            word_masks.append(valid)
+            word_masks.append(torch.arange(word_count) < count)
             words.append({"orig": list(item["texts"]), "rel": related})
         ids = pad_sequence(token_ids, batch_first=True, padding_value=self.pad_id)
         result = {
@@ -315,48 +218,17 @@ class ViT5VQADataCollator:
             "ocr_char_mask": torch.stack(char_masks),
             "ocr_word_mask": torch.stack(word_masks).long(),
         }
-        if lexical:
-            result.update(
-                twc_o2r=torch.stack(o2r_all),
-                twc_r2o=torch.stack(r2o_all),
-                twc_group_ids=torch.stack(groups),
-            )
-        if self.lattice:
+        if self.related:
             rel_padded = pad_sequence(rel_token_ids, batch_first=True, padding_value=self.pad_id)
-            original_length = ids.shape[1]
-            width = max(1, max(len(order) for order in lattice_order))
-            index = torch.full((len(batch), width), -1, dtype=torch.long)
-            slots_map = torch.full((len(batch), width), -1, dtype=torch.long)
-            for row, order in enumerate(lattice_order):
-                for column, (part, position, slot) in enumerate(order):
-                    index[row, column] = position + (original_length if part else 0)
-                    slots_map[row, column] = slot
             result.update(
                 ocr_rel_input_ids=rel_padded,
                 ocr_rel_attention_mask=(rel_padded != self.pad_id).long(),
                 ocr_rel_to_word_map=pad_sequence(rel_word_maps, batch_first=True, padding_value=-1),
                 ocr_rel_char_ids=torch.stack(rel_char_ids),
                 ocr_rel_char_mask=torch.stack(rel_char_masks),
-                ocr_lattice_index=index,
-                ocr_lattice_word_map=slots_map,
             )
-        if self.twc_separate:
-            view_padded = pad_sequence(view_ids, batch_first=True, padding_value=self.pad_id)
-            result.update(
-                twc_ocr_input_ids=view_padded,
-                twc_ocr_attention_mask=(view_padded != self.pad_id).long(),
-                twc_ocr_to_word_map=pad_sequence(view_maps, batch_first=True, padding_value=-1),
-                twc_ocr_char_ids=torch.stack(view_chars),
-                twc_ocr_char_mask=torch.stack(view_masks),
-            )
-        if lexical or answer_targets:
-            result["twc_text_ids"] = torch.stack(text_ids)
-        if answer_targets:
-            width = max(1, max(len(ids) for ids in answer_ids))
-            result["twc_answer_labels"] = torch.stack(answer_labels)
-            result["twc_answer_text_ids"] = torch.tensor(
-                [ids + [-1] * (width - len(ids)) for ids in answer_ids], dtype=torch.long
-            )
+        if self.twc_labels:
+            result.update(twc_o2r=torch.stack(o2r_all), twc_r2o=torch.stack(r2o_all))
         if self.return_ocr_words:
             result["ocr_words"] = words
         # Unlabelled inference batches do not create an all-ignored decoder loss.

@@ -37,12 +37,13 @@ from PIL import Image
 from transformers.modeling_outputs import BaseModelOutput
 
 from data.dataset import ViT5VQADataset
+from models.openvivqa_model import RELATED_FIELDS
 from training.common import build_collator, build_corrector, load_dataframes, load_model_and_tokenizer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 MODEL_KEYS = ["input_ids", "attention_mask", "pixel_values", "ocr_info", "ocr_input_ids",
               "ocr_attention_mask", "ocr_to_word_map", "ocr_char_ids", "ocr_char_mask", "ocr_word_mask",
-              *('ocr_rel_input_ids', 'ocr_rel_attention_mask', 'ocr_rel_to_word_map', 'ocr_rel_char_ids', 'ocr_rel_char_mask', 'ocr_lattice_index', 'ocr_lattice_word_map')]
+              *RELATED_FIELDS]
 CMAP = matplotlib.colormaps["YlOrRd"]
 
 
@@ -127,8 +128,8 @@ def draw_chips(ax, title, words, weights, vmax, changed=None, max_words=90):
 
 def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png):
     L_q = batch["input_ids"].size(1)
-    lattice = "ocr_lattice_word_map" in batch  # OCR block = lattice (original + changed corrections)
-    L_ocr = batch["ocr_lattice_index"].size(1) if lattice else batch["ocr_input_ids"].size(1)
+    related = "ocr_rel_input_ids" in batch  # OCR block = [original OCR | related OCR] (TWC)
+    L_ocr = batch["ocr_input_ids"].size(1) + (batch["ocr_rel_input_ids"].size(1) if related else 0)
     S = vec.shape[0]
     L_img = S - L_q - L_ocr
     total = float(vec.sum()) or 1.0
@@ -140,13 +141,16 @@ def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png)
     # ảnh
     img_vec = vec[L_q:L_q + L_img] if L_img > 0 else None
 
-    # OCR: token → từ (ocr_to_word_map), nửa đầu gốc, nửa sau bản sửa
+    # OCR: token → từ (ocr_to_word_map), bản gốc ở slot 0..W-1, bản related ở W..2W-1
     ocr_vec = vec[L_q + L_img:]
-    wmap = (batch["ocr_lattice_word_map"] if lattice else batch["ocr_to_word_map"])[0].tolist()
+    W_slots = batch["ocr_char_ids"].shape[1]
+    wmap = batch["ocr_to_word_map"][0].tolist()
+    if related:
+        wmap += [w + W_slots if w >= 0 else -1 for w in batch["ocr_rel_to_word_map"][0].tolist()]
     words = batch["ocr_words"][0]
     orig, rel = words["orig"], words["rel"]
     n = len(orig)  # entry OCR thật (không gồm PAD)
-    slots = batch["ocr_char_ids"].shape[1] * (2 if lattice else 1)  # W hoặc 2W (nửa related bắt đầu ở W)
+    slots = W_slots * (2 if related else 1)
     half = slots // 2 if rel is not None else slots
     w_att = np.zeros(slots)
     for t, wi in enumerate(wmap[:len(ocr_vec)]):
@@ -200,7 +204,7 @@ def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png)
         if j in top:
             ax_box.text(x1, max(y1 - 4, 0), orig[j], fontsize=8, color="black", va="bottom",
                         bbox=dict(boxstyle="round,pad=0.15", fc="white", ec=col, lw=1.5, alpha=0.9))
-    ax_box.set_title(f"Attention trên từ OCR (gốc + bản sửa, {100 * (mass['ocr_orig'] + mass['ocr_rel']):.1f}% tổng)",
+    ax_box.set_title(f"Attention trên từ OCR (gốc + related, {100 * (mass['ocr_orig'] + mass['ocr_rel']):.1f}% tổng)",
                      fontsize=10)
     ax_box.axis("off")
 
@@ -212,14 +216,14 @@ def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png)
     head.text(0, 0.62, f"Dự đoán: {short(answer)}    |    Đáp án: {short(str(gt)) if gt else '(không có)'}",
               fontsize=11, va="top",
               color="green" if gt and answer.strip().lower() == str(gt).strip().lower() else "black")
-    head.text(0, 0.0, "Tỷ lệ attention — câu hỏi {:.1f}% · ảnh {:.1f}% · OCR gốc {:.1f}% · OCR sửa {:.1f}%".format(
+    head.text(0, 0.0, "Tỷ lệ attention — câu hỏi {:.1f}% · ảnh {:.1f}% · OCR gốc {:.1f}% · OCR related {:.1f}%".format(
         100 * mass["question"], 100 * mass["image"], 100 * mass["ocr_orig"], 100 * mass["ocr_rel"]),
         fontsize=10, va="bottom", color="dimgray")
 
     vmax_txt = max([*q_w, *o_w, *r_w, 1e-9])
     draw_chips(fig.add_subplot(gs[2, 0]), "Câu hỏi", q_words, q_w, vmax_txt)
     draw_chips(fig.add_subplot(gs[2, 1]), "OCR gốc", o_words, o_w, vmax_txt)
-    draw_chips(fig.add_subplot(gs[3, :]), "OCR đã sửa (viền đỏ = từ bị sửa)" if rel is not None else "OCR đã sửa (OCR-Aug tắt)",
+    draw_chips(fig.add_subplot(gs[3, :]), "OCR related (viền đỏ = từ bị đổi)" if rel is not None else "OCR related (TWC tắt)",
                r_words, r_w, vmax_txt, changed=r_changed)
     sm = cm.ScalarMappable(norm=colors.Normalize(0, vmax_txt), cmap=CMAP)
     fig.colorbar(sm, ax=fig.axes, fraction=0.012, pad=0.01, label="attention (cùng thang cho câu hỏi và OCR)")
@@ -261,7 +265,7 @@ def main():
     else:
         df = df.sample(n=min(args.n, len(df)), random_state=args.seed)
 
-    corrector = build_corrector(model.config, frames["train"]) if model.config.ablation_use_ocr_aug else None
+    corrector = build_corrector(model.config, frames["train"]) if model.config.use_twc else None
     collator = build_collator(model, tokenizer, corrector, training=False)
     collator.return_ocr_words = True
     max_new = int(getattr(model.config, "generation_max_new_tokens", 56))

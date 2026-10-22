@@ -207,8 +207,7 @@ def main(args_list=None):
             "Audit fresh optimizer states; use model_name_or_path to load model weights."
         )
     set_seed(train_args.seed)
-    flags = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr",
-             "ablation_use_ocr_aug", "use_twc", "twc_weight")
+    flags = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "use_twc", "twc_weight")
     model, tokenizer = load_model_and_tokenizer(
         model_args.model_name_or_path, overrides={name: getattr(model_args, name) for name in flags}
     )
@@ -226,9 +225,9 @@ def main(args_list=None):
         # Seeded sample selection, then save the complete collated tensors/mappings.
         indices = torch.randperm(len(dataset))[:count].tolist()
         corrector = (
-            build_corrector(model.config, frames["train"]) if model.config.ablation_use_ocr_aug else None
+            build_corrector(model.config, frames["train"]) if model.config.use_twc else None
         )
-        collator = build_collator(model, tokenizer, corrector, training=True, seed=train_args.seed)
+        collator = build_collator(model, tokenizer, corrector, training=True)
         batch = collator([dataset[i] for i in indices])
         batch_file.parent.mkdir(parents=True, exist_ok=True)
         torch.save(batch, batch_file)

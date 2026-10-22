@@ -1,26 +1,17 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
-# ViSceT5 = CLIP không nhận câu hỏi + SceSpaVis + kênh sửa OCR (+ TWC khi use_twc=true).
+# Công tắc module (notebook ghi đè qua biến môi trường): QA-ViT, Consformer, TWC.
 ablation_use_image: true
-ablation_use_qaclip: false   # dùng qavit_mode ở dưới
-ablation_use_ocr: true
-ablation_use_ocr_aug: true
-ocr_related: "augment"       # một bản related (keep/correct/noise theo twc_adv_probability) dùng chung cho OCR-Aug, ConsFormer và TWC; cùng quy trình lúc train và test
-ocr_aug_mode: "lattice"      # ConsFormer chạy riêng bản gốc / bản related; mỗi từ related chèn ngay sau từ gốc trong input ViT5
-ocr_lattice_keep: "all"      # chèn đủ mọi từ của bản related
-# Công thức của run t1 (commit c6e2118, test EM 30.89): CLIP đóng băng hoàn toàn, RMSNorm,
-# TWC TWA nguyên bản (BCE trên đầu ra encoder, related = tăng cường TWA), batch 8x1, LS 0.1.
-qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
+ablation_use_qaclip: false   # QA-ViT: câu hỏi vào CLIP qua adapter học được · false = CLIP thường, không adapter
+ablation_use_ocr: true       # Consformer · false = OCR text-only
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor
+# TWC như TWA: bản OCR related (tăng cường TWA = OCR Augmentation) đứng sau bản gốc trong input
+# encoder, mỗi bản qua Consformer riêng; loss BCE hai chiều trên đầu ra encoder. Bản related có
+# ở cả train và test (cùng quy trình); chỉ khi train mới có loss.
 use_twc: false
 twc_weight: 1.0
-twc_temperature_init: 0.1    # τ khởi tạo (học được); notebook đặt bằng TWC_TAU
-twc_adv_probability: 0.6     # p của bản related: từ đúng → nhiễu ký tự, từ sai → sửa; notebook đặt bằng TWC_AUG_P
-twc_loss: "bce"             # TWA: sigmoid BCE hai chiều trên các ô != -1
-twc_feature: "fused"         # TWA: đặc trưng sau encoder (ViT5) tại vị trí OCR gốc / related
-twc_queue_size: 0           # TWA: chỉ so trong batch
-twc_mask_same_text: false   # TWA: nhãn như create_batch_labels
-twc_objective: "lexical"     # TWA: từ OCR gốc ↔ từ related (nhãn 1.0 giữ nguyên / 0.9 bị đổi, cùng chữ trong ảnh kế thừa)
+twc_adv_probability: 0.6     # TWA adv_pro: xác suất một từ của bản related bị đổi; notebook: TWC_AUG_P
+twc_temperature_init: 0.1    # τ khởi tạo (học được; TWA 0.07); notebook: TWC_TAU
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"
@@ -32,10 +23,10 @@ seed: 42
 num_train_epochs: 5
 per_device_train_batch_size: 8
 per_device_eval_batch_size: 8
-gradient_accumulation_steps: 1   # batch hiệu dụng 8 = 8 x 1 (t1)
-learning_rate: 0.00003                 # phần đã pretrain (ViT5, projection của adapter CLIP)
+gradient_accumulation_steps: 1   # notebook: BATCH_SIZE, GRAD_ACCUM
+learning_rate: 0.00003                 # phần đã pretrain (ViT5, projection của QA-ViT)
 new_module_learning_rate: 0.0001       # module khởi tạo ngẫu nhiên (ConsFormer, embedding OCR/ký tự): ~3x, như M4C/TWA
-scalar_learning_rate: 0.001            # tham số vô hướng (temperature TWC, gate adapter), không weight decay
+scalar_learning_rate: 0.001            # tham số vô hướng (temperature TWC, gate QA-ViT), không weight decay
 weight_decay: 0.1
 warmup_ratio: 0.1
 lr_scheduler_type: "cosine"

@@ -2,8 +2,8 @@
 
     python -m training.predict --ckpt_dir output/finetune --dataset ViTextVQA --split both
 
-The related OCR copy (if the model uses it) comes from the deterministic correction
-channel with the lexicon built from the TRAIN split, exactly as during evaluation.
+The related OCR copy (TWC models) is built by the same TWA procedure as in training,
+with the lexicon from the TRAIN split.
 Test answers are never read (the public test JSON may hold placeholders); dev EM/F1
 use the same normalisation as the validation metric during training.
 """
@@ -65,7 +65,7 @@ def main(args_list=None):
     model, tokenizer = load_model_and_tokenizer(args.ckpt_dir)
     model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
     frames = load_dataframes(args.dataset, args.data_dir)
-    corrector = build_corrector(model.config, frames["train"]) if model.config.ablation_use_ocr_aug else None
+    corrector = build_corrector(model.config, frames["train"]) if model.config.use_twc else None
     collator = build_collator(model, tokenizer, corrector, training=False)
     beams = args.num_beams or model.config.generation_num_beams
     max_new = args.max_new_tokens or model.config.generation_max_new_tokens

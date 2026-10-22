@@ -2,9 +2,9 @@
 
 STAGE=finetune (default) | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
-            RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG, USE_TWC,
-            TWC_WEIGHT, TWC_TEMPERATURE, TWC_ADV_PROBABILITY, QAVIT_MODE (off|no_question|question),
-            LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
+            RESUME_FROM_CHECKPOINT, PER_DEVICE_TRAIN_BATCH_SIZE, GRADIENT_ACCUMULATION_STEPS,
+            module switches ABLATION_USE_QACLIP (QA-ViT), ABLATION_USE_OCR (Consformer), USE_TWC,
+            TWC_ADV_PROBABILITY, TWC_TEMPERATURE, TWC_WEIGHT, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE.
 """
@@ -27,14 +27,13 @@ def training_arguments():
         "MODEL_NAME_OR_PATH": "model_name_or_path",
         "RESUME_FROM_CHECKPOINT": "resume_from_checkpoint",
         "RESUME_CHECKPOINT_ID": "resume_checkpoint_id",
+        "PER_DEVICE_TRAIN_BATCH_SIZE": "per_device_train_batch_size",
+        "GRADIENT_ACCUMULATION_STEPS": "gradient_accumulation_steps",
         "PER_DEVICE_EVAL_BATCH_SIZE": "per_device_eval_batch_size",
-        "ABLATION_USE_IMAGE": "ablation_use_image",
         "ABLATION_USE_QACLIP": "ablation_use_qaclip",
         "ABLATION_USE_OCR": "ablation_use_ocr",
-        "ABLATION_USE_OCR_AUG": "ablation_use_ocr_aug",
         "USE_TWC": "use_twc",
         "TWC_WEIGHT": "twc_weight",
-        "QAVIT_MODE": "qavit_mode",
         "TWC_TEMPERATURE": "twc_temperature_init",
         "TWC_ADV_PROBABILITY": "twc_adv_probability",
         "LEARNING_RATE": "learning_rate",
@@ -47,11 +46,6 @@ def training_arguments():
     for variable, flag in overrides.items():
         if _env(variable):
             arguments.extend([f"--{flag}", _env(variable)])
-    if not _env("QAVIT_MODE") and (_env("CLIP_LATE_ADAPTER") or _env("ABLATION_USE_QACLIP")):
-        # Notebooks from before QAVIT_MODE: derive the single QA-ViT switch so YAML cannot override it.
-        question = _env("ABLATION_USE_QACLIP").lower() in ("1", "true", "yes")
-        layers = _env("CLIP_LATE_ADAPTER").lower() in ("1", "true", "yes")
-        arguments.extend(["--qavit_mode", "question" if question else ("no_question" if layers else "off")])
     if _env("OUTPUT_DIR"):
         output_dir = _env("OUTPUT_DIR")
         arguments.extend(["--output_dir", output_dir, "--logging_dir", output_dir.rstrip("/") + "/logs"])
