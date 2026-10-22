@@ -127,8 +127,11 @@ def draw_chips(ax, title, words, weights, vmax, changed=None, max_words=90):
 
 def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png):
     L_q = batch["input_ids"].size(1)
-    lattice = "ocr_lattice_word_map" in batch  # OCR block = lattice (original + changed corrections)
+    lattice = "ocr_lattice_word_map" in batch
+    separate = "ocr_rel_input_ids" in batch and not lattice
     L_ocr = batch["ocr_lattice_index"].size(1) if lattice else batch["ocr_input_ids"].size(1)
+    if separate:
+        L_ocr += batch["ocr_rel_input_ids"].size(1)
     S = vec.shape[0]
     L_img = S - L_q - L_ocr
     total = float(vec.sum()) or 1.0
@@ -142,11 +145,15 @@ def visualize(qid, sample, batch, tokenizer, answer, gt, vec, enc_mask, out_png)
 
     # OCR: token → từ (ocr_to_word_map), nửa đầu gốc, nửa sau bản sửa
     ocr_vec = vec[L_q + L_img:]
-    wmap = (batch["ocr_lattice_word_map"] if lattice else batch["ocr_to_word_map"])[0].tolist()
+    wmap = batch["ocr_lattice_word_map"] if lattice else batch["ocr_to_word_map"]
+    if separate:
+        rel_map = batch["ocr_rel_to_word_map"]
+        wmap = torch.cat([wmap, torch.where(rel_map >= 0, rel_map + batch["ocr_char_ids"].shape[1], -1)], dim=1)
+    wmap = wmap[0].tolist()
     words = batch["ocr_words"][0]
     orig, rel = words["orig"], words["rel"]
     n = len(orig)  # entry OCR thật (không gồm PAD)
-    slots = batch["ocr_char_ids"].shape[1] * (2 if lattice else 1)  # W hoặc 2W (nửa related bắt đầu ở W)
+    slots = batch["ocr_char_ids"].shape[1] * (2 if lattice or separate else 1)
     half = slots // 2 if rel is not None else slots
     w_att = np.zeros(slots)
     for t, wi in enumerate(wmap[:len(ocr_vec)]):

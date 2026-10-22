@@ -34,7 +34,7 @@ class ModelArguments:
     )
     twc_weight: float = field(default=1.0, metadata={"help": "Weight of the TWC loss."})
     twc_loss: str = field(default="infonce", metadata={"help": "infonce (softmax, TWA paper) | bce (TWA code)."})
-    twc_feature: str = field(default="lexical", metadata={"help": "lexical (OCR text+chars) | fused (encoder output)."})
+    twc_feature: str = field(default="fused", metadata={"help": "lexical (OCR text+chars) | fused (encoder output)."})
     twc_queue_size: int = field(
         default=16384, metadata={"help": "Cross-batch memory of word features used as extra negatives; 0 = in-batch."}
     )
@@ -52,18 +52,18 @@ class ModelArguments:
         default=0.07, metadata={"help": "Initial (learnable) TWC temperature τ; 0.07 = CLIP/TWA."}
     )
     ocr_aug_mode: str = field(
-        default="concat", metadata={"help": "OCR Augmentation: concat (one ConsFormer pass over both halves) | "
+        default="separate", metadata={"help": "OCR Augmentation: separate (two ConsFormer passes, full concatenation) | concat (one pass) | "
                                             "lattice (separate passes, only changed words inserted after the original)."}
     )
     ocr_related: str = field(
-        default="correct", metadata={"help": "lattice: related copy = correct (deterministic) | augment "
+        default="correct", metadata={"help": "separate/lattice: related copy = correct (deterministic) | augment "
                                              "(TWA keep/correct/noise at twc_adv_probability), same at train and test."}
     )
     twc_view: str = field(
         default="shared", metadata={"help": "shared | separate (decoder reads the correction, TWC its own augmented copy)."}
     )
     twc_adv_probability: float = field(
-        default=0.35, metadata={"help": "TWA augmentation probability of each OCR word's related copy (TWA: 0.35)."}
+        default=0.4, metadata={"help": "TWA augmentation probability of each OCR word's related copy."}
     )
     qavit_mode: Optional[str] = field(
         default=None,

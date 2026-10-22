@@ -659,7 +659,7 @@ def test_answer_normalization_metrics():
 
 
 def test_training_entrypoint_save_resume_and_evaluation(
-    model, tokenizer, samples, tmp_path, monkeypatch
+    make_model, tokenizer, samples, tmp_path, monkeypatch
 ):
     from training import evaluate, finetune
 
@@ -674,7 +674,7 @@ def test_training_entrypoint_save_resume_and_evaluation(
         finetune,
         "load_model_and_tokenizer",
         lambda checkpoint, overrides=None: (
-            load_model_and_tokenizer(checkpoint, overrides) if checkpoint else (model, tokenizer)
+            load_model_and_tokenizer(checkpoint, overrides) if checkpoint else (make_model(**overrides), tokenizer)
         ),
     )
     monkeypatch.setattr(finetune, "hub_target", lambda: (None, None))
@@ -708,8 +708,6 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "rmsnorm",  # the fixture model; resume re-applies the architecture flags
         "--qavit_mode",
         "off",
-        "--ablation_use_ocr_aug",
-        "False",  # the fixture model has no OCR-Aug (and so no lattice type embedding)
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -917,7 +915,7 @@ def test_answer_twc_collator_targets(make_model, tokenizer, samples, corrector):
     assert collator.related_mode == "correct" and collator.twc_answer and not collator.twc_lexical
     batch = collator(samples)
     assert "twc_o2r" not in batch
-    labels, words = batch["twc_answer_labels"][0], batch["ocr_words"][0] if "ocr_words" in batch else None
+    labels = batch["twc_answer_labels"][0]
     texts = batch["ocr_info"][0]["texts"]
     slots = batch["ocr_char_ids"].shape[1]
     half = slots // 2
@@ -992,21 +990,23 @@ def test_clip_late_adapter_trains_without_question(make_model, tokenizer, sample
     assert not any(n.endswith("instruction_proj_gate") for n, _ in plain.named_parameters())
 
 
-def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
+def test_separate_encoder_recipe_from_yaml(make_model, tokenizer, samples, corrector):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
             "twc_related_train", "ocr_feature_norm")
     assert {k: cfg[k] for k in keys} == {
-        "twc_loss": "bce", "twc_feature": "lexical", "twc_queue_size": 0, "twc_mask_same_text": False,
+        "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
         "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
-    assert cfg["ocr_aug_mode"] == "lattice"
-    model = make_model(use_twc=True, ocr_aug_mode="lattice", **{k: cfg[k] for k in keys})
+    assert cfg["ocr_aug_mode"] == "separate" and cfg["use_twc"]
+    assert cfg["twc_adv_probability"] == 0.4 and cfg["twc_view"] == "shared"
+    model = make_model(use_twc=True, ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
+                       twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector, training=True)
-    assert collator.related_mode == "correct" and collator.lattice and collator.twc_lexical
+    assert collator.related_mode == "twa" and collator.separate and not collator.lattice and collator.twc_lexical
     outputs = model(**collator(samples))
     assert torch.isfinite(outputs["twc_loss"]) and "twc_answer_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
@@ -1182,3 +1182,104 @@ def test_lattice_augmented_related_is_identical_at_train_and_test(make_model, to
     assert torch.isclose(a["twc_o2r"][0].diagonal(), torch.tensor(0.9)).any()
     outputs = model(**a)
     assert torch.isfinite(outputs["twc_loss"])
+
+
+@pytest.mark.parametrize("full_ocr", [True, False])
+def test_separate_ocr_full_pair_uses_same_vit5_memory_for_twc(
+    make_model, tokenizer, samples, corrector, tmp_path, full_ocr
+):
+    model = make_model(
+        ablation_use_ocr=full_ocr, ocr_aug_mode="separate", ocr_related="augment",
+        use_twc=True, twc_objective="lexical", twc_feature="fused", twc_view="shared",
+        twc_loss="bce", twc_queue_size=0, twc_adv_probability=0.4,
+    )
+    model.eval()
+    # Change the subword count (cà phê -> trà); preserve the other entries.
+    def related(texts, probability, rng):
+        assert probability == 0.4
+        rel = ["trà" if text == "cà phê" else text for text in texts]
+        return rel, *corrector.pair_labels(texts, rel)
+
+    pair = [samples[0], {**samples[1], "ocr_path": None}]
+    with patch.object(corrector, "augment", side_effect=related):
+        batch = build_collator(model, tokenizer, corrector, training=True, seed=123)(pair)
+        evaluation = build_collator(model, tokenizer, corrector, training=False)(pair)
+    assert not any("lattice" in key or key.startswith("twc_ocr_") for key in batch)
+    for key in batch:
+        if key in evaluation and torch.is_tensor(batch[key]):
+            torch.testing.assert_close(batch[key], evaluation[key])
+    assert batch["ocr_input_ids"].shape[1] == 4
+    assert batch["ocr_rel_input_ids"].shape[1] == 3
+    W = batch["ocr_char_ids"].shape[1]
+    assert not torch.equal(batch["ocr_char_ids"], batch["ocr_rel_char_ids"])
+    mapping = torch.cat([
+        batch["ocr_to_word_map"],
+        torch.where(batch["ocr_rel_to_word_map"] >= 0, batch["ocr_rel_to_word_map"] + W, -1),
+    ], dim=1)
+    token_mask = torch.cat([batch["ocr_attention_mask"], batch["ocr_rel_attention_mask"]], dim=1)
+    assert mapping[0].tolist() == [0, 0, 1, 2, W, W + 1, W + 2]
+    assert mapping[1].tolist() == [0, -1, -1, -1, W, -1, -1]
+    branch_outputs = []
+    if full_ocr:
+        original_encode = model.ocr_encoder.forward
+        def capture_branch(*args, **kwargs):
+            result = original_encode(*args, **kwargs)
+            result[0].retain_grad()
+            branch_outputs.append(result[0])
+            return result
+        encoder_patch = patch.object(model.ocr_encoder, "forward", side_effect=capture_branch)
+    else:
+        encoder_patch = patch.object(model, "_encode_ocr", wraps=model._encode_ocr)
+    with encoder_patch as text_encoder, patch.object(model, "_twc", wraps=model._twc) as contrast, \
+            patch.object(model, "_fuse_ocr", wraps=model._fuse_ocr) as fusion, \
+            patch.object(model.vit5.encoder, "forward", wraps=model.vit5.encoder.forward) as encoder:
+        outputs = model(**batch)
+    assert text_encoder.call_count == 2 and encoder.call_count == 1
+    memory = outputs["encoder_outputs"].last_hidden_state
+    offset = batch["input_ids"].shape[1] + 4
+    assert memory.shape[1] == offset + 7  # every original AND related token, including unchanged words
+    torch.testing.assert_close(contrast.call_args.args[0], memory[:, offset:])
+    torch.testing.assert_close(contrast.call_args.args[1], mapping)
+    torch.testing.assert_close(contrast.call_args.args[2], token_mask)
+    assert not hasattr(model, "ocr_type_embedding")
+    if full_ocr:
+        assert fusion.call_count == 1  # concatenate text first, then add aligned OCR streams
+        paired_info, text, _, paired_map, chars, char_mask = fusion.call_args.args
+        assert text.shape[1] == 7
+        torch.testing.assert_close(paired_map, mapping)
+        torch.testing.assert_close(chars[:, :W], batch["ocr_char_ids"])
+        torch.testing.assert_close(chars[:, W:], batch["ocr_rel_char_ids"])
+        torch.testing.assert_close(char_mask[:, W:], batch["ocr_rel_char_mask"])
+        for key in ("boxes", "det_features", "rec_features"):
+            torch.testing.assert_close(paired_info[0][key][:W], batch["ocr_info"][0][key])
+            torch.testing.assert_close(paired_info[0][key][W:], batch["ocr_info"][0][key])
+    assert torch.isfinite(outputs["loss"]) and torch.isfinite(outputs["twc_loss"])
+    # TWC alone must backpropagate through ViT5 encoder and BOTH text passes, not the decoder.
+    outputs["twc_loss"].backward()
+    assert model.vit5.encoder.block[0].layer[0].SelfAttention.q.weight.grad.abs().sum() > 0
+    assert model.vit5.decoder.block[0].layer[0].SelfAttention.q.weight.grad is None
+    for branch in branch_outputs:
+        assert branch.grad is not None and torch.isfinite(branch.grad).all() and branch.grad.abs().sum() > 0
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    with torch.no_grad():
+        direct = model.generate(**evaluation)
+        encoded, mask, _ = model.encode(**{k: v for k, v in evaluation.items() if k != "labels"})
+        cached = model.generate(encoder_outputs=encoded, attention_mask=mask)
+    torch.testing.assert_close(direct, cached)
+    model.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
+    model.image_processor.save_pretrained(tmp_path / "image_processor")
+    restored, restored_tokenizer = load_model_and_tokenizer(str(tmp_path))
+    assert restored.config.ocr_aug_mode == "separate" and restored.config.twc_feature == "fused"
+    assert restored.config.twc_adv_probability == 0.4
+    restored.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(restored(**batch)["logits"], outputs["logits"])
+        torch.testing.assert_close(restored.generate(**evaluation), direct)
+
+
+def test_separate_ocr_rejects_a_different_twc_view():
+    with pytest.raises(ValueError, match="twc_feature=fused"):
+        OpenViVQAConfig(ocr_aug_mode="separate", use_twc=True, twc_feature="lexical")
+    with pytest.raises(ValueError, match="twc_view=shared"):
+        OpenViVQAConfig(ocr_aug_mode="separate", use_twc=True, twc_feature="fused", twc_view="separate")

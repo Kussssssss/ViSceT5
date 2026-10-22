@@ -35,6 +35,11 @@ L là số subword được pad trong batch; W là số entry được pad, khô
 pad đến cùng W. `labels` là token câu trả lời; padding = -100. Batch inference
 không có câu trả lời không tạo `labels`.
 
+Mode hiện hành `ocr_aug_mode=separate`: các tensor `ocr_rel_input_ids`,
+`ocr_rel_attention_mask`, `ocr_rel_to_word_map`, `ocr_rel_char_ids`, `ocr_rel_char_mask`
+giữ bản Related riêng, với độ dài subword độc lập. Box/det/rec chỉ lưu một lần;
+model nhân bản theo entry lúc fusion, offset mapping Related thêm W, giữ padding=-1.
+
 ## Luồng mô hình
 
 `models/openvivqa_model.py` chứa `OpenViVQAModel` và ba bước công khai:
@@ -52,6 +57,9 @@ Chi tiết đối chiếu QAClip với repo QA-ViT gốc, khởi tạo adapter v
 OCR Consformer encode chuỗi subword qua GroupAttention. Mapping subword→entry
 gắn box, det/rec và character features với từng subword. SemanticOCREmbedding
 hợp nhất các feature đó. Mọi nhánh đưa vào ViT5 phải có cùng chiều d_model.
+Origin và Related đi qua hai lượt ConsFormer độc lập (chung trọng số), rồi concat
+toàn bộ text feature trước khi cộng character/bbox/det/rec tương ứng. Không chọn
+token lattice, không type embedding; từ giữ nguyên vẫn xuất hiện ở cả hai bản.
 
 Encoder ViT5 nhận chuỗi ghép: question embeddings, CLIP patch tokens (nếu dùng ảnh),
 OCR features (bản gốc rồi bản related, mức subword). Attention mask được ghép
@@ -63,18 +71,22 @@ cùng thứ tự. Decoder ViT5 sinh câu trả lời theo cách autoregressive.
 + từ của câu hỏi/đáp án TẬP TRAIN. Hai cách sinh bản related (cùng độ dài, cùng thứ tự,
 dùng chung box/det/rec với entry gốc):
 
-- `correct` (xác định; eval/test, và train khi tắt TWC): giữ chuỗi đặc biệt/số/từ có
+- `correct` (xác định): giữ chuỗi đặc biệt/số/từ có
   trong từ điển; từ còn lại thay bằng ứng viên tốt nhất (dời dấu → đổi dấu → edit
   distance ≤ 2 cùng dạng không dấu hoặc phụ âm đầu). Hòa nhau phá bằng chính từ đó.
-- `augment` (TWA §3.4, chỉ khi train với TWC): với xác suất 0.35, từ trong từ điển bị
+- `augment` (mode hiện hành, cả train và test): với xác suất 0.4, từ trong từ điển bị
   sửa một ký tự (nhãn 0.9), từ ngoài từ điển được sửa (0.9); còn lại giữ (1.0); cùng chữ
   kế thừa nhãn, khác chữ = 0, PAD = -1. Ngẫu nhiên cố định theo mẫu (tái lập được).
 
-TWC (`OpenViVQAModel._twc`): pool đầu ra encoder về mức entry cho bản gốc và bản related,
-chuẩn hóa L2, logits = exp(τ)·cos trên mọi cặp trong batch (τ học được, kẹp [1/100, 100]);
+TWC (`OpenViVQAModel._twc`): cắt đầy đủ Origin và Related từ cùng output ViT5 encoder
+mà decoder VQA sử dụng, rồi pool về entry theo mapping hai bản và chuẩn hóa L2.
+Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ học được, kẹp [1/100,100];
 nhãn block-diagonal theo mẫu, cặp khác mẫu cùng (ảnh, chữ) kế thừa nhãn, hàng/cột PAD bỏ;
 loss = sigmoid-BCE hai chiều trên ô hợp lệ (như code TWA). Tổng loss = VQA + λ·TWC.
-`VQATrainer` dùng collator `twa` khi train và `correct` khi eval/predict.
+YAML bật `use_twc=true`, `twc_feature=fused`, `twc_view=shared`. TWC truyền gradient
+qua ViT5 encoder về cả hai lượt ConsFormer; decoder nhận gradient từ loss VQA.
+Collator sinh cùng bản Related lúc train và eval/predict; chỉ train tạo nhãn TWC.
+`concat` và `lattice` cũ được giữ cho checkpoint lịch sử, không dùng trong YAML/notebook.
 
 ## Module và ablation
 

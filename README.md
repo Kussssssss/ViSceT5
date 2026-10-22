@@ -4,7 +4,8 @@ Vietnamese scene-text visual question answering with ViT5, question-conditioned 
 and OCR Consformer features.
 
 The training pipeline learns answer generation directly from image/question/answer
-pairs. The loss is the decoder's cross-entropy over answer tokens (padding is ignored).
+pairs. The configured loss combines decoder cross-entropy over answer tokens
+(with label smoothing) and the optional TWC loss on ViT5 encoder outputs.
 
 ## Training
 
@@ -17,8 +18,8 @@ python training/finetune.py configs/finetune.yaml --smoke_test True
 
 Dataset configuration lives in `configs/data/`. Training prepares the configured
 dataset when its CSV cache is unavailable. Data preparation scripts, OCR features,
-and vocabulary utilities are retained; the VQA collator does not require auxiliary
-dictionary files.
+and vocabulary utilities are retained. OCR augmentation requires the term and
+Vietnamese dictionary files in `configs/data/`; the lexicon also uses training Q&A.
 
 With `model_name_or_path: null`, the model initializes its ViT5 and CLIP
 backbones from their configured weights. Use `--model_name_or_path PATH` to start
@@ -60,13 +61,28 @@ unlabelled.
 answer loss, and `generate()` can reuse that memory. `VQATrainer` performs evaluation
 generation from the same encoder result and writes `train_metrics.jsonl`.
 
-The fused sequence is `[question embeddings, CLIP patches, OCR features, mean patch token]`.
+The configured `ocr_aug_mode: separate` runs the complete Origin and Related
+sequences independently through the same ConsFormer. It concatenates their text
+features, then adds the aligned character/box/detection/recognition features.
+Characters are rebuilt for Related; box/det/rec are reused from the original region.
+The fused sequence is `[question embeddings, CLIP patches, all Origin features, all Related features]`.
+Unchanged Related entries are retained. There is no lattice selection or type embedding.
+Separate masks/maps handle different subword counts and padding in each half.
+
+TWC pools the Origin/Related slices of the **same ViT5 encoder output** used by
+the VQA decoder to OCR entry level, normalizes them, then computes the contrastive
+loss. The current YAML enables TWC with BCE, `twc_feature: fused`, `twc_view: shared`.
+`ocr_related: augment` uses keep/correct/character-noise with probability **0.4**
+at both train and test, reproducibly seeded per sample. No extra ViT5 pass is needed.
+Legacy `concat` and `lattice` modes remain available to load old experiments.
+To warm-start a lattice checkpoint into the new architecture, use a fresh optimizer;
+the old type embedding is unused. New checkpoints save their mode for evaluation.
 Visual Search, ConvNeXt, ROI crops and crop tokens have been removed.
 `models/modules/visual_search.py` is retained only as reference source and is not
 imported by the active model or module package. Image and OCR features enter the
 ViT5 encoder directly without modality projectors; their dimensions must match
 ViT5 `d_model`.
-`encode()` returns `(encoder_outputs, attention_mask)`. Image preprocessing follows
+`encode()` returns `(encoder_outputs, attention_mask, ocr_offset)`. Image preprocessing follows
 the CLIP backbone's image size, or the `image_size` override in the model config.
 
 ## Cloud runners
@@ -77,7 +93,8 @@ bash run_all.sh mock      # smoke run
 bash run_all_colab.sh     # Colab
 ```
 
-The notebook `notebooks/finetune_colab.ipynb` provides a direct VQA workflow.
+The notebook `notebooks/twc_colab.ipynb` provides a VQA/TWC workflow with the same
+separate OCR encoding, full concatenation and p=0.4.
 `run_pipeline.py` accepts environment overrides `TRAIN_CONFIG`, `NUM_TRAIN_EPOCHS`,
 `MODEL_NAME_OR_PATH`, `RESUME_FROM_CHECKPOINT`, `RESUME_CHECKPOINT_ID`, `MOCK_TEST`,
 and `SMOKE_*`. Setting both `HF_TOKEN` and `HF_REPO` enables checkpoint upload;

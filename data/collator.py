@@ -34,7 +34,7 @@ class ViT5VQADataCollator:
     related_mode:
       none    — OCR gốc (W entry).
       correct — thêm bản OCR đã sửa (kênh sửa OCR, xác định) → 2W entry.
-      twa     — thêm bản tăng cường kiểu TWA + nhãn TWC (chỉ dùng khi train với TWC).
+      twa     — bản tăng cường TWA; tạo nhãn TWC riêng khi training yêu cầu.
     Nửa related đứng sau nửa gốc và dùng chung box/det/rec của entry gốc tương ứng.
     """
 
@@ -63,8 +63,9 @@ class ViT5VQADataCollator:
         # lattice: the corrected copy goes in its own sequence (own ConsFormer pass); only the words
         # it changes are inserted after their original word (ocr_lattice_index / _word_map).
         self.lattice = related_mode != "none" and getattr(config, "ocr_aug_mode", "concat") == "lattice"
-        if self.lattice and self.twc_separate:
-            raise ValueError("ocr_aug_mode=lattice shares one related copy; no separate TWC view.")
+        self.separate = related_mode != "none" and config.ocr_aug_mode in ("separate", "lattice")
+        if self.separate and self.twc_separate:
+            raise ValueError("Separate OCR passes share one related copy; no separate TWC view.")
         self.seed = int(seed)
         self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
         if related_mode not in RELATED_MODES:
@@ -157,9 +158,9 @@ class ViT5VQADataCollator:
             return related, None, None
         # TWA: cố định theo mẫu (như seed tăng cường cố định của TWA) → tái lập được,
         # độc lập số worker DataLoader và PYTHONHASHSEED.
-        # Lattice: the same copy must come out at train and at test → a seed that does not depend
+        # Separate/lattice: the same copy must come out at train and at test → a seed that does not depend
         # on the training seed (TWA builds its related copy with a fixed seed for every split).
-        seed = 13 if self.lattice else self.seed
+        seed = 13 if self.separate else self.seed
         rng = random.Random(_stable_hash(f"{seed}|{sample['image_path']}|{sample['question']}"))
         return self.corrector.augment(texts, self.cfg.twc_adv_probability, rng)
 
@@ -233,22 +234,23 @@ class ViT5VQADataCollator:
                     view_maps.append(torch.tensor(mapping + v_map, dtype=torch.long))
                     view_chars.append(torch.cat([chars, v_chars]))
                     view_masks.append(torch.cat([mask, v_mask]))
-                if self.lattice:
+                if self.separate:
                     rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(related, word_count)
                     rel_token_ids.append(torch.tensor(rel_ids, dtype=torch.long))
                     rel_word_maps.append(torch.tensor(rel_map, dtype=torch.long))
                     rel_char_ids.append(rel_chars)
                     rel_char_masks.append(rel_mask)
-                    tokens_of = {}, {}
-                    for part, part_map in enumerate((mapping, rel_map)):
-                        for position, word in enumerate(part_map):
-                            tokens_of[part].setdefault(word, []).append(position)
-                    order = []  # (part, position, slot): original tokens, then the changed correction
-                    for index in range(count):
-                        order += [(0, t, index) for t in tokens_of[0].get(index, [])]
-                        if related[index] != item["texts"][index]:
-                            order += [(1, t, word_count + index) for t in tokens_of[1].get(index, [])]
-                    lattice_order.append(order)
+                    if self.lattice:
+                        tokens_of = {}, {}
+                        for part, part_map in enumerate((mapping, rel_map)):
+                            for position, word in enumerate(part_map):
+                                tokens_of[part].setdefault(word, []).append(position)
+                        order = []
+                        for index in range(count):
+                            order += [(0, t, index) for t in tokens_of[0].get(index, [])]
+                            if related[index] != item["texts"][index]:
+                                order += [(1, t, word_count + index) for t in tokens_of[1].get(index, [])]
+                        lattice_order.append(order)
                 else:
                     rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(
                         related, word_count, offset=word_count
@@ -320,8 +322,16 @@ class ViT5VQADataCollator:
                 twc_r2o=torch.stack(r2o_all),
                 twc_group_ids=torch.stack(groups),
             )
-        if self.lattice:
+        if self.separate:
             rel_padded = pad_sequence(rel_token_ids, batch_first=True, padding_value=self.pad_id)
+            result.update(
+                ocr_rel_input_ids=rel_padded,
+                ocr_rel_attention_mask=(rel_padded != self.pad_id).long(),
+                ocr_rel_to_word_map=pad_sequence(rel_word_maps, batch_first=True, padding_value=-1),
+                ocr_rel_char_ids=torch.stack(rel_char_ids),
+                ocr_rel_char_mask=torch.stack(rel_char_masks),
+            )
+        if self.lattice:
             original_length = ids.shape[1]
             width = max(1, max(len(order) for order in lattice_order))
             index = torch.full((len(batch), width), -1, dtype=torch.long)
@@ -331,11 +341,6 @@ class ViT5VQADataCollator:
                     index[row, column] = position + (original_length if part else 0)
                     slots_map[row, column] = slot
             result.update(
-                ocr_rel_input_ids=rel_padded,
-                ocr_rel_attention_mask=(rel_padded != self.pad_id).long(),
-                ocr_rel_to_word_map=pad_sequence(rel_word_maps, batch_first=True, padding_value=-1),
-                ocr_rel_char_ids=torch.stack(rel_char_ids),
-                ocr_rel_char_mask=torch.stack(rel_char_masks),
                 ocr_lattice_index=index,
                 ocr_lattice_word_map=slots_map,
             )
