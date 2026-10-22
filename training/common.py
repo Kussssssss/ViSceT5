@@ -118,7 +118,10 @@ def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
     lexical = twc and config.twc_objective in ("lexical", "both")
     answer = twc and config.twc_objective in ("answer", "both")
     mode = "none"
-    if config.ablation_use_ocr_aug:
+    if config.ablation_use_ocr_aug and config.ocr_aug_mode == "lattice":
+        # One related copy for OCR-Aug, ConsFormer and TWC, identical at train and test.
+        mode = "twa" if config.ocr_related == "augment" else "correct"
+    elif config.ablation_use_ocr_aug:
         mode = "twa" if (lexical and config.twc_related_train == "twa") else "correct"
     ocr_config = {
         "ocr_embedding": {
@@ -138,5 +141,6 @@ def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
         seed=seed,
         twc_lexical=lexical,
         twc_answer=answer,
-        twc_separate=mode == "twa" and config.twc_view == "separate",
+        twc_separate=(mode == "twa" and config.twc_view == "separate"
+                      and config.ocr_aug_mode != "lattice" and training),
     )

@@ -55,6 +55,10 @@ class ModelArguments:
         default="concat", metadata={"help": "OCR Augmentation: concat (one ConsFormer pass over both halves) | "
                                             "lattice (separate passes, only changed words inserted after the original)."}
     )
+    ocr_related: str = field(
+        default="correct", metadata={"help": "lattice: related copy = correct (deterministic) | augment "
+                                             "(TWA keep/correct/noise at twc_adv_probability), same at train and test."}
+    )
     twc_view: str = field(
         default="shared", metadata={"help": "shared | separate (decoder reads the correction, TWC its own augmented copy)."}
     )

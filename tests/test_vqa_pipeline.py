@@ -1160,3 +1160,25 @@ def test_lattice_validation():
     with pytest.raises(ValueError):
         OpenViVQAConfig(use_twc=True, ocr_aug_mode="lattice", twc_objective="lexical",
                         twc_feature="fused", twc_related_train="correct")
+
+
+def test_lattice_augmented_related_is_identical_at_train_and_test(make_model, tokenizer, samples):
+    # Shared related copy built by keep/correct/noise at p: same procedure (fixed per-sample seed) at
+    # train and at test, whatever the training seed; TWC labels come from the same copy.
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}),
+                             label_list=[0.9, 0.9])
+    model = make_model(ocr_aug_mode="lattice", ocr_related="augment", twc_adv_probability=1.0,
+                       use_twc=True, twc_objective="lexical", twc_loss="bce", twc_feature="lexical",
+                       twc_queue_size=0)
+    train = build_collator(model, tokenizer, corrector, training=True, seed=123)
+    test = build_collator(model, tokenizer, corrector, training=False)
+    assert train.related_mode == test.related_mode == "twa" and train.lattice and test.lattice
+    a, b = train(samples), test(samples)
+    for key in ("ocr_input_ids", "ocr_rel_input_ids", "ocr_lattice_index", "ocr_lattice_word_map"):
+        torch.testing.assert_close(a[key], b[key])
+    # "sữa" is a valid word → character noise at p = 1.0 → inserted after the original, label 0.9.
+    assert not torch.equal(a["ocr_rel_char_ids"], a["ocr_char_ids"])
+    assert (a["ocr_lattice_word_map"][0] >= a["ocr_char_ids"].shape[1]).any()
+    assert torch.isclose(a["twc_o2r"][0].diagonal(), torch.tensor(0.9)).any()
+    outputs = model(**a)
+    assert torch.isfinite(outputs["twc_loss"])
