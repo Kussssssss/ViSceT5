@@ -195,10 +195,14 @@ class OpenViVQAConfig(PretrainedConfig):
             raise ValueError("ocr_lattice_keep must be all|changed.")
         if self.ocr_related not in ("correct", "augment"):
             raise ValueError("ocr_related must be correct|augment.")
-        if self.use_twc and self.ablation_use_ocr_aug and self.ocr_aug_mode == "lattice" and (
-                twc_objective != "lexical" or twc_feature != "lexical"):
-            raise ValueError("With ocr_aug_mode=lattice, TWC contrasts the two separate passes: use "
-                             "twc_objective=lexical and twc_feature=lexical.")
+        if self.use_twc and self.ablation_use_ocr_aug and self.ocr_aug_mode == "lattice":
+            # fused (TWA: the multimodal encoder output at the original / related OCR positions)
+            # needs every related word in the encoder input; lexical = the two ConsFormer passes.
+            if twc_objective != "lexical":
+                raise ValueError("With ocr_aug_mode=lattice, use twc_objective=lexical.")
+            if twc_feature == "fused" and self.ocr_lattice_keep != "all":
+                raise ValueError("twc_feature=fused with a lattice needs ocr_lattice_keep=all "
+                                 "(every related word must be in the encoder input).")
         self.twc_view = str(twc_view)
         if self.twc_view not in ("shared", "separate"):
             raise ValueError("twc_view must be shared|separate.")

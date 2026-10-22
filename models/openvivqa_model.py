@@ -593,6 +593,12 @@ class OpenViVQAModel(PreTrainedModel):
                         twc_ocr_char_mask, ocr_word_mask, attention_mask, token_mask, image_features=image,
                     )
                     tokens = view.last_hidden_state[:, view_offset : view_offset + twc_ocr_input_ids.shape[1]]
+            elif lattice and self.config.twc_feature == "fused":
+                # TWA: encoder (ViT5) output at the lattice OCR positions; slots 0..W-1 original,
+                # W..2W-1 related (every word is present with ocr_lattice_keep=all).
+                tokens = encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_lattice_index.shape[1]]
+                word_map = ocr_lattice_word_map
+                token_mask = (ocr_lattice_index >= 0).long()
             elif lattice:
                 # Lexical features of the two separate passes: original slots 0..W-1, corrected W..2W-1.
                 words = ocr_char_ids.shape[1]

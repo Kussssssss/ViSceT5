@@ -998,13 +998,13 @@ def test_t1_recipe_from_yaml(make_model, tokenizer, samples, corrector):
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
             "twc_related_train", "ocr_feature_norm")
     assert {k: cfg[k] for k in keys} == {
-        "twc_loss": "bce", "twc_feature": "lexical", "twc_queue_size": 0, "twc_mask_same_text": False,
+        "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
         "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
     assert cfg["ocr_aug_mode"] == "lattice"
-    model = make_model(use_twc=True, ocr_aug_mode="lattice", **{k: cfg[k] for k in keys})
+    model = make_model(use_twc=True, ocr_aug_mode="lattice", ocr_lattice_keep="all", **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector, training=True)
     assert collator.related_mode == "correct" and collator.lattice and collator.twc_lexical
     outputs = model(**collator(samples))
@@ -1158,8 +1158,7 @@ def test_ocr_lattice(make_model, tokenizer):
 
 def test_lattice_validation():
     with pytest.raises(ValueError):
-        OpenViVQAConfig(use_twc=True, ocr_aug_mode="lattice", twc_objective="lexical",
-                        twc_feature="fused", twc_related_train="correct")
+        OpenViVQAConfig(use_twc=True, ocr_aug_mode="lattice", twc_objective="answer")
 
 
 def test_lattice_augmented_related_is_identical_at_train_and_test(make_model, tokenizer, samples):
@@ -1210,3 +1209,37 @@ def test_lattice_keep(make_model, tokenizer, keep):
     else:              # cà phê sua sữa'
         assert order == [0, 1, 2, W + 2]
     assert torch.isfinite(model(**batch)["loss"])
+
+
+
+def test_twc_fused_on_lattice_uses_encoder_output(make_model, tokenizer, samples):
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}),
+                             label_list=[0.9, 0.9])
+    model = make_model(ocr_aug_mode="lattice", ocr_lattice_keep="all", ocr_related="augment",
+                       twc_adv_probability=1.0, use_twc=True, twc_objective="lexical", twc_loss="bce",
+                       twc_feature="fused", twc_queue_size=0)
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    captured = {}
+    original = model._twc
+
+    def spy(tokens, word_map, token_mask, *rest):
+        captured.update(tokens=tokens, word_map=word_map)
+        return original(tokens, word_map, token_mask, *rest)
+
+    model._twc = spy
+    outputs = model(**batch)
+    encoded = outputs["encoder_outputs"].last_hidden_state
+    start = batch["input_ids"].shape[1] + (4 if model.config.ablation_use_image else 0)
+    torch.testing.assert_close(captured["tokens"], encoded[:, start: start + batch["ocr_lattice_index"].shape[1]])
+    assert torch.equal(captured["word_map"], batch["ocr_lattice_word_map"])
+    W = batch["ocr_char_ids"].shape[1]
+    real = len(batch["ocr_info"][0]["texts"])
+    slots = set(batch["ocr_lattice_word_map"][0].tolist()) - {-1}
+    assert set(range(real)) | set(range(W, W + real)) == slots  # every original and related word
+    assert torch.isfinite(outputs["twc_loss"])
+
+
+def test_twc_fused_lattice_needs_keep_all():
+    with pytest.raises(ValueError):
+        OpenViVQAConfig(use_twc=True, ocr_aug_mode="lattice", ocr_lattice_keep="changed",
+                        twc_objective="lexical", twc_feature="fused")
