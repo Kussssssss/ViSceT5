@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from transformers import HfArgumentParser, set_seed
 
 from configs.arguments import CustomTrainingArguments, DataArguments, ModelArguments
+from configs.model_config import OpenViVQAConfig
 from data.dataset import ViT5VQADataset
 from training.common import (
     PROJECT_ROOT,
@@ -25,7 +26,8 @@ from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
 
 ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "use_twc",
-                      "twc_weight", "twc_adv_probability", "twc_temperature_init", "ocr_feature_norm")
+                      "twc_weight", "twc_adv_probability", "twc_temperature_init", "ocr_feature_norm",
+                      "ocr_related_remove_bbox")
 
 
 def main(args_list=None):
@@ -84,6 +86,14 @@ def main(args_list=None):
             print(f"[HF] resume skipped ({type(error).__name__}: {error})")
 
     flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS}
+    if training_args.resume_from_checkpoint:
+        # Resuming must continue the same model: refuse a run trained with other settings.
+        trained = OpenViVQAConfig.from_pretrained(training_args.resume_from_checkpoint)
+        changed = {name: (getattr(trained, name), value) for name, value in flags.items()
+                   if getattr(trained, name) != value}
+        if changed:
+            raise ValueError(f"Checkpoint {training_args.resume_from_checkpoint} was trained with other "
+                             f"settings (trained, requested): {changed}. Use a new OUTPUT_DIR / HF repo.")
     checkpoint = model_args.model_name_or_path or training_args.resume_from_checkpoint
     model, tokenizer = load_model_and_tokenizer(checkpoint, overrides=flags)
     if training_args.should_log:

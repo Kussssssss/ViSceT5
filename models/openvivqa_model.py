@@ -186,7 +186,7 @@ class OpenViVQAModel(PreTrainedModel):
         features = self.char_embedding(ids) + self.char_position_embedding(positions)
         return self.ocr_char_layernorm((features * mask.unsqueeze(-1)).mean(dim=-2))
 
-    def _encode_ocr(self, info, ids, token_mask, word_map, char_ids, char_mask):
+    def _encode_ocr(self, info, ids, token_mask, word_map, char_ids, char_mask, remove_bbox=False):
         if not self.config.ablation_use_ocr:
             tokens = self.get_input_embeddings()(ids)
             features = self.ocr_lite_text_proj(self.ocr_lite_text_ln(tokens))
@@ -195,6 +195,8 @@ class OpenViVQAModel(PreTrainedModel):
         valid = (word_map >= 0) & token_mask.bool()
         indices = word_map.clamp(0, char_ids.shape[1] - 1)
         boxes = torch.stack([item["boxes"] for item in info]).to(ids.device, self.target_dtype)
+        if remove_bbox:  # TWA con_remove_bbox
+            boxes = torch.zeros_like(boxes)
         text_features, _ = self.ocr_encoder(ids, token_mask)
         results = []
         for batch_index, item in enumerate(info):
@@ -237,7 +239,8 @@ class OpenViVQAModel(PreTrainedModel):
         """Encode [question, image patches, original OCR, related OCR] once for loss and generation.
 
         As TWA: with TWC the related OCR copy follows the original one in the encoder input and
-        shares its box/det/rec; each copy is encoded on its own (separate Consformer passes,
+        shares its det/rec region features (TWA: fc7); its box is zero with ocr_related_remove_bbox
+        (TWA: con_remove_bbox). Each copy is encoded on its own (separate Consformer passes,
         shared weights), never as one concatenated sequence.
         image_features: precomputed (tokens, mask) to reuse CLIP.
 
@@ -264,7 +267,8 @@ class OpenViVQAModel(PreTrainedModel):
             if ocr_rel_attention_mask is None:
                 ocr_rel_attention_mask = (ocr_rel_input_ids != self.config.pad_token_id).long()
             pieces.append(self._encode_ocr(ocr_info, ocr_rel_input_ids, ocr_rel_attention_mask,
-                                           ocr_rel_to_word_map, ocr_rel_char_ids, ocr_rel_char_mask))
+                                           ocr_rel_to_word_map, ocr_rel_char_ids, ocr_rel_char_mask,
+                                           remove_bbox=self.config.ocr_related_remove_bbox))
             masks.append(ocr_rel_attention_mask)
         if any(piece.shape[-1] != self.d_model for piece in pieces):
             raise ValueError("All vision/OCR backbone output dimensions must match ViT5 d_model.")

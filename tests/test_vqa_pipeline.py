@@ -703,8 +703,15 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "True",
         "--dataloader_pin_memory",
         "False",
+        # The fixture model's settings: resume refuses a checkpoint trained with other ones.
         "--ocr_feature_norm",
-        "rmsnorm",  # the fixture model; resume re-applies the architecture flags
+        "rmsnorm",
+        "--twc_adv_probability",
+        "0.35",
+        "--twc_temperature_init",
+        "0.07",
+        "--ocr_related_remove_bbox",
+        "False",
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -718,6 +725,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         + ["--smoke_max_steps", "2", "--resume_from_checkpoint", str(checkpoint)]
     )
     assert resumed.state.global_step == 2
+    with pytest.raises(ValueError, match="other settings"):
+        finetune.main(arguments + ["--resume_from_checkpoint", str(checkpoint), "--ocr_related_remove_bbox", "True"])
     metrics = evaluate.main(
         ["--checkpoint", str(tmp_path), "--output_dir", str(tmp_path / "evaluate")]
     )
@@ -1011,3 +1020,27 @@ def test_unset_group_rates_give_stock_optimizer(make_model, tokenizer, samples, 
     gate = next(n for n in named if n.endswith("instruction_proj_gate"))
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     assert by_id[id(named[gate])]["weight_decay"] == 0.1
+
+
+@pytest.mark.parametrize("remove", [True, False])
+def test_related_copy_box_follows_twa_con_remove_bbox(make_model, tokenizer, samples, corrector, remove):
+    model = make_model(use_twc=True, ocr_related_remove_bbox=remove)
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    seen = []
+    with patch.object(model.semantic_ocr_embedding, "forward",
+                      side_effect=lambda info, tok, char: seen.append(info[0]) or
+                      type(model.semantic_ocr_embedding).forward(model.semantic_ocr_embedding, info, tok, char)):
+        outputs = model(**batch)
+    original, related = seen[:2], seen[2:]  # one call per sample and per copy
+    assert all(item["boxes"].abs().sum() > 0 for item in original)
+    assert all((item["boxes"].abs().sum() == 0) == remove for item in related)
+    for o, r in zip(original, related):  # region features stay shared, as TWA's fc7
+        assert torch.equal(o["det"], r["det"]) and torch.equal(o["rec"], r["rec"])
+    assert torch.isfinite(outputs["twc_loss"])
+
+
+def test_configs_before_remove_bbox_keep_the_shared_box():
+    assert OpenViVQAConfig(use_twc=True).ocr_related_remove_bbox is False
+    import yaml
+    cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
+    assert cfg["ocr_related_remove_bbox"] is True
