@@ -41,6 +41,9 @@ class ModelArguments:
     ocr_feature_norm: str = field(
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
     )
+    ocr_related_remove_bbox: bool = field(
+        default=True, metadata={"help": "TWA con_remove_bbox: zero box for the related OCR copy."}
+    )
 
 
 @dataclass

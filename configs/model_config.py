@@ -44,6 +44,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_label_list: Optional[List[float]] = None,
         twc_temperature_init: float = 0.07,
         ocr_feature_norm: Optional[str] = None,
+        ocr_related_remove_bbox: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -132,6 +133,10 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
+        # TWA con_remove_bbox: the related OCR copy gets a zero box (its region features stay
+        # shared, as TWA's fc7); otherwise the encoder pairs the two copies by layout alone.
+        # None (configs before this field) = False: the box was shared.
+        self.ocr_related_remove_bbox = bool(ocr_related_remove_bbox) if ocr_related_remove_bbox is not None else False
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
