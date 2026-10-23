@@ -72,8 +72,12 @@ Separate masks/maps handle different subword counts and padding in each half.
 TWC pools the Origin/Related slices of the **same ViT5 encoder output** used by
 the VQA decoder to OCR entry level, normalizes them, then computes the contrastive
 loss. The current YAML enables TWC with BCE, `twc_feature: fused`, `twc_view: shared`.
-`ocr_related: augment` uses keep/correct/character-noise with probability **0.4**
+`ocr_related: augment` uses keep/correct/character-noise with probability **0.6**
 at both train and test, reproducibly seeded per sample. No extra ViT5 pass is needed.
+Temperature is fixed at `tau=0.07`: it has no
+gradient and is excluded from the optimizer, including after loading a checkpoint.
+The configured temperature overrides any previously learned checkpoint scale.
+Use a fresh optimizer when warm-starting a run that learned temperature.
 Legacy `concat` and `lattice` modes remain available to load old experiments.
 To warm-start a lattice checkpoint into the new architecture, use a fresh optimizer;
 the old type embedding is unused. New checkpoints save their mode for evaluation.
@@ -94,7 +98,7 @@ bash run_all_colab.sh     # Colab
 ```
 
 The notebook `notebooks/twc_colab.ipynb` provides a VQA/TWC workflow with the same
-separate OCR encoding, full concatenation and p=0.4.
+separate OCR encoding, full concatenation and p=0.6.
 `run_pipeline.py` accepts environment overrides `TRAIN_CONFIG`, `NUM_TRAIN_EPOCHS`,
 `MODEL_NAME_OR_PATH`, `RESUME_FROM_CHECKPOINT`, `RESUME_CHECKPOINT_ID`, `MOCK_TEST`,
 and `SMOKE_*`. Setting both `HF_TOKEN` and `HF_REPO` enables checkpoint upload;

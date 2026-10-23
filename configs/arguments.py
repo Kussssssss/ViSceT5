@@ -49,7 +49,7 @@ class ModelArguments:
     )
     twc_answer_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-grounded TWC loss."})
     twc_temperature_init: float = field(
-        default=0.07, metadata={"help": "Initial (learnable) TWC temperature τ; 0.07 = CLIP/TWA."}
+        default=0.07, metadata={"help": "Fixed TWC temperature tau (legacy option name); not trainable."}
     )
     ocr_aug_mode: str = field(
         default="separate", metadata={"help": "OCR Augmentation: separate (two ConsFormer passes, full concatenation) | concat (one pass) | "
@@ -63,7 +63,7 @@ class ModelArguments:
         default="shared", metadata={"help": "shared | separate (decoder reads the correction, TWC its own augmented copy)."}
     )
     twc_adv_probability: float = field(
-        default=0.4, metadata={"help": "TWA augmentation probability of each OCR word's related copy."}
+        default=0.6, metadata={"help": "TWA augmentation probability of each OCR word's related copy."}
     )
     qavit_mode: Optional[str] = field(
         default=None,
@@ -122,7 +122,7 @@ class CustomTrainingArguments(Seq2SeqTrainingArguments):
     )
     scalar_learning_rate: Optional[float] = field(
         default=None,
-        metadata={"help": "LR of scalar parameters (TWC temperatures, CLIP adapter gates), without weight decay; "
+        metadata={"help": "LR of trainable scalar parameters (CLIP adapter gates), without weight decay; "
                           "None = learning_rate. Adam moves a scalar by ~lr per step, so 3e-5 barely moves it."},
     )
     smoke_test: bool = field(

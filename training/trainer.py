@@ -17,7 +17,7 @@ except ImportError:
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "twc_answer_query",
                "ocr_type_embedding")
-SCALARS = ("twc_logit_scale", "twc_answer_logit_scale", "instruction_proj_gate")
+SCALARS = ("instruction_proj_gate",)
 
 
 class VQATrainer(Seq2SeqTrainer):
@@ -61,7 +61,7 @@ class VQATrainer(Seq2SeqTrainer):
     def create_optimizer(self):
         """Three parameter groups (each keeps its own LR under the shared warmup/cosine schedule):
         pretrained (ViT5, CLIP adapter projections) = learning_rate; randomly initialised
-        modules = new_module_learning_rate; scalars (TWC temperatures, adapter gates) =
+        modules = new_module_learning_rate; trainable scalars (adapter gates) =
         scalar_learning_rate without weight decay (as CLIP's logit scale). Unset rates fall back
         to learning_rate (and scalars to the usual weight-decay rule), i.e. the stock optimizer."""
         if self.optimizer is not None:
@@ -169,7 +169,7 @@ class VQATrainer(Seq2SeqTrainer):
             logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
             base = getattr(self.model, "module", self.model)
             for name, key in (("twc_logit_scale", "twc_tau"), ("twc_answer_logit_scale", "twc_answer_tau")):
-                if hasattr(base, name):  # learned temperature τ = 1 / exp(clamped logit scale)
+                if hasattr(base, name):  # fixed temperature tau = 1 / exp(clamped logit scale)
                     theta = float(getattr(base, name).detach().clamp(-4.6052, 4.6052))
                     logs[key] = round(float(torch.exp(torch.tensor(-theta))), 4)
             self._twc_sum = {}

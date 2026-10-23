@@ -33,7 +33,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ablation_use_ocr_aug: bool = True,
         use_twc: bool = False,
         twc_weight: float = 1.0,
-        twc_adv_probability: float = 0.4,
+        twc_adv_probability: float = 0.6,
         twc_label_list: Optional[List[float]] = None,
         twc_loss: str = "infonce",
         twc_feature: str = "lexical",
@@ -157,8 +157,8 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
-        # Initial TWC temperature τ (learnable: logit scale = exp(θ), θ0 = log(1/τ)).
-        # 0.07 = CLIP/TWA; a larger τ starts with a softer similarity → logit mapping.
+        # Fixed TWC temperature tau: scale = exp(theta) = 1/tau, no optimizer updates.
+        # Keep the legacy field name for checkpoint/CLI compatibility.
         self.twc_temperature_init = float(twc_temperature_init)
         if not 0.01 <= self.twc_temperature_init <= 100:
             raise ValueError("twc_temperature_init must lie in [0.01, 100] (the logit-scale clamp).")
