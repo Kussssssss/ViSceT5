@@ -1002,7 +1002,8 @@ def test_separate_encoder_recipe_from_yaml(make_model, tokenizer, samples, corre
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
     assert cfg["ocr_aug_mode"] == "separate" and cfg["use_twc"]
-    assert cfg["twc_adv_probability"] == 0.4 and cfg["twc_view"] == "shared"
+    assert cfg["twc_adv_probability"] == 0.6 and cfg["twc_view"] == "shared"
+    assert cfg["twc_temperature_init"] == 0.07
     model = make_model(use_twc=True, ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
                        twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector, training=True)
@@ -1015,9 +1016,11 @@ def test_separate_encoder_recipe_from_yaml(make_model, tokenizer, samples, corre
 def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, corrector, tmp_path):
     import math
     model = make_model(use_twc=True, twc_objective="lexical", twc_loss="bce", twc_feature="fused",
-                       twc_queue_size=0, twc_related_train="twa", twc_temperature_init=0.4,
-                       twc_adv_probability=0.7, clip_late_adapter=True, ablation_use_qaclip=False)
-    assert math.isclose(float(model.twc_logit_scale.exp()), 2.5, rel_tol=1e-5)
+                       twc_queue_size=0, twc_related_train="twa", twc_temperature_init=0.07,
+                       twc_adv_probability=0.6, clip_late_adapter=True, ablation_use_qaclip=False)
+    assert math.isclose(float(model.twc_logit_scale.exp()), 1 / 0.07, rel_tol=1e-5)
+    assert not model.twc_logit_scale.requires_grad
+    fixed_scale = model.twc_logit_scale.detach().clone()
     args = CustomTrainingArguments(output_dir=str(tmp_path), learning_rate=3e-5, weight_decay=0.1,
                                    new_module_learning_rate=1e-4, scalar_learning_rate=1e-3,
                                    max_steps=1, per_device_train_batch_size=2, logging_steps=1,
@@ -1029,8 +1032,7 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     optimizer = trainer.create_optimizer()
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     named = dict(model.named_parameters())
-    assert by_id[id(named["twc_logit_scale"])]["lr"] == 1e-3
-    assert by_id[id(named["twc_logit_scale"])]["weight_decay"] == 0.0
+    assert id(named["twc_logit_scale"]) not in by_id
     gate = next(n for n in named if n.endswith("instruction_proj_gate"))
     assert by_id[id(named[gate])]["lr"] == 1e-3
     consformer = next(n for n in named if n.startswith("ocr_encoder.") and n.endswith("weight"))
@@ -1040,9 +1042,11 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     assert sum(len(g["params"]) for g in optimizer.param_groups) == sum(p.requires_grad for p in model.parameters())
     trainer.train()
     taus = [e["twc_tau"] for e in trainer.state.log_history if "twc_tau" in e]
-    assert taus and 0.3 < taus[0] < 0.5
+    assert taus and all(math.isclose(tau, 0.07, abs_tol=1e-6) for tau in taus)
+    torch.testing.assert_close(model.twc_logit_scale, fixed_scale, rtol=0, atol=0)
+    assert model.twc_logit_scale.grad is None
     batch = build_collator(model, tokenizer, corrector, training=True)
-    assert batch.cfg.twc_adv_probability == 0.7
+    assert batch.cfg.twc_adv_probability == 0.6
 
 
 @pytest.mark.parametrize("feature", ["fused", "lexical"])
@@ -1064,7 +1068,7 @@ def test_twc_separate_view(make_model, tokenizer, samples, feature):
     outputs = model(**batch)
     assert torch.isfinite(outputs["loss"]) and torch.isfinite(outputs["twc_loss"])
     (outputs["loss"] + outputs["twc_loss"]).backward()
-    assert model.twc_logit_scale.grad is not None
+    assert model.twc_logit_scale.grad is None and not model.twc_logit_scale.requires_grad
     model.eval()
     with torch.no_grad():
         model.generate(**{k: v for k, v in batch.items() if k != "labels"}, num_beams=1, max_new_tokens=2)
@@ -1283,3 +1287,39 @@ def test_separate_ocr_rejects_a_different_twc_view():
         OpenViVQAConfig(ocr_aug_mode="separate", use_twc=True, twc_feature="lexical")
     with pytest.raises(ValueError, match="twc_view=shared"):
         OpenViVQAConfig(ocr_aug_mode="separate", use_twc=True, twc_feature="fused", twc_view="separate")
+
+
+@pytest.mark.parametrize("objective", ["lexical", "answer", "both"])
+def test_fixed_temperature_survives_loading_a_previously_learned_scale(
+    make_model, tokenizer, samples, corrector, tmp_path, objective
+):
+    import math
+    model = make_model(
+        use_twc=True, twc_objective=objective, twc_feature="fused", twc_queue_size=0,
+        twc_temperature_init=0.07, twc_adv_probability=0.6,
+    )
+    names = [name for name in ("twc_logit_scale", "twc_answer_logit_scale") if hasattr(model, name)]
+    assert names
+    # Legacy checkpoint: trained scales no longer match the configured fixed temperature.
+    with torch.no_grad():
+        for name in names:
+            getattr(model, name).fill_(math.log(1 / 0.2))
+    model.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
+    restored, _ = load_model_and_tokenizer(str(tmp_path))
+    for name in names:
+        scale = getattr(restored, name)
+        assert not scale.requires_grad and scale.grad is None
+        assert math.isclose(float(scale.exp()), 1 / 0.07, rel_tol=1e-6)
+    args = CustomTrainingArguments(output_dir=str(tmp_path / "train"), use_cpu=True, report_to="none")
+    trainer = VQATrainer(model=restored, args=args)
+    optimizer_ids = {id(p) for group in trainer.create_optimizer().param_groups for p in group["params"]}
+    assert all(id(getattr(restored, name)) not in optimizer_ids for name in names)
+    batch = build_collator(restored, tokenizer, corrector, training=True)(samples)
+    output = restored(**batch)
+    terms = [value for key, value in output.items() if key in ("twc_loss", "twc_answer_loss")]
+    assert terms and all(torch.isfinite(value) for value in terms)
+    sum(terms).backward()
+    for name in names:
+        assert getattr(restored, name).grad is None
+    assert restored.vit5.encoder.block[0].layer[0].SelfAttention.q.weight.grad.abs().sum() > 0

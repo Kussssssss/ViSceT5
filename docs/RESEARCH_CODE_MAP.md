@@ -74,13 +74,13 @@ dùng chung box/det/rec với entry gốc):
 - `correct` (xác định): giữ chuỗi đặc biệt/số/từ có
   trong từ điển; từ còn lại thay bằng ứng viên tốt nhất (dời dấu → đổi dấu → edit
   distance ≤ 2 cùng dạng không dấu hoặc phụ âm đầu). Hòa nhau phá bằng chính từ đó.
-- `augment` (mode hiện hành, cả train và test): với xác suất 0.4, từ trong từ điển bị
+- `augment` (mode hiện hành, cả train và test): với xác suất 0.6, từ trong từ điển bị
   sửa một ký tự (nhãn 0.9), từ ngoài từ điển được sửa (0.9); còn lại giữ (1.0); cùng chữ
   kế thừa nhãn, khác chữ = 0, PAD = -1. Ngẫu nhiên cố định theo mẫu (tái lập được).
 
 TWC (`OpenViVQAModel._twc`): cắt đầy đủ Origin và Related từ cùng output ViT5 encoder
 mà decoder VQA sử dụng, rồi pool về entry theo mapping hai bản và chuẩn hóa L2.
-Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ học được, kẹp [1/100,100];
+Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ với τ=0.07 cố định, không gradient/optimizer;
 nhãn block-diagonal theo mẫu, cặp khác mẫu cùng (ảnh, chữ) kế thừa nhãn, hàng/cột PAD bỏ;
 loss = sigmoid-BCE hai chiều trên ô hợp lệ (như code TWA). Tổng loss = VQA + λ·TWC.
 YAML bật `use_twc=true`, `twc_feature=fused`, `twc_view=shared`. TWC truyền gradient
