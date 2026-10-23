@@ -12,7 +12,7 @@ use_twc: false
 twc_weight: 1.0
 twc_adv_probability: 0.6     # TWA adv_pro: xác suất một từ của bản related bị đổi; notebook: TWC_AUG_P
 twc_temperature_init: 0.1    # τ khởi tạo (học được; TWA 0.07); notebook: TWC_TAU
-ocr_related_remove_bbox: true   # TWA con_remove_bbox: bản related có box = 0 (det/rec vẫn dùng chung như fc7 của TWA)
+ocr_related_remove_layout: true   # bản related không có box, det, rec (con_remove_bbox của TWA + bỏ đặc trưng vùng)
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"

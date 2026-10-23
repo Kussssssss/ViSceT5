@@ -710,7 +710,7 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "0.35",
         "--twc_temperature_init",
         "0.07",
-        "--ocr_related_remove_bbox",
+        "--ocr_related_remove_layout",
         "False",
     ]
     trainer = finetune.main(arguments)
@@ -726,7 +726,7 @@ def test_training_entrypoint_save_resume_and_evaluation(
     )
     assert resumed.state.global_step == 2
     with pytest.raises(ValueError, match="other settings"):
-        finetune.main(arguments + ["--resume_from_checkpoint", str(checkpoint), "--ocr_related_remove_bbox", "True"])
+        finetune.main(arguments + ["--resume_from_checkpoint", str(checkpoint), "--ocr_related_remove_layout", "True"])
     metrics = evaluate.main(
         ["--checkpoint", str(tmp_path), "--output_dir", str(tmp_path / "evaluate")]
     )
@@ -1023,8 +1023,8 @@ def test_unset_group_rates_give_stock_optimizer(make_model, tokenizer, samples, 
 
 
 @pytest.mark.parametrize("remove", [True, False])
-def test_related_copy_box_follows_twa_con_remove_bbox(make_model, tokenizer, samples, corrector, remove):
-    model = make_model(use_twc=True, ocr_related_remove_bbox=remove)
+def test_related_copy_has_no_layout(make_model, tokenizer, samples, corrector, remove):
+    model = make_model(use_twc=True, ocr_related_remove_layout=remove)
     batch = build_collator(model, tokenizer, corrector, training=True)(samples)
     seen = []
     with patch.object(model.semantic_ocr_embedding, "forward",
@@ -1032,15 +1032,16 @@ def test_related_copy_box_follows_twa_con_remove_bbox(make_model, tokenizer, sam
                       type(model.semantic_ocr_embedding).forward(model.semantic_ocr_embedding, info, tok, char)):
         outputs = model(**batch)
     original, related = seen[:2], seen[2:]  # one call per sample and per copy
-    assert all(item["boxes"].abs().sum() > 0 for item in original)
-    assert all((item["boxes"].abs().sum() == 0) == remove for item in related)
-    for o, r in zip(original, related):  # region features stay shared, as TWA's fc7
-        assert torch.equal(o["det"], r["det"]) and torch.equal(o["rec"], r["rec"])
+    for key in ("boxes", "det", "rec"):
+        assert all(item[key].abs().sum() > 0 for item in original)
+        assert all((item[key].abs().sum() == 0) == remove for item in related)
+        if not remove:
+            assert all(torch.equal(o[key], r[key]) for o, r in zip(original, related))
     assert torch.isfinite(outputs["twc_loss"])
 
 
-def test_configs_before_remove_bbox_keep_the_shared_box():
-    assert OpenViVQAConfig(use_twc=True).ocr_related_remove_bbox is False
+def test_configs_before_remove_layout_keep_the_shared_layout():
+    assert OpenViVQAConfig(use_twc=True).ocr_related_remove_layout is False
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
-    assert cfg["ocr_related_remove_bbox"] is True
+    assert cfg["ocr_related_remove_layout"] is True
