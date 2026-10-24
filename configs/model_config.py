@@ -22,7 +22,7 @@ DEFAULT_CHAR_NUM = len(COMBINED_CHARS)
 
 # Switches of older code. Their "off" values match this code; any other value is refused.
 LEGACY_FIELDS = (
-    "clip_late_adapter", "ablation_use_ocr_aug", "ocr_aug_mode", "ocr_related", "ocr_lattice_keep",
+    "ablation_use_ocr_aug", "ocr_aug_mode", "ocr_related", "ocr_lattice_keep",
     "twc_loss", "twc_feature", "twc_queue_size", "twc_queue_start", "twc_mask_same_text",
     "twc_objective", "twc_answer_weight", "twc_related_train", "twc_view",
 )
@@ -44,6 +44,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_label_list: Optional[List[float]] = None,
         twc_temperature_init: float = 0.07,
         ocr_feature_norm: Optional[str] = None,
+        clip_late_adapter: Optional[bool] = None,
         ocr_related_remove_layout: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
@@ -94,20 +95,22 @@ class OpenViVQAConfig(PretrainedConfig):
         ):
             kwargs.pop(name, None)
         legacy = {name: kwargs.pop(name, None) for name in LEGACY_FIELDS}
-        if (legacy["clip_late_adapter"] or legacy["ablation_use_ocr_aug"]
-                or legacy["twc_objective"] in ("answer", "both")):
+        if legacy["ablation_use_ocr_aug"] or legacy["twc_objective"] in ("answer", "both"):
             raise ValueError(
-                "This configuration comes from older code (QA-ViT without question, OCR Augmentation "
-                "as a separate module, or answer TWC), which this code no longer builds; "
-                "use commit bf74388 for it."
+                "This configuration comes from older code (OCR Augmentation as a separate module, "
+                "or answer TWC), which this code no longer builds; use commit bf74388 for it."
             )
         super().__init__(**kwargs)
 
         self.vit5_name = vit5_name
         self.clip_vision_name = clip_vision_name
-        # QA-ViT: the question goes into the late CLIP layers through the learned adapter.
-        # False = plain frozen CLIP, no question and no adapter.
+        # QA-ViT (set together by qavit_mode in the training arguments):
+        #   ablation_use_qaclip = the question goes into the late CLIP layers through the adapter;
+        #   clip_late_adapter   = those layers and their gated adapter exist WITHOUT the question
+        #                         (pre-refactor code with QA-ViT "off"); None (older configs) = False.
+        # Both False = plain frozen CLIP, no adapter.
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
+        self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         # Consformer (SceSpaVis): ConsFormer + characters + box/det/rec. False = text-only OCR.
         self.ablation_use_ocr = bool(ablation_use_ocr)
         # Bỏ ảnh: CLIP không được dựng, encoder chỉ nhận [câu hỏi, OCR].
@@ -124,10 +127,11 @@ class OpenViVQAConfig(PretrainedConfig):
             raise ValueError("twc_adv_probability must lie in [0, 1].")
         # TWA label_list: [o2r, r2o] of a changed word; an unchanged word = 1.0.
         self.twc_label_list = list(twc_label_list) if twc_label_list is not None else [0.9, 0.9]
-        # Initial TWC temperature τ (learnable: logit scale = exp(θ), θ0 = log(1/τ)); TWA: 0.07.
+        # FIXED TWC temperature τ (logit scale = 1/τ, not trained); TWA starts from 0.07.
+        # The field keeps its old name so checkpoints and arguments stay compatible.
         self.twc_temperature_init = float(twc_temperature_init)
-        if self.twc_temperature_init <= 0:
-            raise ValueError("twc_temperature_init must be positive.")
+        if not 0.01 <= self.twc_temperature_init <= 100:
+            raise ValueError("twc_temperature_init must lie in [0.01, 100].")
         # Norm of each OCR stream (box/det/rec/token/char) in SemanticOCREmbedding.
         # layernorm = pre-refactor code; None (configs saved before the field) = rmsnorm.
         self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")

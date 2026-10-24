@@ -1,13 +1,11 @@
-"""Related OCR copy for TWC, as TWA (Jin et al., MM'22) findRelatedOCR_adr.
+"""Related OCR copy for TWC (TWA augmentation, Jin et al., MM'22 §3.4).
 
-For every OCR word, a random number r ~ U(0, 1) (one draw per word, TWA order); if r < p and
-the word has more than one character:
-* in-lexicon word → one character edit (create_adv_word_adr: insert if shorter than 4
-  characters, else delete or replace with probability 1/2); labels o2r/r2o = label_list[1]/[0];
-* other word → nearest lexicon word (find_related_word; here the Vietnamese lexicon search
-  below); labels label_list[0]/[1], or 1.0 when no candidate changes the word.
-Untouched words get 1.0. Words with the same text inherit each other's label; different
-texts are negatives (0.0).
+For every OCR word (numbers, special strings and words with a digit at either end are kept):
+with probability p an in-lexicon word gets one character edit (insert if shorter than 4
+characters, else delete or replace, never the first character; labels o2r/r2o =
+label_list[1]/[0]) and an out-of-lexicon word is corrected to its best lexicon candidate
+(labels label_list[0]/[1]); untouched words get 1.0. Words with the same text inherit each
+other's label; different texts are negatives (0.0).
 """
 
 import json
@@ -21,6 +19,9 @@ from data.vocab import COMBINED_CHARS, _normalize_text, _remove_vietnamese_accen
 
 _TONE_MARKS = {"́": 1, "̀": 2, "̣": 3, "̉": 4, "̃": 5}
 _TONE_BY_ID = {tone: mark for mark, tone in _TONE_MARKS.items()}
+_SPECIAL = re.compile(
+    r"^(http|https|www|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|\d+[./-]\d+|\d{3,}|[a-zA-Z]+\d+|\d+[a-zA-Z]+)"
+)
 _CONSONANTS = ["ngh", "ng", "gh", "gi", "kh", "nh", "ph", "qu", "th", "tr", "ch",
                "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "x"]
 _WORD = re.compile(r"[\w]+")
@@ -56,6 +57,11 @@ def _is_vowel(char):
 
 def _initial_consonant(word):
     return next((c for c in _CONSONANTS if word.startswith(c)), "")
+
+
+def _keep_as_is(word):
+    """Special strings, numbers and words with a digit at either end are never edited."""
+    return bool(_SPECIAL.search(word)) or word.isdigit() or word[0].isdigit() or word[-1].isdigit()
 
 
 class OCRCorrector:
@@ -153,31 +159,36 @@ class OCRCorrector:
 
     # ------------------------------------------------------------- related copy
     def _char_noise(self, word, rng):
-        """TWA create_adv_word_adr: same branches, positions and order of random draws."""
         chars = list(word)
         if len(chars) < 4:
-            char = rng.choice(self.noise_chars)
-            chars.insert(rng.randint(0, len(chars) - 1), char)
-        elif rng.random() < 0.5:
-            del chars[rng.randint(0, len(chars) - 1)]
+            position = rng.randint(1, len(chars))
+            chars.insert(position, rng.choice(self.noise_chars))
         else:
-            char = rng.choice(self.noise_chars)
-            chars[rng.randint(0, len(chars) - 1)] = char
+            position = rng.randint(1, len(chars) - 1)
+            if rng.random() < 0.5:
+                del chars[position]
+            else:
+                chars[position] = rng.choice(self.noise_chars)
         return "".join(chars)
 
     def augment(self, words, probability, rng):
-        """TWA findRelatedOCR_adr → (related, o2r, r2o) with n×n label lists (no padding)."""
+        """TWA augmentation → (related, o2r, r2o) with n×n label lists (no padding)."""
         related, diag_o2r, diag_r2o = [], [], []
+        semi_o2r, semi_r2o = self.label_list[1], self.label_list[0]
         for word in words:
-            rel, label = word, (1.0, 1.0)
-            if rng.random() < probability and len(word) > 1:
-                if word in self.vocab:
-                    rel = self._char_noise(word, rng)
-                    label = (self.label_list[1], self.label_list[0])
-                else:
-                    rel = self.find_related(word) or word
-                    if rel != word:
-                        label = (self.label_list[0], self.label_list[1])
+            label = (1.0, 1.0)
+            if _keep_as_is(word):
+                rel = word
+            elif word in self.vocab:
+                rel = word
+                if rng.random() < probability and len(word) > 1:
+                    rel, label = self._char_noise(word, rng), (semi_o2r, semi_r2o)  # NOISE
+            else:
+                rel = word
+                if rng.random() < probability:
+                    found = self.find_related(word)
+                    if found:
+                        rel, label = found, (self.label_list[0], self.label_list[1])  # CORRECT
             related.append(rel)
             diag_o2r.append(label[0])
             diag_r2o.append(label[1])

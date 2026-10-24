@@ -25,9 +25,10 @@ from training.trainer import VQATrainer
 from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
 
-ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "use_twc",
+ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "clip_late_adapter", "ablation_use_ocr", "use_twc",
                       "twc_weight", "twc_adv_probability", "twc_temperature_init", "ocr_feature_norm",
                       "ocr_related_remove_layout")
+QAVIT_MODES = ("off", "no_question", "question")
 
 
 def main(args_list=None):
@@ -85,15 +86,22 @@ def main(args_list=None):
         except Exception as error:
             print(f"[HF] resume skipped ({type(error).__name__}: {error})")
 
-    flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS}
+    flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS if hasattr(model_args, name)}
+    # One QA-ViT switch → its two config fields (question fed / layers without question).
+    mode = model_args.qavit_mode or ("question" if model_args.ablation_use_qaclip else "off")
+    if mode not in QAVIT_MODES:
+        raise ValueError(f"qavit_mode must be one of {QAVIT_MODES}, got {mode!r}.")
+    flags["ablation_use_qaclip"] = mode == "question"
+    flags["clip_late_adapter"] = mode == "no_question"
     if training_args.resume_from_checkpoint:
-        # Resuming must continue the same model: refuse a run trained with other settings.
+        # Resuming continues the SAME model: keep the settings it was trained with, even where
+        # the current YAML defaults differ (e.g. a field added after the run started).
         trained = OpenViVQAConfig.from_pretrained(training_args.resume_from_checkpoint)
-        changed = {name: (getattr(trained, name), value) for name, value in flags.items()
-                   if getattr(trained, name) != value}
-        if changed:
-            raise ValueError(f"Checkpoint {training_args.resume_from_checkpoint} was trained with other "
-                             f"settings (trained, requested): {changed}. Use a new OUTPUT_DIR / HF repo.")
+        for name, value in list(flags.items()):
+            if getattr(trained, name) != value:
+                print(f"[resume] {name}: keeping the checkpoint's {getattr(trained, name)!r} "
+                      f"(requested {value!r})")
+                flags[name] = getattr(trained, name)
     checkpoint = model_args.model_name_or_path or training_args.resume_from_checkpoint
     model, tokenizer = load_model_and_tokenizer(checkpoint, overrides=flags)
     if training_args.should_log:

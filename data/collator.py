@@ -1,5 +1,6 @@
 """Build deterministic image/question/OCR batches for answer generation."""
 
+import hashlib
 import random
 import re
 
@@ -16,8 +17,13 @@ from data.vocab import (
     _normalize_text,
 )
 
-# TWA builds the related copy of every sample with random.Random(13) (findRelatedOCR*).
+# The related copy of a sample is fixed by (13, image, question): the same at train and test,
+# independent of the DataLoader workers and PYTHONHASHSEED.
 TWA_SEED = 13
+
+
+def _stable_hash(text):
+    return int.from_bytes(hashlib.md5(text.encode("utf-8")).digest()[:8], "little")
 
 
 class ViT5VQADataCollator:
@@ -25,7 +31,8 @@ class ViT5VQADataCollator:
 
     related: also build the related OCR copy (TWA augmentation, same procedure at train and
     test) as its own sequence ocr_rel_* (word slots 0..W-1, sharing box/det/rec with the
-    original word). twc_labels: emit the TWC labels twc_o2r / twc_r2o (training).
+    original word). twc_labels: emit the TWC labels twc_o2r / twc_r2o and the (image, text)
+    groups twc_group_ids (training).
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
@@ -118,13 +125,14 @@ class ViT5VQADataCollator:
         info.update(texts=texts, width=raw["width"], height=raw["height"], placeholder=not keep)
         return info
 
-    def _related(self, item):
-        """Related copy + TWC labels (TWA findRelatedOCR_adr). The <unk> placeholder of an image
-        without OCR is never edited and gets no labels (all -1, as TWA's PAD)."""
+    def _related(self, item, sample):
+        """Related copy + TWC labels. The <unk> placeholder of an image without OCR is never
+        edited and gets no labels (all -1, as TWA's PAD)."""
         texts = item["texts"]
         if item["placeholder"]:
             return list(texts), None, None
-        return self.corrector.augment(texts, self.cfg.twc_adv_probability, random.Random(TWA_SEED))
+        rng = random.Random(_stable_hash(f"{TWA_SEED}|{sample['image_path']}|{sample['question']}"))
+        return self.corrector.augment(texts, self.cfg.twc_adv_probability, rng)
 
     def _encode_ocr_text(self, texts, word_count):
         char_ids = torch.zeros(word_count, self.char_max_num, dtype=torch.long)
@@ -170,8 +178,8 @@ class ViT5VQADataCollator:
         )
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
         rel_token_ids, rel_word_maps, rel_char_ids, rel_char_masks = [], [], [], []
-        o2r_all, r2o_all, words = [], [], []
-        for item in info:
+        o2r_all, r2o_all, groups, words = [], [], [], []
+        for sample, item in zip(batch, info):
             count = len(item["texts"])
             ids, mapping, chars, mask = self._encode_ocr_text(item["texts"], word_count)
             for key in ("boxes", "det_features", "rec_features"):
@@ -180,7 +188,7 @@ class ViT5VQADataCollator:
                 )
             related = None
             if self.related:
-                related, o2r, r2o = self._related(item)
+                related, o2r, r2o = self._related(item, sample)
                 rel_ids, rel_map, rel_chars, rel_mask = self._encode_ocr_text(related, word_count)
                 rel_token_ids.append(torch.tensor(rel_ids, dtype=torch.long))
                 rel_word_maps.append(torch.tensor(rel_map, dtype=torch.long))
@@ -190,11 +198,17 @@ class ViT5VQADataCollator:
                     # PAD và placeholder <unk> = -1 (không phải mẫu tương phản), như TWA.
                     full_o2r = torch.full((word_count, word_count), -1.0)
                     full_r2o = torch.full((word_count, word_count), -1.0)
+                    group = torch.full((word_count,), -1, dtype=torch.long)
                     if o2r is not None:
                         full_o2r[:count, :count] = torch.tensor(o2r)
                         full_r2o[:count, :count] = torch.tensor(r2o)
+                        group[:count] = torch.tensor(
+                            [_stable_hash(f"{sample['image_path']}|{text}") & 0x3FFFFFFF
+                             for text in item["texts"]]
+                        )
                     o2r_all.append(full_o2r)
                     r2o_all.append(full_r2o)
+                    groups.append(group)
             token_ids.append(torch.tensor(ids, dtype=torch.long))
             word_maps.append(torch.tensor(mapping, dtype=torch.long))
             char_ids.append(chars)
@@ -228,7 +242,8 @@ class ViT5VQADataCollator:
                 ocr_rel_char_mask=torch.stack(rel_char_masks),
             )
         if self.twc_labels:
-            result.update(twc_o2r=torch.stack(o2r_all), twc_r2o=torch.stack(r2o_all))
+            result.update(twc_o2r=torch.stack(o2r_all), twc_r2o=torch.stack(r2o_all),
+                          twc_group_ids=torch.stack(groups))
         if self.return_ocr_words:
             result["ocr_words"] = words
         # Unlabelled inference batches do not create an all-ignored decoder loss.

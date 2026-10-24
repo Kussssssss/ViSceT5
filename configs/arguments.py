@@ -18,8 +18,14 @@ class ModelArguments:
     )
     # Module switches
     ablation_use_qaclip: bool = field(
-        default=False, metadata={"help": "QA-ViT: the question enters the late CLIP layers through the "
-                                         "learned adapter. False = plain frozen CLIP, no adapter."}
+        default=False, metadata={"help": "QA-ViT with the question (use qavit_mode)."}
+    )
+    qavit_mode: Optional[str] = field(
+        default=None,
+        metadata={"help": "QA-ViT in the late 6 CLIP layers (CLIP itself stays frozen): off = plain CLIP; "
+                          "no_question = QA-ViT layers with an empty question, only the gated adapter "
+                          "learns (pre-refactor code); question = full QA-ViT. "
+                          "None = from ablation_use_qaclip (question / off)."},
     )
     ablation_use_ocr: bool = field(
         default=True, metadata={"help": "Consformer (SceSpaVis) OCR representation. False = text-only OCR."}
@@ -36,7 +42,7 @@ class ModelArguments:
         default=0.35, metadata={"help": "TWA adv_pro: probability that a word of the related copy is changed."}
     )
     twc_temperature_init: float = field(
-        default=0.07, metadata={"help": "Initial (learnable) TWC temperature τ; 0.07 = CLIP/TWA."}
+        default=0.07, metadata={"help": "Fixed TWC temperature τ (not trained)."}
     )
     ocr_feature_norm: str = field(
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}

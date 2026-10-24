@@ -29,7 +29,7 @@ from transformers import (
 from configs.arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from configs.model_config import OpenViVQAConfig
 from data.dataset import ViT5VQADataset
-from data.collator import TWA_SEED
+from data.collator import TWA_SEED, _stable_hash
 from data.ocr_correction import OCRCorrector
 from models.modules.qa_clip import QACLIPEncoder
 from models.openvivqa_model import OpenViVQAModel
@@ -703,15 +703,6 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "True",
         "--dataloader_pin_memory",
         "False",
-        # The fixture model's settings: resume refuses a checkpoint trained with other ones.
-        "--ocr_feature_norm",
-        "rmsnorm",
-        "--twc_adv_probability",
-        "0.35",
-        "--twc_temperature_init",
-        "0.07",
-        "--ocr_related_remove_layout",
-        "False",
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -725,8 +716,10 @@ def test_training_entrypoint_save_resume_and_evaluation(
         + ["--smoke_max_steps", "2", "--resume_from_checkpoint", str(checkpoint)]
     )
     assert resumed.state.global_step == 2
-    with pytest.raises(ValueError, match="other settings"):
-        finetune.main(arguments + ["--resume_from_checkpoint", str(checkpoint), "--ocr_related_remove_layout", "True"])
+    # The YAML asks for settings the fixture checkpoint was not trained with (QA-ViT no_question,
+    # LayerNorm OCR, related copy without layout, ...): resume keeps the checkpoint's own.
+    for name in ("clip_late_adapter", "ocr_feature_norm", "ocr_related_remove_layout", "twc_adv_probability"):
+        assert getattr(resumed.model.config, name) == getattr(model.config, name), name
     metrics = evaluate.main(
         ["--checkpoint", str(tmp_path), "--output_dir", str(tmp_path / "evaluate")]
     )
@@ -754,41 +747,49 @@ def test_pipeline_arguments_do_not_modify_process_argv(monkeypatch):
 def test_notebook_switches_reach_the_training_arguments(monkeypatch):
     from run_pipeline import training_arguments
 
-    env = {"ABLATION_USE_QACLIP": "true", "ABLATION_USE_OCR": "false", "USE_TWC": "true",
-           "TWC_ADV_PROBABILITY": "0.6", "TWC_TEMPERATURE": "0.1",
+    env = {"QAVIT_MODE": "no_question", "ABLATION_USE_OCR": "false", "USE_TWC": "true",
+           "TWC_ADV_PROBABILITY": "0.6", "TWC_TEMPERATURE": "0.07",
            "PER_DEVICE_TRAIN_BATCH_SIZE": "4", "GRADIENT_ACCUMULATION_STEPS": "2",
            # Switches of older notebooks are not read any more.
-           "ABLATION_USE_OCR_AUG": "true", "QAVIT_MODE": "no_question", "CLIP_LATE_ADAPTER": "true",
+           "ABLATION_USE_OCR_AUG": "true", "CLIP_LATE_ADAPTER": "true",
            "TWC_FEATURE": "lexical", "OCR_AUG_MODE": "lattice"}
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     arguments = training_arguments()
     value = lambda flag: arguments[arguments.index(flag) + 1]
-    assert value("--ablation_use_qaclip") == "true" and value("--ablation_use_ocr") == "false"
+    assert value("--qavit_mode") == "no_question" and value("--ablation_use_ocr") == "false"
     assert value("--use_twc") == "true" and value("--twc_adv_probability") == "0.6"
-    assert value("--twc_temperature_init") == "0.1"
+    assert value("--twc_temperature_init") == "0.07"
     assert value("--per_device_train_batch_size") == "4" and value("--gradient_accumulation_steps") == "2"
-    for flag in ("--ablation_use_ocr_aug", "--qavit_mode", "--clip_late_adapter", "--twc_feature",
-                 "--ocr_aug_mode"):
+    for flag in ("--ablation_use_ocr_aug", "--clip_late_adapter", "--twc_feature", "--ocr_aug_mode"):
         assert flag not in arguments
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
     model_args, _, train_args = parse_args_with_yaml_and_cli(parser, arguments)
-    assert model_args.ablation_use_qaclip and not model_args.ablation_use_ocr and model_args.use_twc
+    assert model_args.qavit_mode == "no_question" and not model_args.ablation_use_ocr and model_args.use_twc
     assert (train_args.per_device_train_batch_size, train_args.gradient_accumulation_steps) == (4, 2)
 
 
-def _reference_twc(logits, o2r_blocks, r2o_blocks):
-    """TWA loss_accuracy: create_batch_labels (block-diagonal, cross-sample 0, PAD rows/columns -1)
-    + mean sigmoid BCE in both directions over the cells != -1."""
+def _reference_twc(logits, o2r_blocks, r2o_blocks, groups):
+    """Previous implementation (origin/tmp): block-diagonal labels, a cross-sample pair of the
+    same (image, text) inherits its partner's diagonal label, PAD rows/columns -1, then the TWA
+    mean sigmoid BCE in both directions over the cells != -1."""
+    words = o2r_blocks.shape[1]
+    group = groups.reshape(-1)
+    n = group.numel()
 
-    def create_batch_labels(batch_labels):
-        result = torch.block_diag(*batch_labels)
-        ignore = torch.diagonal(result) == -1
+    def labels(blocks):
+        result = torch.block_diag(*blocks.float())
+        diagonal = result.diagonal().clone()
+        for i in range(n):
+            for j in range(n):
+                if i // words != j // words and group[i] >= 0 and group[i] == group[j]:
+                    result[i, j] = diagonal[j]
+        ignore = diagonal == -1
         result[ignore, :] = -1.0
         result[:, ignore] = -1.0
         return result
 
-    o2r_l, r2o_l = create_batch_labels(o2r_blocks), create_batch_labels(r2o_blocks)
+    o2r_l, r2o_l = labels(o2r_blocks), labels(r2o_blocks)
     mask = o2r_l != -1
     loss_i = torch.nn.functional.binary_cross_entropy_with_logits(logits[mask], o2r_l[mask])
     loss_t = torch.nn.functional.binary_cross_entropy_with_logits(logits.t()[mask], r2o_l[mask])
@@ -799,14 +800,14 @@ def _reference_twc(logits, o2r_blocks, r2o_blocks):
 def test_twc_matches_twa_on_the_encoder_output(make_model, tokenizer, samples, corrector, consformer):
     # As TWA: [original OCR | related OCR] in the encoder input, split again after the encoder.
     model = make_model(use_twc=True, ablation_use_ocr=consformer)
-    pair = [samples[0], {**samples[0], "question": "hiệu gì"}]  # same image twice: still negatives
+    pair = [samples[0], {**samples[0], "question": "hiệu gì"}]  # same image twice: pairs inherit
     batch = build_collator(model, tokenizer, corrector, training=True)(pair)
     captured = {}
     original_twc = model._twc
 
-    def spy(tokens, word_map, token_mask, o2r, r2o):
+    def spy(tokens, word_map, token_mask, o2r, r2o, groups):
         captured.update(tokens=tokens, word_map=word_map, token_mask=token_mask)
-        return original_twc(tokens, word_map, token_mask, o2r, r2o)
+        return original_twc(tokens, word_map, token_mask, o2r, r2o, groups)
 
     model._twc = spy
     outputs = model(**batch)
@@ -831,8 +832,9 @@ def test_twc_matches_twa_on_the_encoder_output(make_model, tokenizer, samples, c
     feats = feats / counts.clamp_min(1e-9).unsqueeze(-1)
     norm = lambda x: x / x.norm(dim=-1, keepdim=True).clamp_min(1e-6)
     orig, rel = norm(feats[:, :words]).reshape(-1, 32), norm(feats[:, words:]).reshape(-1, 32)
-    logits = model.twc_logit_scale.exp() * orig @ rel.t()  # no clamp, as TWA
-    reference = _reference_twc(logits, batch["twc_o2r"], batch["twc_r2o"])
+    logits = orig @ rel.t() / model.config.twc_temperature_init  # fixed τ
+    assert torch.equal(batch["twc_group_ids"][0], batch["twc_group_ids"][1])  # same image, same words
+    reference = _reference_twc(logits, batch["twc_o2r"], batch["twc_r2o"], batch["twc_group_ids"])
     torch.testing.assert_close(outputs["twc_loss"], reference, rtol=1e-5, atol=1e-6)
     assert 0 <= float(outputs["twc_acc"]) <= 1
 
@@ -858,12 +860,12 @@ def test_consformer_encodes_each_copy_separately(make_model, tokenizer, samples,
 
     with torch.no_grad(), patch.object(model.vit5.encoder, "forward", side_effect=record):
         alone = model._encode_ocr(*rel_args)
-        model.encode(**{k: v for k, v in batch.items() if k not in ("labels", "twc_o2r", "twc_r2o")})
+        model.encode(**{k: v for k, v in batch.items() if k not in ("labels", "twc_o2r", "twc_r2o", "twc_group_ids")})
     start = batch["input_ids"].shape[1] + 4 + batch["ocr_input_ids"].shape[1]
     torch.testing.assert_close(captured["embeds"][:, start:], alone)
 
 
-def test_related_copy_is_twa_and_identical_at_train_and_test(make_model, tokenizer, samples, corrector):
+def test_related_copy_is_identical_at_train_and_test(make_model, tokenizer, samples, corrector):
     import random
 
     model = make_model(use_twc=True, twc_adv_probability=0.6)
@@ -872,9 +874,10 @@ def test_related_copy_is_twa_and_identical_at_train_and_test(make_model, tokeniz
     a, b = train(samples), test(samples)
     for key in ("ocr_input_ids", "ocr_rel_input_ids", "ocr_rel_to_word_map", "ocr_rel_char_ids"):
         torch.testing.assert_close(a[key], b[key])
-    assert "twc_o2r" in a and "twc_o2r" not in b
+    assert "twc_o2r" in a and "twc_o2r" not in b and "twc_group_ids" not in b
     texts = a["ocr_info"][0]["texts"]
-    related, o2r, _ = corrector.augment(texts, 0.6, random.Random(TWA_SEED))  # TWA: Random(13) per sample
+    seed = _stable_hash(f"{TWA_SEED}|{samples[0]['image_path']}|{samples[0]['question']}")
+    related, o2r, _ = corrector.augment(texts, 0.6, random.Random(seed))  # fixed per (13, image, question)
     expected = test._encode_ocr_text(related, a["ocr_char_ids"].shape[1])
     assert a["ocr_rel_input_ids"][0][: len(expected[0])].tolist() == expected[0]
     torch.testing.assert_close(a["twc_o2r"][0][: len(texts), : len(texts)], torch.tensor(o2r))
@@ -884,9 +887,10 @@ def test_related_copy_is_twa_and_identical_at_train_and_test(make_model, tokeniz
     assert set(a["ocr_rel_to_word_map"][0][a["ocr_rel_to_word_map"][0] >= 0].tolist()) == set(range(real))
     assert (a["twc_o2r"][0][real:, :] == -1).all() and (a["twc_o2r"][0][:, real:] == -1).all()
     assert set(a["twc_o2r"][0][:real, :real].diagonal().tolist()) <= {1.0, 0.9}
+    assert (a["twc_group_ids"][0][:real] >= 0).all() and (a["twc_group_ids"][0][real:] == -1).all()
 
 
-def test_corrector_follows_twa_find_related_ocr_adr():
+def test_corrector_related_copy():
     import random
 
     corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["cà phê sữa"], "answer": ["trà"]}))
@@ -897,22 +901,25 @@ def test_corrector_follows_twa_find_related_ocr_adr():
     related, o2r, r2o = corrector.augment(words, 1.0, random.Random(0))
     assert related[0] != "cà" and o2r[0][0] == 0.9  # in-lexicon word → one character edit
     assert related[4] == "phê" and o2r[4][4] == 0.9  # other word → nearest lexicon word
-    assert related[3] == "123" and o2r[3][3] == 1.0  # no lexicon candidate → unchanged, 1.0
-    assert related[5] == "x" and o2r[5][5] == 1.0    # single character: never changed (TWA len > 1)
+    assert related[3] == "123" and o2r[3][3] == 1.0  # numbers are never edited
+    assert related[5] == "x" and o2r[5][5] == 1.0    # no lexicon candidate → unchanged
     assert o2r[0][2] == o2r[2][2] and o2r[2][0] == o2r[0][0]  # same text inherits
-    for word in ("ab", "abc", "abcd", "abcdef"):  # create_adv_word_adr: insert (< 4) / delete or replace
+    for word in ("ab", "abc", "abcd", "abcdef"):  # insert (< 4) / delete or replace, never the first character
         for seed in range(20):
             noisy = corrector._char_noise(word, random.Random(seed))
             assert len(noisy) == len(word) + 1 if len(word) < 4 else len(noisy) in (len(word) - 1, len(word))
+            assert noisy[0] == word[0]
 
 
 def test_legacy_configs_are_refused():
-    for legacy in ({"clip_late_adapter": True}, {"ablation_use_ocr_aug": True},
+    for legacy in ({"ablation_use_ocr_aug": True},
                    {"ablation_use_ocr_aug": False, "use_twc": True, "twc_objective": "answer"}):
         with pytest.raises(ValueError, match="older code"):
             OpenViVQAConfig(**legacy)
-    config = OpenViVQAConfig(ablation_use_ocr_aug=False, clip_late_adapter=False, twc_loss="bce")
-    assert not any(k in config.to_dict() for k in ("ablation_use_ocr_aug", "clip_late_adapter", "twc_loss"))
+    config = OpenViVQAConfig(ablation_use_ocr_aug=False, clip_late_adapter=True, twc_loss="bce")
+    assert config.clip_late_adapter is True
+    assert not any(k in config.to_dict() for k in ("ablation_use_ocr_aug", "twc_loss"))
+    assert OpenViVQAConfig().clip_late_adapter is False  # configs without the field
 
 
 def test_loading_a_checkpoint_keeps_clip_frozen(make_model, tokenizer, tmp_path):
@@ -927,28 +934,39 @@ def test_loading_a_checkpoint_keeps_clip_frozen(make_model, tokenizer, tmp_path)
 
 
 def test_twc_checkpoint_roundtrip_and_generate(make_model, tokenizer, samples, corrector, tmp_path):
+    import math
     model = make_model(use_twc=True, twc_temperature_init=0.1).eval()
     batch = build_collator(model, tokenizer, corrector, training=False)(samples)
     batch.pop("labels")
+    with torch.no_grad():
+        model.twc_logit_scale.fill_(5.0)  # e.g. a temperature learned by older code
     model.save_pretrained(tmp_path)
     tokenizer.save_pretrained(tmp_path)
     restored, _ = load_model_and_tokenizer(str(tmp_path))
     restored.eval()
-    assert restored.config.use_twc and hasattr(restored, "twc_logit_scale")
+    assert restored.config.use_twc and not restored.twc_logit_scale.requires_grad
+    assert math.isclose(float(restored.twc_logit_scale.exp()), 10.0, rel_tol=1e-5)  # the configured fixed τ
     with torch.no_grad():
         torch.testing.assert_close(model.generate(**batch), restored.generate(**batch))
 
 
-def test_qavit_off_has_no_adapter_and_on_learns_it(make_model, tokenizer, samples):
-    plain = make_model(ablation_use_qaclip=False)
+def test_qavit_modes(make_model, tokenizer, samples):
+    plain = make_model(ablation_use_qaclip=False)  # off
     assert not any("instruct" in n for n, _ in plain.named_parameters())
     assert not any(p.requires_grad for p in plain.qa_clip.parameters())
-    qavit = make_model(ablation_use_qaclip=True)
-    gates = [p for n, p in qavit.named_parameters() if n.endswith("instruction_proj_gate")]
-    assert gates and all(g.requires_grad for g in gates)
-    batch = build_collator(qavit, tokenizer)(samples)
-    qavit(**batch)["loss"].backward()
-    assert any(g.grad is not None and g.grad.abs().sum() > 0 for g in gates)
+    for flags in ({"ablation_use_qaclip": True}, {"clip_late_adapter": True}):  # question, no_question
+        model = make_model(**flags)
+        gates = [p for n, p in model.named_parameters() if n.endswith("instruction_proj_gate")]
+        assert gates and all(g.requires_grad for g in gates)
+        frozen = [n for n, p in model.qa_clip.named_parameters()
+                  if not p.requires_grad and "instruction" not in n and "instruct_dim_reduce" not in n]
+        assert frozen  # CLIP itself stays frozen
+        batch = build_collator(model, tokenizer)(samples)
+        with patch.object(model.qa_clip, "forward", wraps=model.qa_clip.forward) as clip:
+            model(**batch)["loss"].backward()
+        question = clip.call_args.kwargs["text_emb"]
+        assert question.shape[1] == (batch["input_ids"].shape[1] if "ablation_use_qaclip" in flags else 0)
+        assert any(g.grad is not None and g.grad.abs().sum() > 0 for g in gates)
 
 
 def test_ocr_feature_norm_switch(make_model):
@@ -966,22 +984,24 @@ def test_yaml_recipe(make_model, tokenizer, samples, corrector):
     model_keys = {"ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "ocr_feature_norm",
                   "use_twc", "twc_weight", "twc_adv_probability", "twc_temperature_init"}
     assert model_keys <= set(cfg)
-    assert not set(cfg) & {"ablation_use_ocr_aug", "qavit_mode", "clip_late_adapter", "ocr_aug_mode",
+    assert not set(cfg) & {"ablation_use_ocr_aug", "clip_late_adapter", "ocr_aug_mode",
                            "twc_loss", "twc_feature", "twc_objective", "twc_queue_size", "twc_view"}
-    assert (cfg["twc_adv_probability"], cfg["twc_temperature_init"], cfg["ocr_feature_norm"]) == (0.6, 0.1, "layernorm")
+    assert cfg["qavit_mode"] == "no_question"
+    assert (cfg["twc_adv_probability"], cfg["twc_temperature_init"], cfg["ocr_feature_norm"]) == (0.6, 0.07, "layernorm")
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
-    model = make_model(**{**{k: cfg[k] for k in model_keys}, "use_twc": True})
+    model = make_model(**{**{k: cfg[k] for k in model_keys}, "use_twc": True, "clip_late_adapter": True})
     outputs = model(**build_collator(model, tokenizer, corrector, training=True)(samples))
     assert torch.isfinite(outputs["loss"]) and torch.isfinite(outputs["twc_loss"])
 
 
-def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, corrector, tmp_path):
+def test_fixed_temperature_and_lr_groups(make_model, tokenizer, samples, corrector, tmp_path):
     import math
     model = make_model(use_twc=True, twc_temperature_init=0.4, twc_adv_probability=0.7, ablation_use_qaclip=True)
     assert math.isclose(float(model.twc_logit_scale.exp()), 2.5, rel_tol=1e-5)
+    assert not model.twc_logit_scale.requires_grad  # fixed τ
     args = CustomTrainingArguments(output_dir=str(tmp_path), learning_rate=3e-5, weight_decay=0.1,
                                    new_module_learning_rate=1e-4, scalar_learning_rate=1e-3,
-                                   max_steps=1, per_device_train_batch_size=2, logging_steps=1,
+                                   max_steps=2, per_device_train_batch_size=2, logging_steps=1,
                                    remove_unused_columns=False, report_to="none", save_strategy="no",
                                    use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
     dataset = ViT5VQADataset(pd.DataFrame(samples))
@@ -990,10 +1010,9 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     optimizer = trainer.create_optimizer()
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     named = dict(model.named_parameters())
-    assert by_id[id(named["twc_logit_scale"])]["lr"] == 1e-3
-    assert by_id[id(named["twc_logit_scale"])]["weight_decay"] == 0.0
+    assert id(named["twc_logit_scale"]) not in by_id
     gate = next(n for n in named if n.endswith("instruction_proj_gate"))
-    assert by_id[id(named[gate])]["lr"] == 1e-3
+    assert by_id[id(named[gate])]["lr"] == 1e-3 and by_id[id(named[gate])]["weight_decay"] == 0.0
     consformer = next(n for n in named if n.startswith("ocr_encoder.") and n.endswith("weight"))
     assert by_id[id(named[consformer])]["lr"] == 1e-4
     t5 = "vit5.shared.weight"
@@ -1001,7 +1020,7 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     assert sum(len(g["params"]) for g in optimizer.param_groups) == sum(p.requires_grad for p in model.parameters())
     trainer.train()
     taus = [e["twc_tau"] for e in trainer.state.log_history if "twc_tau" in e]
-    assert taus and 0.3 < taus[0] < 0.5
+    assert taus and all(math.isclose(t, 0.4, rel_tol=1e-4) for t in taus)
     batch = build_collator(model, tokenizer, corrector, training=True)
     assert batch.cfg.twc_adv_probability == 0.7
 
