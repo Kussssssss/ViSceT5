@@ -62,8 +62,9 @@ class OpenViVQAModel(PreTrainedModel):
                 self.qa_clip = QACLIPEncoder.from_pretrained(
                     config.clip_vision_name,
                     instruction_dim=config.qa_clip_d_text or self.d_model,
-                    # QA-ViT: câu hỏi vào 6 lớp cuối qua adapter học được; tắt = CLIP thường.
-                    integration_point="late" if config.ablation_use_qaclip else "none",
+                    # QA-ViT: câu hỏi vào 6 lớp cuối qua adapter học được; clip_late_adapter giữ
+                    # adapter có cổng ở 6 lớp cuối với câu hỏi rỗng; tắt cả hai = CLIP thường.
+                    integration_point="late" if (config.ablation_use_qaclip or config.clip_late_adapter) else "none",
                     freeze_clip=True,
                     attn_implementation="eager",
                 )
@@ -109,8 +110,10 @@ class OpenViVQAModel(PreTrainedModel):
                 self.ocr_lite_text_proj.bias.zero_()
 
         if config.use_twc:
-            # Nhiệt độ học được τ của TWC (CLIP/TWA): exp(logit_scale) = 1/τ lúc đầu.
-            self.twc_logit_scale = nn.Parameter(torch.tensor(math.log(1 / config.twc_temperature_init)))
+            # Nhiệt độ cố định τ của TWC: exp(logit_scale) = 1/τ, không học (giữ tên tham số cũ).
+            self.twc_logit_scale = nn.Parameter(
+                torch.tensor(math.log(1 / config.twc_temperature_init)), requires_grad=False
+            )
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -130,6 +133,12 @@ class OpenViVQAModel(PreTrainedModel):
         model = loaded[0] if isinstance(loaded, tuple) else loaded
         if hasattr(model, "qa_clip"):
             model.qa_clip._apply_freeze()
+        # Loading recreates parameters (and older checkpoints hold a learned temperature):
+        # the configured fixed τ stays authoritative.
+        if hasattr(model, "twc_logit_scale"):
+            with torch.no_grad():
+                model.twc_logit_scale.fill_(math.log(1 / model.config.twc_temperature_init))
+            model.twc_logit_scale.requires_grad_(False)
         return loaded
 
     @property
@@ -170,6 +179,11 @@ class OpenViVQAModel(PreTrainedModel):
                 input_ids=input_ids, attention_mask=attention_mask, return_dict=True
             ).last_hidden_state
             instruction_mask = attention_mask
+        elif self.config.clip_late_adapter:
+            # Empty instruction: the gated adapter runs on the visual attention only.
+            batch = pixel_values.shape[0]
+            instruction = pixel_values.new_zeros(batch, 0, self.qa_clip.config.instruction_dim)
+            instruction_mask = torch.zeros(batch, 0, dtype=torch.long, device=pixel_values.device)
         outputs = self.qa_clip(
             pixel_values=pixel_values,
             text_emb=instruction,
@@ -291,19 +305,30 @@ class OpenViVQAModel(PreTrainedModel):
         features = torch.nan_to_num(sums / counts.clamp_min(1), nan=0.0, posinf=0.0, neginf=0.0)
         return F.normalize(features, dim=-1, eps=1e-6)
 
-    def _twc(self, tokens, word_map, token_mask, o2r, r2o):
-        """TWC as TWA (_forward_pretrain_cons_output + loss_accuracy): encoder output of every
-        original word vs every related word of the batch, logits = exp(logit_scale) · cos,
-        labels = create_batch_labels (block-diagonal, cross-sample 0, PAD rows/columns -1),
-        symmetric sigmoid BCE over the cells != -1.
+    def _twc(self, tokens, word_map, token_mask, o2r, r2o, groups):
+        """TWC (TWA _forward_pretrain_cons_output + loss_accuracy): encoder output of every
+        original word vs every related word of the batch, logits = (1/τ) · cos with a fixed τ,
+        symmetric sigmoid BCE over the cells != -1. Labels: block-diagonal per sample (TWA
+        create_batch_labels); a cross-sample pair of the same (image, text) inherits its
+        partner's diagonal label (the same word of the same image asked twice); PAD rows/columns -1.
         tokens: [B, L, D] encoder output of [original OCR | related OCR]; word_map: [B, L] word
-        slot of each token (original 0..W-1, related W..2W-1); o2r, r2o: [B, W, W]."""
+        slot of each token (original 0..W-1, related W..2W-1); o2r, r2o: [B, W, W];
+        groups: [B, W] hash of (image, text) of each original word, -1 = PAD."""
         batch, words = o2r.shape[:2]
         features = self._pool_words(tokens, word_map, token_mask, 2 * words)
         original = features[:, :words].reshape(batch * words, -1)
         related = features[:, words:].reshape(batch * words, -1)
         logits = self.twc_logit_scale.exp() * original @ related.t()  # [B·W, B·W]
         o2r, r2o = torch.block_diag(*o2r.float()), torch.block_diag(*r2o.float())
+        group = groups.reshape(-1)
+        sample = torch.arange(group.numel(), device=group.device) // words
+        inherit = (
+            (group.unsqueeze(1) == group.unsqueeze(0))
+            & (group.unsqueeze(1) >= 0)
+            & (sample.unsqueeze(1) != sample.unsqueeze(0))
+        )
+        o2r = torch.where(inherit, o2r.diagonal().unsqueeze(0).expand_as(o2r), o2r)
+        r2o = torch.where(inherit, r2o.diagonal().unsqueeze(0).expand_as(r2o), r2o)
         for labels in (o2r, r2o):
             ignored = labels.diagonal() == -1
             labels[ignored, :] = -1.0
@@ -343,6 +368,7 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_rel_char_mask=None,
         twc_o2r=None,
         twc_r2o=None,
+        twc_group_ids=None,
         ocr_words=None,
     ):
         if ocr_attention_mask is None:
@@ -390,6 +416,7 @@ class OpenViVQAModel(PreTrainedModel):
                 torch.cat([ocr_attention_mask, ocr_rel_attention_mask], dim=1),
                 twc_o2r,
                 twc_r2o,
+                twc_group_ids,
             )
         return result
 
@@ -410,7 +437,7 @@ class OpenViVQAModel(PreTrainedModel):
         generation_config=None,
         **generation_kwargs,
     ):
-        for name in ("twc_o2r", "twc_r2o", "ocr_words", "labels"):
+        for name in ("twc_o2r", "twc_r2o", "twc_group_ids", "ocr_words", "labels"):
             generation_kwargs.pop(name, None)
         related = {name: generation_kwargs.pop(name) for name in RELATED_FIELDS if name in generation_kwargs}
         if encoder_outputs is None:

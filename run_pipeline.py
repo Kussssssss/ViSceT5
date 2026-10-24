@@ -3,7 +3,7 @@
 STAGE=finetune (default) | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, PER_DEVICE_TRAIN_BATCH_SIZE, GRADIENT_ACCUMULATION_STEPS,
-            module switches ABLATION_USE_QACLIP (QA-ViT), ABLATION_USE_OCR (Consformer), USE_TWC,
+            module switches QAVIT_MODE (off|no_question|question), ABLATION_USE_OCR (Consformer), USE_TWC,
             TWC_ADV_PROBABILITY, TWC_TEMPERATURE, TWC_WEIGHT, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE.
@@ -31,6 +31,7 @@ def training_arguments():
         "GRADIENT_ACCUMULATION_STEPS": "gradient_accumulation_steps",
         "PER_DEVICE_EVAL_BATCH_SIZE": "per_device_eval_batch_size",
         "ABLATION_USE_QACLIP": "ablation_use_qaclip",
+        "QAVIT_MODE": "qavit_mode",
         "ABLATION_USE_OCR": "ablation_use_ocr",
         "USE_TWC": "use_twc",
         "TWC_WEIGHT": "twc_weight",

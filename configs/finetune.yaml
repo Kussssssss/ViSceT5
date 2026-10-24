@@ -2,7 +2,8 @@ dataset_name: "ViTextVQA"
 data_dir: "./datasets"
 # Công tắc module (notebook ghi đè qua biến môi trường): QA-ViT, Consformer, TWC.
 ablation_use_image: true
-ablation_use_qaclip: false   # QA-ViT: câu hỏi vào CLIP qua adapter học được · false = CLIP thường, không adapter
+ablation_use_qaclip: false   # dùng qavit_mode ở dưới
+qavit_mode: "no_question"    # off = CLIP thường | no_question = adapter QA-ViT học, câu hỏi rỗng (code trước refactor) | question = QA-ViT đầy đủ
 ablation_use_ocr: true       # Consformer · false = OCR text-only
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor
 # TWC như TWA: bản OCR related (tăng cường TWA = OCR Augmentation) đứng sau bản gốc trong input
@@ -11,7 +12,7 @@ ocr_feature_norm: "layernorm"   # Consformer như code trước refactor
 use_twc: false
 twc_weight: 1.0
 twc_adv_probability: 0.6     # TWA adv_pro: xác suất một từ của bản related bị đổi; notebook: TWC_AUG_P
-twc_temperature_init: 0.1    # τ khởi tạo (học được; TWA 0.07); notebook: TWC_TAU
+twc_temperature_init: 0.07   # τ CỐ ĐỊNH (không học); notebook: TWC_TAU
 ocr_related_remove_layout: true   # bản related không có box, det, rec (con_remove_bbox của TWA + bỏ đặc trưng vùng)
 
 output_dir: "./output/finetune"
@@ -27,7 +28,7 @@ per_device_eval_batch_size: 8
 gradient_accumulation_steps: 1   # notebook: BATCH_SIZE, GRAD_ACCUM
 learning_rate: 0.00003                 # phần đã pretrain (ViT5, projection của QA-ViT)
 new_module_learning_rate: 0.0001       # module khởi tạo ngẫu nhiên (ConsFormer, embedding OCR/ký tự): ~3x, như M4C/TWA
-scalar_learning_rate: 0.001            # tham số vô hướng (temperature TWC, gate QA-ViT), không weight decay
+scalar_learning_rate: 0.001            # gate QA-ViT, không weight decay (temperature TWC cố định)
 weight_decay: 0.1
 warmup_ratio: 0.1
 lr_scheduler_type: "cosine"
