@@ -3,7 +3,7 @@ data_dir: "./datasets"
 # Công tắc module (notebook ghi đè qua biến môi trường): QA-ViT, Consformer, TWC.
 ablation_use_image: true
 ablation_use_qaclip: false   # dùng qavit_mode ở dưới
-qavit_mode: "no_question"    # off = CLIP thường | no_question = adapter QA-ViT học, câu hỏi rỗng (code trước refactor) | question = QA-ViT đầy đủ
+qavit_mode: "off"            # off = CLIP thường (như run tmp_viscet5) | no_question = adapter QA-ViT học, câu hỏi rỗng | question = QA-ViT đầy đủ
 ablation_use_ocr: true       # Consformer · false = OCR text-only
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor
 # TWC như TWA: bản OCR related (tăng cường TWA = OCR Augmentation) đứng sau bản gốc trong input
