@@ -988,10 +988,10 @@ def test_yaml_recipe(make_model, tokenizer, samples, corrector):
     assert model_keys <= set(cfg)
     assert not set(cfg) & {"ablation_use_ocr_aug", "clip_late_adapter", "ocr_aug_mode",
                            "twc_loss", "twc_feature", "twc_objective", "twc_queue_size", "twc_view"}
-    assert cfg["qavit_mode"] == "no_question"
+    assert cfg["qavit_mode"] == "off"
     assert (cfg["twc_adv_probability"], cfg["twc_temperature_init"], cfg["ocr_feature_norm"]) == (0.6, 0.07, "layernorm")
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
-    model = make_model(**{**{k: cfg[k] for k in model_keys}, "use_twc": True, "clip_late_adapter": True})
+    model = make_model(**{**{k: cfg[k] for k in model_keys}, "use_twc": True})
     outputs = model(**build_collator(model, tokenizer, corrector, training=True)(samples))
     assert torch.isfinite(outputs["loss"]) and torch.isfinite(outputs["twc_loss"])
 
