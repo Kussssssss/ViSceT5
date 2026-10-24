@@ -920,6 +920,8 @@ def test_legacy_configs_are_refused():
     assert config.clip_late_adapter is True
     assert not any(k in config.to_dict() for k in ("ablation_use_ocr_aug", "twc_loss"))
     assert OpenViVQAConfig().clip_late_adapter is False  # configs without the field
+    # Older configs store twc_objective="answer" (the old default) even with TWC off.
+    assert not OpenViVQAConfig(ablation_use_ocr_aug=False, use_twc=False, twc_objective="answer").use_twc
 
 
 def test_loading_a_checkpoint_keeps_clip_frozen(make_model, tokenizer, tmp_path):

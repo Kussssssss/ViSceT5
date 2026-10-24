@@ -95,10 +95,13 @@ class OpenViVQAConfig(PretrainedConfig):
         ):
             kwargs.pop(name, None)
         legacy = {name: kwargs.pop(name, None) for name in LEGACY_FIELDS}
-        if legacy["ablation_use_ocr_aug"] or legacy["twc_objective"] in ("answer", "both"):
+        # Older configs store twc_objective even with TWC off (default "answer"): only refuse it
+        # when TWC was on.
+        if legacy["ablation_use_ocr_aug"] or (use_twc and legacy["twc_objective"] in ("answer", "both")):
             raise ValueError(
                 "This configuration comes from older code (OCR Augmentation as a separate module, "
-                "or answer TWC), which this code no longer builds; use commit bf74388 for it."
+                "or answer TWC), which this code no longer builds; use the commit that trained it "
+                "(notebook 6b: HF_PRED_COMMIT = \"auto\")."
             )
         super().__init__(**kwargs)
 
