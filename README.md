@@ -9,6 +9,13 @@ pairs. The configured loss combines decoder cross-entropy over answer tokens
 
 ## Training
 
+The current YAML and Colab notebook run the **no OCR augmentation / no TWC**
+ablation. Image features and the full OCR ConsFormer (Origin text, characters,
+boxes, detection and recognition features) remain enabled. YAML results go to
+`output/finetune_no_aug_no_twc` to keep them separate from the augmented run.
+To restore the full method, enable `ablation_use_ocr_aug` and `use_twc` in YAML,
+or `USE_OCRAUG` and `USE_TWC` in the notebook.
+
 Install dependencies with `bash setup.sh`, then run from the repository root:
 
 ```bash
@@ -61,7 +68,7 @@ unlabelled.
 answer loss, and `generate()` can reuse that memory. `VQATrainer` performs evaluation
 generation from the same encoder result and writes `train_metrics.jsonl`.
 
-The configured `ocr_aug_mode: separate` runs the complete Origin and Related
+When augmentation is enabled, `ocr_aug_mode: separate` runs the complete Origin and Related
 sequences independently through the same ConsFormer. It concatenates their text
 features, then adds the aligned character/box/detection/recognition features.
 Characters are rebuilt for Related; box/det/rec are reused from the original region.
@@ -71,7 +78,7 @@ Separate masks/maps handle different subword counts and padding in each half.
 
 TWC pools the Origin/Related slices of the **same ViT5 encoder output** used by
 the VQA decoder to OCR entry level, normalizes them, then computes the contrastive
-loss. The current YAML enables TWC with BCE, `twc_feature: fused`, `twc_view: shared`.
+loss. When enabled, TWC uses BCE, `twc_feature: fused`, `twc_view: shared`.
 `ocr_related: augment` uses keep/correct/character-noise with probability **0.6**
 at both train and test, reproducibly seeded per sample. No extra ViT5 pass is needed.
 Temperature is fixed at `tau=0.07`: it has no
