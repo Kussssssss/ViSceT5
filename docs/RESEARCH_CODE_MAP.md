@@ -83,7 +83,10 @@ mà decoder VQA sử dụng, rồi pool về entry theo mapping hai bản và ch
 Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ với τ=0.07 cố định, không gradient/optimizer;
 nhãn block-diagonal theo mẫu, cặp khác mẫu cùng (ảnh, chữ) kế thừa nhãn, hàng/cột PAD bỏ;
 loss = sigmoid-BCE hai chiều trên ô hợp lệ (như code TWA). Tổng loss = VQA + λ·TWC.
-YAML bật `use_twc=true`, `twc_feature=fused`, `twc_view=shared`. TWC truyền gradient
+YAML hiện chạy ablation `ablation_use_ocr_aug=false`, `use_twc=false`: chỉ Origin,
+vẫn có image, ConsFormer và character/bbox/det/rec; chỉ loss VQA. Kết quả lưu riêng
+ở `output/finetune_no_aug_no_twc`. Khi bật lại hai cờ, dùng `twc_feature=fused`,
+`twc_view=shared`. TWC truyền gradient
 qua ViT5 encoder về cả hai lượt ConsFormer; decoder nhận gradient từ loss VQA.
 Collator sinh cùng bản Related lúc train và eval/predict; chỉ train tạo nhãn TWC.
 `concat` và `lattice` cũ được giữ cho checkpoint lịch sử, không dùng trong YAML/notebook.
