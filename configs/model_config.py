@@ -44,6 +44,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_label_list: Optional[List[float]] = None,
         twc_temperature_init: float = 0.07,
         ocr_feature_norm: Optional[str] = None,
+        ocr_full_features: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -107,7 +108,8 @@ class OpenViVQAConfig(PretrainedConfig):
         # QA-ViT: the question goes into the late CLIP layers through the learned adapter.
         # False = plain frozen CLIP, no question and no adapter.
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
-        # Consformer (SceSpaVis): ConsFormer + characters + box/det/rec. False = text-only OCR.
+        # Consformer: the ConsFormer contextual encoder of the OCR tokens. False = the ViT5 token
+        # embeddings instead (box/det/rec/char then depend on ocr_full_features).
         self.ablation_use_ocr = bool(ablation_use_ocr)
         # Bỏ ảnh: CLIP không được dựng, encoder chỉ nhận [câu hỏi, OCR].
         self.ablation_use_image = bool(ablation_use_image)
@@ -132,6 +134,10 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
+        # OCR input features of every run, Consformer on or off: token + char + box + det + rec
+        # (SemanticOCREmbedding). None (configs before this field) = False: without Consformer the
+        # OCR was text-only (ViT5 embedding → RMSNorm → Linear), so those checkpoints load as trained.
+        self.ocr_full_features = bool(ocr_full_features) if ocr_full_features is not None else False
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text

@@ -1011,3 +1011,73 @@ def test_unset_group_rates_give_stock_optimizer(make_model, tokenizer, samples, 
     gate = next(n for n in named if n.endswith("instruction_proj_gate"))
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     assert by_id[id(named[gate])]["weight_decay"] == 0.1
+
+
+
+@pytest.mark.parametrize("consformer,twc", [(False, False), (True, False), (False, True), (True, True)])
+def test_full_ocr_features_in_every_ablation(make_model, tokenizer, samples, corrector, consformer, twc):
+    """baseline = image + question + OCR text + box/det/rec/char; Consformer adds the ConsFormer
+    encoder; TWC adds the related OCR copy (sharing box/det/rec with its original word)."""
+    model = make_model(ablation_use_ocr=consformer, use_twc=twc, ocr_full_features=True).eval()
+    assert hasattr(model, "ocr_encoder") == consformer
+    assert hasattr(model, "semantic_ocr_embedding") and hasattr(model, "char_embedding")
+    assert not hasattr(model, "ocr_lite_text_proj")
+    batch = build_collator(model, tokenizer, corrector, training=False)(samples)
+    seen = {}
+    forward = model.vit5.encoder.forward
+
+    def record(*args, **kwargs):
+        seen["x"] = kwargs["inputs_embeds"].detach().clone()
+        return forward(*args, **kwargs)
+
+    def encode(b):
+        with torch.no_grad(), patch.object(model.vit5.encoder, "forward", side_effect=record):
+            model.encode(**{k: v for k, v in b.items() if k != "labels"})
+        return seen["x"]
+
+    base = encode(batch)
+
+    def moves(mutate):
+        b = copy.deepcopy(batch)
+        mutate(b)
+        return not torch.allclose(encode(b), base)
+
+    def shift(key, value):
+        def mutate(b):
+            for item in b["ocr_info"]:
+                item[key] = item[key] + value
+        return mutate
+
+    def chars(b):
+        b["ocr_char_ids"] = torch.where(b["ocr_char_ids"] > 0, torch.full_like(b["ocr_char_ids"], 7), b["ocr_char_ids"])
+
+    def text(b):
+        b["ocr_input_ids"] = torch.where(b["ocr_attention_mask"].bool(), torch.full_like(b["ocr_input_ids"], 11),
+                                         b["ocr_input_ids"])
+
+    for mutate in (shift("boxes", 0.3), shift("det_features", 3.0), shift("rec_features", 3.0), chars, text):
+        assert moves(mutate)
+    assert ("ocr_rel_input_ids" in batch) == twc
+    model.train()
+    outputs = model(**build_collator(model, tokenizer, corrector, training=True)(samples))
+    loss = outputs["loss"] + (outputs["twc_loss"] if twc else 0)
+    loss.backward()
+    dead = [n for n, p in model.named_parameters() if p.requires_grad and p.grad is None]
+    assert not dead, dead
+
+
+def test_consformer_on_is_unchanged_by_full_ocr_features(make_model):
+    on = make_model(ablation_use_ocr=True, ocr_full_features=True).state_dict()
+    before = make_model(ablation_use_ocr=True).state_dict()  # configs without the field
+    assert on.keys() == before.keys()
+    for key in on:
+        torch.testing.assert_close(on[key], before[key], rtol=0, atol=0)
+
+
+def test_configs_before_full_ocr_features_keep_text_only_baseline(make_model):
+    old = make_model(ablation_use_ocr=False)
+    assert old.config.ocr_full_features is False
+    assert hasattr(old, "ocr_lite_text_proj") and not hasattr(old, "semantic_ocr_embedding")
+    import yaml
+    cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
+    assert cfg["ocr_full_features"] is True

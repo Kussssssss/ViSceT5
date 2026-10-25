@@ -3,8 +3,9 @@ data_dir: "./datasets"
 # Công tắc module (notebook ghi đè qua biến môi trường): QA-ViT, Consformer, TWC.
 ablation_use_image: true
 ablation_use_qaclip: false   # QA-ViT: câu hỏi vào CLIP qua adapter học được · false = CLIP thường, không adapter
-ablation_use_ocr: true       # Consformer · false = OCR text-only
-ocr_feature_norm: "layernorm"   # Consformer như code trước refactor
+ablation_use_ocr: true       # Consformer (ConsFormer mã hoá chữ OCR) · false = embedding token ViT5
+ocr_full_features: true      # mọi run đều có đặc trưng OCR: chữ + ký tự + box + det + rec (baseline cũng vậy)
+ocr_feature_norm: "layernorm"   # chuẩn hoá từng luồng OCR như code trước refactor
 # TWC như TWA: bản OCR related (tăng cường TWA = OCR Augmentation) đứng sau bản gốc trong input
 # encoder, mỗi bản qua Consformer riêng; loss BCE hai chiều trên đầu ra encoder. Bản related có
 # ở cả train và test (cùng quy trình); chỉ khi train mới có loss.
