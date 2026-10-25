@@ -63,7 +63,7 @@ class ModelArguments:
         default="shared", metadata={"help": "shared | separate (decoder reads the correction, TWC its own augmented copy)."}
     )
     twc_adv_probability: float = field(
-        default=0.6, metadata={"help": "TWA augmentation probability of each OCR word's related copy."}
+        default=0.35, metadata={"help": "TWA augmentation probability of each OCR word's related copy."}
     )
     qavit_mode: Optional[str] = field(
         default=None,
