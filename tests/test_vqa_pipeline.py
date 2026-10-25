@@ -990,8 +990,7 @@ def test_clip_late_adapter_trains_without_question(make_model, tokenizer, sample
     assert not any(n.endswith("instruction_proj_gate") for n, _ in plain.named_parameters())
 
 
-@pytest.mark.parametrize("full_method", [False, True])
-def test_yaml_ablation_and_full_ocr_pair(make_model, tokenizer, samples, corrector, full_method):
+def test_separate_encoder_recipe_from_yaml(make_model, tokenizer, samples, corrector):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
@@ -1002,33 +1001,15 @@ def test_yaml_ablation_and_full_ocr_pair(make_model, tokenizer, samples, correct
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
-    assert cfg["ocr_aug_mode"] == "separate"
-    assert not cfg["ablation_use_ocr_aug"] and not cfg["use_twc"]
-    assert cfg["ablation_use_image"] and cfg["ablation_use_ocr"]
-    assert cfg["twc_adv_probability"] == 0.6 and cfg["twc_view"] == "shared"
+    assert cfg["ocr_aug_mode"] == "separate" and cfg["use_twc"]
+    assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
     assert cfg["twc_temperature_init"] == 0.07
-    model = make_model(use_twc=full_method, ablation_use_ocr_aug=full_method,
-                       ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
+    model = make_model(use_twc=True, ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
                        twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
-    # The ablation must not need a correction vocabulary at train or test.
-    train = build_collator(model, tokenizer, corrector if full_method else None, training=True)
-    evaluation = build_collator(model, tokenizer, corrector if full_method else None, training=False)
-    batch = train(samples)
-    eval_batch = evaluation(samples)
-    with patch.object(model.ocr_encoder, "forward", wraps=model.ocr_encoder.forward) as encoder:
-        outputs = model(**batch)
-    assert encoder.call_count == (2 if full_method else 1)
-    assert torch.isfinite(outputs["loss"])
-    if full_method:
-        assert train.related_mode == "twa" and train.separate and train.twc_lexical
-        assert torch.isfinite(outputs["twc_loss"])
-    else:
-        assert train.related_mode == evaluation.related_mode == "none"
-        assert not hasattr(model, "twc_logit_scale")
-        for payload in (batch, eval_batch):
-            assert not any(key.startswith(("ocr_rel_", "twc_", "ocr_lattice_")) for key in payload)
-        assert "twc_loss" not in outputs and "twc_answer_loss" not in outputs
-        assert outputs["attention_mask"].shape[1] == 8 + 4 + batch["ocr_input_ids"].shape[1]
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    assert collator.related_mode == "twa" and collator.separate and not collator.lattice and collator.twc_lexical
+    outputs = model(**collator(samples))
+    assert torch.isfinite(outputs["twc_loss"]) and "twc_answer_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
 
 

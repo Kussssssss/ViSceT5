@@ -1,18 +1,18 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
-# Ablation: image + question + OCR origin; tắt cả augmentation và loss TWC.
+# ViSceT5 = CLIP không nhận câu hỏi + SceSpaVis + kênh sửa OCR (+ TWC khi use_twc=true).
 ablation_use_image: true
 ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
-ablation_use_ocr_aug: false
+ablation_use_ocr_aug: true
 ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
 ocr_aug_mode: "separate"      # hai lượt ConsFormer riêng; concat toàn bộ Origin + Related rồi cộng feature OCR
 qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
-use_twc: false
+use_twc: true
 twc_weight: 1.0
 twc_temperature_init: 0.07    # tau cố định, không gradient và không cập nhật bởi optimizer
-twc_adv_probability: 0.6     # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
+twc_adv_probability: 0.35    # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
 twc_view: "shared"           # VQA và TWC dùng chung một lượt ViT5 encoder, cùng Origin + Related
 twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
 twc_feature: "fused"         # Origin ↔ Related lấy từ output ViT5 encoder sau khi fusion image/question/OCR
@@ -23,8 +23,8 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune_no_aug_no_twc"
-logging_dir: "./output/finetune_no_aug_no_twc/logs"
+output_dir: "./output/finetune"
+logging_dir: "./output/finetune/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""

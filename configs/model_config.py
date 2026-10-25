@@ -33,7 +33,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ablation_use_ocr_aug: bool = True,
         use_twc: bool = False,
         twc_weight: float = 1.0,
-        twc_adv_probability: float = 0.6,
+        twc_adv_probability: float = 0.35,
         twc_label_list: Optional[List[float]] = None,
         twc_loss: str = "infonce",
         twc_feature: str = "lexical",
