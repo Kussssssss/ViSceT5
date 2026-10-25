@@ -77,15 +77,17 @@ class OpenViVQAModel(PreTrainedModel):
             image_std=config.image_std,
         )
 
-        if config.ablation_use_ocr:
-            # SceSpaVis: ConsFormer + ký tự + box/det/rec.
+        if config.ablation_use_ocr or config.ocr_full_features:
+            # Đặc trưng OCR: chữ (ConsFormer, hoặc embedding token ViT5 khi tắt Consformer)
+            # + ký tự + box/det/rec. Cùng thứ tự dựng như trước → bật Consformer khởi tạo y hệt.
             with _seeded(seed + 2):
-                self.ocr_encoder = OCREncoder(
-                    self.vit5.config.num_heads,
-                    self.d_model,
-                    self.vit5.config.d_kv,
-                    self.vit5.config.d_ff,
-                )
+                if config.ablation_use_ocr:
+                    self.ocr_encoder = OCREncoder(
+                        self.vit5.config.num_heads,
+                        self.d_model,
+                        self.vit5.config.d_kv,
+                        self.vit5.config.d_ff,
+                    )
                 self.semantic_ocr_embedding = SemanticOCREmbedding(
                     SimpleNamespace(
                         d_model=self.d_model,
@@ -98,7 +100,8 @@ class OpenViVQAModel(PreTrainedModel):
                 self.char_embedding = nn.Embedding(config.char_num, self.d_model)
                 self.char_position_embedding = nn.Embedding(config.char_max_num, self.d_model)
                 self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=norm_eps)
-            self.ocr_encoder.set_word_embed_proxy(lambda ids: self.get_input_embeddings()(ids))
+            if config.ablation_use_ocr:
+                self.ocr_encoder.set_word_embed_proxy(lambda ids: self.get_input_embeddings()(ids))
         else:
             # Baseline: OCR text-only ở mức token (embedding ViT5 → RMSNorm → Linear).
             with _seeded(seed + 3):
@@ -187,7 +190,8 @@ class OpenViVQAModel(PreTrainedModel):
         return self.ocr_char_layernorm((features * mask.unsqueeze(-1)).mean(dim=-2))
 
     def _encode_ocr(self, info, ids, token_mask, word_map, char_ids, char_mask):
-        if not self.config.ablation_use_ocr:
+        if not (self.config.ablation_use_ocr or self.config.ocr_full_features):
+            # Older text-only baseline (configs without ocr_full_features).
             tokens = self.get_input_embeddings()(ids)
             features = self.ocr_lite_text_proj(self.ocr_lite_text_ln(tokens))
             return features * token_mask.unsqueeze(-1).to(features.dtype)
@@ -195,7 +199,10 @@ class OpenViVQAModel(PreTrainedModel):
         valid = (word_map >= 0) & token_mask.bool()
         indices = word_map.clamp(0, char_ids.shape[1] - 1)
         boxes = torch.stack([item["boxes"] for item in info]).to(ids.device, self.target_dtype)
-        text_features, _ = self.ocr_encoder(ids, token_mask)
+        if self.config.ablation_use_ocr:
+            text_features, _ = self.ocr_encoder(ids, token_mask)
+        else:  # Consformer off: the ViT5 token embeddings take the place of the ConsFormer output
+            text_features = self.get_input_embeddings()(ids)
         results = []
         for batch_index, item in enumerate(info):
             mapping = indices[batch_index]

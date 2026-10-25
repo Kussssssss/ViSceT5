@@ -22,7 +22,7 @@ class ModelArguments:
                                          "learned adapter. False = plain frozen CLIP, no adapter."}
     )
     ablation_use_ocr: bool = field(
-        default=True, metadata={"help": "Consformer (SceSpaVis) OCR representation. False = text-only OCR."}
+        default=True, metadata={"help": "Consformer: ConsFormer encoder of the OCR tokens. False = ViT5 token embeddings."}
     )
     ablation_use_image: bool = field(
         default=True, metadata={"help": "False = no image features at all (CLIP is not built)."}
@@ -40,6 +40,9 @@ class ModelArguments:
     )
     ocr_feature_norm: str = field(
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
+    )
+    ocr_full_features: bool = field(
+        default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )
 
 
