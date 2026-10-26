@@ -990,7 +990,8 @@ def test_clip_late_adapter_trains_without_question(make_model, tokenizer, sample
     assert not any(n.endswith("instruction_proj_gate") for n, _ in plain.named_parameters())
 
 
-def test_separate_encoder_recipe_from_yaml(make_model, tokenizer, samples, corrector):
+@pytest.mark.parametrize("full_method", [False, True])
+def test_yaml_consformer_ablation_and_full_method(make_model, tokenizer, samples, corrector, full_method):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
@@ -1000,16 +1001,25 @@ def test_separate_encoder_recipe_from_yaml(make_model, tokenizer, samples, corre
         "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
     }
     assert cfg["qavit_mode"] == "off"
-    assert (cfg["per_device_train_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 1, 0.1)
-    assert cfg["ocr_aug_mode"] == "separate" and cfg["use_twc"]
+    assert (cfg["per_device_train_batch_size"], cfg["per_device_eval_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (32, 32, 1, 0.1)
+    assert cfg["learning_rate"] == 1e-4
+    assert cfg["ocr_aug_mode"] == "separate"
+    assert not cfg["ablation_use_ocr_aug"] and not cfg["use_twc"] and not cfg["ablation_use_consformer"]
+    assert cfg["ablation_use_ocr"] and cfg["ablation_use_image"]
     assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
     assert cfg["twc_temperature_init"] == 0.07
-    model = make_model(use_twc=True, ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
+    model = make_model(use_twc=full_method, ablation_use_ocr_aug=full_method,
+                       ablation_use_consformer=full_method, ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
                        twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
-    collator = build_collator(model, tokenizer, corrector, training=True)
-    assert collator.related_mode == "twa" and collator.separate and not collator.lattice and collator.twc_lexical
+    collator = build_collator(model, tokenizer, corrector if full_method else None, training=True)
     outputs = model(**collator(samples))
-    assert torch.isfinite(outputs["twc_loss"]) and "twc_answer_loss" not in outputs
+    assert torch.isfinite(outputs["loss"])
+    if full_method:
+        assert collator.related_mode == "twa" and collator.separate and collator.twc_lexical
+        assert torch.isfinite(outputs["twc_loss"])
+    else:
+        assert collator.related_mode == "none" and not hasattr(model, "ocr_encoder")
+        assert "twc_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
 
 
@@ -1323,3 +1333,55 @@ def test_fixed_temperature_survives_loading_a_previously_learned_scale(
     for name in names:
         assert getattr(restored, name).grad is None
     assert restored.vit5.encoder.block[0].layer[0].SelfAttention.q.weight.grad.abs().sum() > 0
+
+
+
+def test_without_consformer_keeps_raw_text_and_all_ocr_features(
+    make_model, tokenizer, samples, tmp_path
+):
+    model = make_model(ablation_use_consformer=False, ablation_use_ocr_aug=False, use_twc=False)
+    model.eval()
+    assert not hasattr(model, "ocr_encoder") and not hasattr(model, "ocr_lite_text_proj")
+    assert not any(name.startswith("ocr_encoder.") for name in model.state_dict())
+    batch = build_collator(model, tokenizer, training=True)([samples[0], {**samples[1], "ocr_path": None}])
+    assert not any(name.startswith(("ocr_rel_", "twc_", "ocr_lattice_")) for name in batch)
+    text = model.get_input_embeddings()(batch["ocr_input_ids"])
+    with patch.object(model.semantic_ocr_embedding, "forward", wraps=model.semantic_ocr_embedding.forward) as fusion:
+        output = model(**batch)
+    assert fusion.call_count == 2
+    for i, call in enumerate(fusion.call_args_list):
+        torch.testing.assert_close(call.args[1], text[i:i+1])
+        assert call.args[0][0]["det"].shape[0] == batch["ocr_input_ids"].shape[1]
+        assert call.args[0][0]["rec"].shape[0] == batch["ocr_input_ids"].shape[1]
+    assert output["attention_mask"].shape[1] == 8 + 4 + batch["ocr_input_ids"].shape[1]
+    assert "twc_loss" not in output and "twc_answer_loss" not in output
+    assert torch.isfinite(output["loss"])
+    output["loss"].backward()
+    for weight in (model.get_input_embeddings().weight, model.char_embedding.weight,
+                   model.semantic_ocr_embedding.linear_boxes.weight,
+                   model.semantic_ocr_embedding.linear_det.weight,
+                   model.semantic_ocr_embedding.linear_rec.weight):
+        assert weight.grad is not None and torch.isfinite(weight.grad).all() and weight.grad.abs().sum() > 0
+    assert not [name for name,p in model.named_parameters() if p.requires_grad and p.grad is None]
+    with torch.no_grad():
+        generation = model.generate(**batch)
+        encoded, mask, _ = model.encode(**{k:v for k,v in batch.items() if k != "labels"})
+        torch.testing.assert_close(generation, model.generate(encoder_outputs=encoded, attention_mask=mask))
+    model.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
+    restored, _ = load_model_and_tokenizer(str(tmp_path))
+    assert not restored.config.ablation_use_consformer and not hasattr(restored, "ocr_encoder")
+    restored.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(restored(**batch)["logits"], output["logits"])
+        torch.testing.assert_close(restored.generate(**batch), generation)
+
+
+def test_disabling_consformer_preserves_initialization_of_shared_modules(make_model):
+    full = make_model(ablation_use_ocr_aug=False)
+    ablated = make_model(ablation_use_consformer=False, ablation_use_ocr_aug=False)
+    full_state = full.state_dict()
+    for name, value in ablated.state_dict().items():
+        torch.testing.assert_close(value, full_state[name], rtol=0, atol=0)
+    assert set(full_state) - set(ablated.state_dict())
+    assert all(name.startswith("ocr_encoder.") for name in set(full_state) - set(ablated.state_dict()))

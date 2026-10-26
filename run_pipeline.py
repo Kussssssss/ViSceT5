@@ -2,7 +2,7 @@
 
 STAGE=finetune (default) | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
-            RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG, USE_TWC,
+            RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG/CONSFORMER, USE_TWC,
             TWC_WEIGHT, TWC_LOSS, TWC_FEATURE, TWC_QUEUE_SIZE, TWC_QUEUE_START,
             TWC_MASK_SAME_TEXT, TWC_OBJECTIVE, TWC_ANSWER_WEIGHT, TWC_RELATED_TRAIN, OCR_FEATURE_NORM, QAVIT_MODE (off|no_question|question),
             TWC_TEMPERATURE, TWC_ADV_PROBABILITY, TWC_VIEW, OCR_AUG_MODE, OCR_RELATED, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
@@ -32,6 +32,7 @@ def training_arguments():
         "ABLATION_USE_IMAGE": "ablation_use_image",
         "ABLATION_USE_QACLIP": "ablation_use_qaclip",
         "ABLATION_USE_OCR": "ablation_use_ocr",
+        "ABLATION_USE_CONSFORMER": "ablation_use_consformer",
         "ABLATION_USE_OCR_AUG": "ablation_use_ocr_aug",
         "USE_TWC": "use_twc",
         "TWC_WEIGHT": "twc_weight",

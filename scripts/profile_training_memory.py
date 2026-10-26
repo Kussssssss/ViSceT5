@@ -207,7 +207,7 @@ def main(args_list=None):
             "Audit fresh optimizer states; use model_name_or_path to load model weights."
         )
     set_seed(train_args.seed)
-    flags = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr",
+    flags = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "ablation_use_consformer",
              "ablation_use_ocr_aug", "use_twc", "twc_weight")
     model, tokenizer = load_model_and_tokenizer(
         model_args.model_name_or_path, overrides={name: getattr(model_args, name) for name in flags}
