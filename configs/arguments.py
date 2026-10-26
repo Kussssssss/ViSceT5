@@ -23,6 +23,10 @@ class ModelArguments:
     ablation_use_ocr: bool = field(
         default=True, metadata={"help": "SceSpaVis OCR representation. False = text-only OCR baseline."}
     )
+    ablation_use_consformer: bool = field(
+        default=True,
+        metadata={"help": "Contextualize OCR text with ConsFormer. False keeps raw ViT5 embeddings plus character/box/det/rec fusion."},
+    )
     ablation_use_image: bool = field(
         default=True, metadata={"help": "False = no image features at all (CLIP is not built)."}
     )

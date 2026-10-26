@@ -29,6 +29,7 @@ class OpenViVQAConfig(PretrainedConfig):
         clip_vision_name: str = "openai/clip-vit-base-patch16",
         ablation_use_qaclip: bool = False,
         ablation_use_ocr: bool = True,
+        ablation_use_consformer: bool = True,
         ablation_use_image: bool = True,
         ablation_use_ocr_aug: bool = True,
         use_twc: bool = False,
@@ -103,6 +104,7 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_vision_name = clip_vision_name
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
         self.ablation_use_ocr = bool(ablation_use_ocr)
+        self.ablation_use_consformer = bool(ablation_use_consformer)
         # Bỏ ảnh: CLIP không được dựng, encoder chỉ nhận [câu hỏi, OCR].
         self.ablation_use_image = bool(ablation_use_image)
         # Kênh sửa OCR: nối bản OCR đã sửa (related) sau bản gốc.

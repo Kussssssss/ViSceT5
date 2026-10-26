@@ -10,6 +10,15 @@ trong luồng hiện hành. Feature ảnh/OCR vào concat trực tiếp, không 
 
 ## Luồng dữ liệu
 
+Kịch bản YAML/notebook hiện tại: `ablation_use_ocr_aug=false`, `use_twc=false`,
+`ablation_use_consformer=false`, nhưng `ablation_use_ocr=true` và có image.
+OCR Origin lấy trực tiếp embedding từ ViT5, giữ norm/fusion character/bbox/det/rec,
+rồi concat với question/image vào ViT5 encoder. Không có Related hay loss TWC.
+ConsFormer không được đăng ký trong model, không forward/optimizer; khởi tạo tạm
+rồi bỏ dưới seed cũ để trọng số các module OCR còn lại giống baseline theo cùng seed.
+Cờ ConsFormer được lưu trong checkpoint; checkpoint cũ mặc định vẫn bật nó.
+Output YAML: `output/finetune_no_aug_no_twc_no_consformer`; notebook có tên run riêng.
+
 `configs/data/*.yaml` → `scripts/prepare_dataset.py` → `DatasetHubLoader`
 → CSV train/validation/test → `ViT5VQADataset` → `ViT5VQADataCollator`.
 

@@ -1,15 +1,16 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
-# ViSceT5 = CLIP không nhận câu hỏi + SceSpaVis + kênh sửa OCR (+ TWC khi use_twc=true).
+# Ablation: không augmentation, không TWC, OCR text không qua ConsFormer.
 ablation_use_image: true
 ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
-ablation_use_ocr_aug: true
+ablation_use_consformer: false # giữ OCR text embedding + character/bbox/det/rec
+ablation_use_ocr_aug: false
 ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
 ocr_aug_mode: "separate"      # hai lượt ConsFormer riêng; concat toàn bộ Origin + Related rồi cộng feature OCR
 qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
-use_twc: true
+use_twc: false
 twc_weight: 1.0
 twc_temperature_init: 0.07    # tau cố định, không gradient và không cập nhật bởi optimizer
 twc_adv_probability: 0.35    # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
@@ -23,19 +24,19 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune"
-logging_dir: "./output/finetune/logs"
+output_dir: "./output/finetune_no_aug_no_twc_no_consformer"
+logging_dir: "./output/finetune_no_aug_no_twc_no_consformer/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
 
 seed: 42
 num_train_epochs: 5
-per_device_train_batch_size: 8
-per_device_eval_batch_size: 8
-gradient_accumulation_steps: 1   # batch hiệu dụng 8 = 8 x 1 (t1)
-learning_rate: 0.00003                 # phần đã pretrain (ViT5, projection của adapter CLIP)
-new_module_learning_rate: 0.0001       # module khởi tạo ngẫu nhiên (ConsFormer, embedding OCR/ký tự): ~3x, như M4C/TWA
+per_device_train_batch_size: 32
+per_device_eval_batch_size: 32
+gradient_accumulation_steps: 1   # batch hiệu dụng 32 = 32 x 1 trên một GPU
+learning_rate: 0.0001                  # ViT5 và projection của adapter CLIP
+new_module_learning_rate: 0.0001       # module OCR/ký tự khởi tạo ngẫu nhiên
 scalar_learning_rate: 0.001            # gate adapter có thể học, không weight decay; temperature TWC đã freeze
 weight_decay: 0.1
 warmup_ratio: 0.1
