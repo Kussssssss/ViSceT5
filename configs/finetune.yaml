@@ -26,7 +26,7 @@ num_train_epochs: 5
 per_device_train_batch_size: 8
 per_device_eval_batch_size: 8
 gradient_accumulation_steps: 1   # notebook: BATCH_SIZE, GRAD_ACCUM
-learning_rate: 0.00003                 # phần đã pretrain (ViT5, projection của QA-ViT)
+learning_rate: 0.0001                  # phần đã pretrain (ViT5, projection của QA-ViT)
 new_module_learning_rate: 0.0001       # module khởi tạo ngẫu nhiên (ConsFormer, embedding OCR/ký tự): ~3x, như M4C/TWA
 scalar_learning_rate: 0.001            # gate QA-ViT, không weight decay (temperature TWC cố định)
 weight_decay: 0.1
