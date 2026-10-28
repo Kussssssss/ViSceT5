@@ -705,6 +705,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "False",
         "--ocr_feature_norm",
         "rmsnorm",  # the fixture model; resume re-applies the architecture flags
+        "--consformer_constituent",
+        "legacy",  # the fixture model (config default)
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -1117,3 +1119,65 @@ def test_configs_before_eval_related_keep_the_training_procedure():
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     assert cfg["twc_eval_related"] == "correct"
+
+
+
+def _tree_transformer_prior(neighbor):
+    """Reference: ViConsFormer / Tree Transformer GroupAttention, two triangular matmuls."""
+    n = neighbor.shape[-1]
+    a = torch.diag(torch.ones(n - 1), 1).bool()
+    b = torch.eye(n).bool()
+    tri = torch.triu(torch.ones(n, n, dtype=neighbor.dtype))
+    t = torch.log(neighbor + 1e-9).masked_fill(~a, 0).matmul(tri)
+    g = tri.matmul(t).exp().masked_fill(~(tri.bool() & ~b), 0)
+    return g + g.transpose(-2, -1) + neighbor.masked_fill(~b, 1e-4)
+
+
+def test_constituent_prior_is_the_tree_transformer_prior():
+    from models.modules.ocr_consformer import constituent_prior
+    torch.manual_seed(0)
+    p = torch.softmax(torch.randn(2, 3, 9, 9, dtype=torch.double), -1)
+    neighbor = 0.3 + 0.7 * torch.sqrt(p * p.transpose(-2, -1) + 1e-4)
+    prior = constituent_prior(neighbor)
+    torch.testing.assert_close(prior, _tree_transformer_prior(neighbor))
+    links = neighbor.diagonal(offset=1, dim1=-2, dim2=-1)
+    torch.testing.assert_close(prior[..., 1, 4], links[..., 1] * links[..., 2] * links[..., 3] + 1e-4)
+
+
+def test_tree_consformer_attends_and_legacy_is_kept():
+    from models.modules.ocr_consformer import GroupAttention, OCREncoder, build_neighbor_mask
+    torch.manual_seed(0)
+    mask = torch.tensor([[1, 1, 1, 1, 1, 1, 0, 0]])
+    x = torch.randn(1, 8, 16)
+    tree, legacy = GroupAttention(2, 16, "tree"), GroupAttention(2, 16, "legacy")
+    legacy.load_state_dict(tree.state_dict())
+    with torch.no_grad():
+        c_tree, n_tree = tree(x, build_neighbor_mask(mask), 0.0)
+        c_legacy, n_legacy = legacy(x, build_neighbor_mask(mask), 0.0)
+    torch.testing.assert_close(n_tree, n_legacy)
+    off = ~torch.eye(8, dtype=torch.bool)
+    assert c_legacy[..., off].max() < 0.02  # the old prior: gated self-attention ~ off
+    assert c_tree[..., :6, :6][..., off[:6, :6]].min() > 1e-3 and c_tree[..., 0, 1].min() > 0.05
+    torch.testing.assert_close(c_tree, _tree_transformer_prior(n_tree.double()).float())
+    encoder = OCREncoder(2, 16, 8, 32)
+    encoder.set_word_embed_proxy(lambda ids: torch.nn.functional.embedding(ids, torch.randn(20, 16)))
+    ids = torch.randint(1, 20, (2, 8))
+    out, breaks = encoder(ids, torch.ones(2, 8, dtype=torch.long))
+    out.sum().backward()
+    assert torch.isfinite(out).all() and breaks.shape == (2, 3, 2, 8, 8)
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in encoder.parameters())
+    assert hasattr(encoder.layers[0].self_attn, "fc_o")
+    assert not hasattr(OCREncoder(2, 16, 8, 32, constituent="legacy").layers[0].self_attn, "fc_o")
+
+
+def test_consformer_constituent_defaults(make_model):
+    assert OpenViVQAConfig().consformer_constituent == "legacy"  # older checkpoints load as trained
+    assert ModelArguments().consformer_constituent == "tree"
+    import yaml
+    cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
+    assert cfg["consformer_constituent"] == "tree"
+    old = make_model(ablation_use_ocr=True).state_dict()
+    assert not any(".fc_o." in key and "ocr_encoder" in key for key in old)
+    new = make_model(ablation_use_ocr=True, consformer_constituent="tree")
+    assert any(".fc_o." in key and "ocr_encoder" in key for key in new.state_dict())
+    assert new.ocr_encoder.layers[0].group_attn.constituent == "tree"

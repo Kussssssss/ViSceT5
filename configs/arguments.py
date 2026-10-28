@@ -44,6 +44,9 @@ class ModelArguments:
     twc_eval_related: str = field(
         default="correct", metadata={"help": "Related OCR copy at eval/test: correct (100% correction, no noise) | augment."}
     )
+    consformer_constituent: str = field(
+        default="tree", metadata={"help": "ConsFormer constituent prior: tree (Tree Transformer / ViConsFormer) | legacy."}
+    )
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )
