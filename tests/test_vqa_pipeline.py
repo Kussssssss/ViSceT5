@@ -991,7 +991,7 @@ def test_clip_late_adapter_trains_without_question(make_model, tokenizer, sample
 
 
 @pytest.mark.parametrize("full_method", [False, True])
-def test_yaml_consformer_ablation_and_full_method(make_model, tokenizer, samples, corrector, full_method):
+def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, corrector, full_method):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
@@ -1004,12 +1004,12 @@ def test_yaml_consformer_ablation_and_full_method(make_model, tokenizer, samples
     assert (cfg["per_device_train_batch_size"], cfg["per_device_eval_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (32, 32, 1, 0.1)
     assert cfg["learning_rate"] == 1e-4
     assert cfg["ocr_aug_mode"] == "separate"
-    assert not cfg["ablation_use_ocr_aug"] and not cfg["use_twc"] and not cfg["ablation_use_consformer"]
+    assert not cfg["ablation_use_ocr_aug"] and not cfg["use_twc"] and cfg["ablation_use_consformer"]
     assert cfg["ablation_use_ocr"] and cfg["ablation_use_image"]
     assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
     assert cfg["twc_temperature_init"] == 0.07
     model = make_model(use_twc=full_method, ablation_use_ocr_aug=full_method,
-                       ablation_use_consformer=full_method, ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
+                       ablation_use_consformer=cfg["ablation_use_consformer"], ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
                        twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector if full_method else None, training=True)
     outputs = model(**collator(samples))
@@ -1018,7 +1018,7 @@ def test_yaml_consformer_ablation_and_full_method(make_model, tokenizer, samples
         assert collator.related_mode == "twa" and collator.separate and collator.twc_lexical
         assert torch.isfinite(outputs["twc_loss"])
     else:
-        assert collator.related_mode == "none" and not hasattr(model, "ocr_encoder")
+        assert collator.related_mode == "none" and hasattr(model, "ocr_encoder")
         assert "twc_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
 

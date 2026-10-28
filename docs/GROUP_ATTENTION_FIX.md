@@ -92,7 +92,7 @@ Các tests này chạy trên CPU, không đo hiệu suất VQA hoặc VRAM GPU.
 
 ## Cấu hình thí nghiệm hiện tại
 
-YAML và notebook vẫn ở kịch bản ablation tắt augmentation, TWC và ConsFormer.
-Bản sửa GroupAttention được dùng khi `ablation_use_consformer=true` (YAML) hoặc
-`USE_CONSFORMER=True` (notebook), với `ablation_use_ocr=true` / `USE_SCESPAVIS=True`.
+YAML và notebook bật ConsFormer để dùng GroupAttention đã sửa, vẫn tắt augmentation/TWC.
+Các cờ hiện tại là `ablation_use_consformer=true` (YAML), `USE_CONSFORMER=True`
+(notebook), với `ablation_use_ocr=true` / `USE_SCESPAVIS=True`.
 Các thông số learning rate/batch size và công thức loss không đổi trong lần sửa này.
