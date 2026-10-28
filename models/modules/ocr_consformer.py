@@ -72,7 +72,8 @@ class GroupAttention(nn.Module):
         ctx = self.norm(context).view(B, L, self.h, self.d_k).transpose(1, 2)
         q = self.linear_query(ctx).to(torch.float32)
         k = self.linear_key  (ctx).to(torch.float32)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
+        # GroupAttention uses d_k (not the sqrt(d_kv) of regular self-attention).
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.d_k
         scores = scores.masked_fill(~nb_mask[:, None, :, :], -1e4)
         neibor_attn = F.softmax(scores, dim=-1)
         neibor_attn = torch.sqrt(neibor_attn * neibor_attn.transpose(-2, -1) + 1e-4)
@@ -83,9 +84,17 @@ class GroupAttention(nn.Module):
         neibor_attn = prior_f + (1.0 - prior_f) * neibor_attn
         tri = torch.triu(torch.ones(L, L, device=device, dtype=torch.bool), diagonal=0).unsqueeze(0).unsqueeze(0)
         tri_f = tri.to(torch.float32)
-        t = torch.log(neibor_attn + 1e-9).matmul(tri_f)
-        g_attn = tri_f.matmul(t).exp()
         eye = torch.eye(L, device=device, dtype=torch.bool).unsqueeze(0).unsqueeze(0)
+        forward_neighbor = torch.diag(
+            torch.ones(L - 1, device=device, dtype=torch.bool), diagonal=1
+        )
+        # For i < j, group[i,j] = product(neighbor[k,k+1], k=i..j-1).
+        # Only forward adjacent links belong in the log-space path product.
+        adjacent_log = torch.log(neibor_attn + 1e-9).masked_fill(~forward_neighbor, 0)
+        t = adjacent_log.matmul(tri_f)
+        # Clear diagonal and lower triangle BEFORE symmetrizing. Otherwise exp(0)
+        # inserts ones that are not group probabilities (especially on the diagonal).
+        g_attn = tri_f.matmul(t).exp().masked_fill(~(tri & ~eye), 0)
         g_attn = g_attn + g_attn.transpose(-2, -1) + neibor_attn.masked_fill(~eye, 1e-4)
         return g_attn.to(dtype_in), neibor_attn.to(dtype_in)
 
