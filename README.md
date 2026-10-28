@@ -52,6 +52,11 @@ unlabelled split can be used for generation; answer-based metrics require refere
 
 Flags in `configs/finetune.yaml` select the ablation baselines:
 
+The GroupAttention equations have been corrected against the supplied original
+source; see [GROUP_ATTENTION_FIX.md](docs/GROUP_ATTENTION_FIX.md) for the exact
+differences, padding behavior and regression checks. The correction is active
+when the OCR ConsFormer is enabled.
+
 | Flag set to `false` | Result |
 | --- | --- |
 | `ablation_use_qaclip` | CLIP without question instruction |
