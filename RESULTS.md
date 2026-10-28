@@ -56,10 +56,22 @@ Commit `4221b1f` là code của run tham chiếu bs4x2.
 
 Run chỉ có Consformer không dùng bản related, nên ở `a04a02e` nó phải cho kết quả tương đương run 32×1 + Consformer ở `cc773b0`. Hai run cần chạy lại ở `a04a02e` là `twc` và `consformer-twc`.
 
+Run `consformer` ở `a04a02e` vẫn dùng ConsFormer lỗi (mục 6). Mọi run có Consformer cần chạy ở `377099e` trở đi.
+
+### 1d. `377099e`: ConsFormer có prior thành phần đúng (Tree Transformer / ViConsFormer)
+
+Chưa có run.
+
+| Batch, LR | Consformer | TWC | Dev | Test | Repo |
+|---|:-:|:-:|---|---|---|
+| 32×1, 1e-4 | ✓ | – | – | – | `ViSceT5-377099e-vitextvqa-consformer-bs32x1` |
+| 32×1, 1e-4 | ✓ | ✓ | – | – | `ViSceT5-377099e-vitextvqa-consformer-twc-p35-tau0.07-bs32x1` |
+
 ### Nhận xét
 
 - **Đặc trưng OCR đầy đủ là yếu tố lớn nhất.** Baseline text-only đạt 28.55 test EM, còn baseline có ký tự, box, det và rec đạt 31.53. Chênh lệch là +3.0 EM, cùng batch 4×2 và LR 3e-5.
 - **Batch 32 với LR 1e-4 tốt hơn batch 8 với LR 3e-5 khoảng +1 EM** (baseline: 32.56 so với 31.53). Batch 16 với LR 3e-5 lại kém hơn batch 8 (29.94 so với 31.64).
+- **Consformer của mọi run trên đều lỗi** (mục 6), nên các số "+ Consformer" chưa đo được đóng góp thật của module này.
 - **Ở `cc773b0`, chưa module nào vượt baseline trên test.** Thứ tự là base 32.56 > TWC 32.13 > cả hai 31.97 > Consformer 31.74. Các chênh lệch trên dev đều dưới 0.4 EM, nằm trong mức dao động giữa các lần chạy (khoảng 1 EM). Riêng TWC lúc test còn nhận bản related có nhiễu, nên cần đo lại ở `a04a02e`.
 
 ---
@@ -162,10 +174,16 @@ Phiên bản paper cũ (đã comment trong `paper/sections/5_experiments_and_res
 | **`cc773b0`** | twc-bs4x2-ablation | `4221b1f` + đặc trưng OCR đầy đủ cho mọi ablation | `ViSceT5-cc773b0-*` |
 | `6f990d9` | twc-bs4x2-ablation | LR mặc định 1e-4, batch 32×1 | `ViSceT5-cc773b0-*-bs32x1`³ |
 | **`a04a02e`** | twc-bs4x2-ablation | bản related lúc val/test/predict được sửa 100% | `ViSceT5-a04a02e-*` |
+| **`377099e`** | twc-bs4x2-ablation | ConsFormer có prior thành phần đúng (Tree Transformer / ViConsFormer) + output projection | `ViSceT5-377099e-*` |
 
 ³ Các run bs32x1 vẫn chạy code `cc773b0`; chỉ notebook đặt LR 1e-4 và batch 32.
 
 ## 6. Lỗi đã biết ảnh hưởng tới kết quả cũ
+
+- **ConsFormer: prior thành phần ≈ 0 (có từ commit đầu tiên, kế thừa từ notebook; sửa ở `377099e`).**
+  - Code cũ cộng log của **mọi** ô neighbour-attention, không chỉ a[k, k+1], và giữ cả nửa dưới ma trận. Vì vậy C ≤ 0.01 ở mọi ô ngoài đường chéo, trong khi bản tham chiếu cho tới khoảng 0.8.
+  - Self-attention có cổng chỉ còn khoảng 0.2% khối lượng (bản tham chiếu: 17–45%). ConsFormer cũ thực chất là 3 lớp FFN chạy trên từng token riêng lẻ.
+  - Mọi số "+ Consformer" / `scespavis` / `only_consformer` trước `377099e` đều bị ảnh hưởng.
 
 - **OCR-Aug "phantom pad"**: `<pad>` bị đọc thành "ipad" trong nửa related. Các số OCR-Aug trước khi sửa lỗi này đều bị ảnh hưởng.
 - **AVF / QA-CLIP**: score của patch luôn là hằng số, nên AVF crop toàn ảnh. Các run AVF/VS trước khi sửa đều bị ảnh hưởng.
