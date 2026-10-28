@@ -21,6 +21,9 @@ from data.vocab import COMBINED_CHARS, _normalize_text, _remove_vietnamese_accen
 
 _TONE_MARKS = {"́": 1, "̀": 2, "̣": 3, "̉": 4, "̃": 5}
 _TONE_BY_ID = {tone: mark for mark, tone in _TONE_MARKS.items()}
+_SPECIAL = re.compile(
+    r"^(http|https|www|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|\d+[./-]\d+|\d{3,}|[a-zA-Z]+\d+|\d+[a-zA-Z]+)"
+)
 _CONSONANTS = ["ngh", "ng", "gh", "gi", "kh", "nh", "ph", "qu", "th", "tr", "ch",
                "b", "c", "d", "đ", "g", "h", "k", "l", "m", "n", "p", "r", "s", "t", "v", "x"]
 _WORD = re.compile(r"[\w]+")
@@ -56,6 +59,11 @@ def _is_vowel(char):
 
 def _initial_consonant(word):
     return next((c for c in _CONSONANTS if word.startswith(c)), "")
+
+
+def _keep_as_is(word):
+    """Special strings, numbers and words with a digit at either end are never corrected."""
+    return bool(_SPECIAL.search(word)) or word.isdigit() or word[0].isdigit() or word[-1].isdigit()
 
 
 class OCRCorrector:
@@ -152,6 +160,13 @@ class OCRCorrector:
         return best
 
     # ------------------------------------------------------------- related copy
+    def correct(self, words):
+        """Deterministic correction of every word that can be corrected (eval/test related copy):
+        an out-of-lexicon word becomes its best lexicon candidate; lexicon words, specials and
+        numbers are kept. No noise."""
+        return [word if _keep_as_is(word) or word in self.vocab or len(word) < 2
+                else (self.find_related(word) or word) for word in words]
+
     def _char_noise(self, word, rng):
         """TWA create_adv_word_adr: same branches, positions and order of random draws."""
         chars = list(word)

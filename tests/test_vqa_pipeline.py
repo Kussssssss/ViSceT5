@@ -1081,3 +1081,39 @@ def test_configs_before_full_ocr_features_keep_text_only_baseline(make_model):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     assert cfg["ocr_full_features"] is True
+
+
+
+def test_related_copy_is_augmented_at_train_and_corrected_at_eval(make_model, tokenizer, samples):
+    import random
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}))
+    model = make_model(use_twc=True, twc_adv_probability=1.0, twc_eval_related="correct")
+    texts = ["cà", "phe", "sữa", "123"]  # "phe" can be corrected, "sữa"/"cà" are lexicon words
+    assert corrector.correct(texts) == ["cà", "phê", "sữa", "123"]
+    train = build_collator(model, tokenizer, corrector, training=True)
+    test = build_collator(model, tokenizer, corrector, training=False)
+    assert (train.related_mode, test.related_mode) == ("augment", "correct")
+    item = {"texts": texts, "placeholder": False}
+    assert test._related(item) == (["cà", "phê", "sữa", "123"], None, None)  # 100% correction, no noise
+    assert train._related(item)[0] == corrector.augment(texts, 1.0, random.Random(TWA_SEED))[0]
+    batch = test(samples)
+    assert "ocr_rel_input_ids" in batch and "twc_o2r" not in batch
+    for words in batch.get("ocr_words", []) or []:
+        assert words["rel"] == corrector.correct(words["orig"])
+    test.return_ocr_words = True
+    words = test(samples)["ocr_words"][0]
+    assert words["rel"] == corrector.correct(words["orig"])
+    model.eval()
+    with torch.no_grad():
+        model.generate(**{k: v for k, v in test(samples).items() if k not in ("labels", "ocr_words")})
+    with pytest.raises(ValueError):
+        ViT5VQADataCollator_ = type(test)
+        ViT5VQADataCollator_(tokenizer, None, None, model.config, corrector=corrector, related=True,
+                             twc_labels=True, related_mode="correct")
+
+
+def test_configs_before_eval_related_keep_the_training_procedure():
+    assert OpenViVQAConfig(use_twc=True).twc_eval_related == "augment"
+    import yaml
+    cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
+    assert cfg["twc_eval_related"] == "correct"

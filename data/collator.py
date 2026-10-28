@@ -23,13 +23,15 @@ TWA_SEED = 13
 class ViT5VQADataCollator:
     """OCR features stay aligned with their original image and text entries.
 
-    related: also build the related OCR copy (TWA augmentation, same procedure at train and
-    test) as its own sequence ocr_rel_* (word slots 0..W-1, sharing box/det/rec with the
-    original word). twc_labels: emit the TWC labels twc_o2r / twc_r2o (training).
+    related: also build the related OCR copy as its own sequence ocr_rel_* (word slots 0..W-1,
+    sharing box/det/rec with the original word), by related_mode:
+      augment — TWA keep / noise / correct with probability twc_adv_probability (training);
+      correct — every correctable word corrected, no noise (evaluation / test).
+    twc_labels: emit the TWC labels twc_o2r / twc_r2o (training, augment only).
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
-                 corrector=None, related=False, twc_labels=False):
+                 corrector=None, related=False, twc_labels=False, related_mode="augment"):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -41,6 +43,11 @@ class ViT5VQADataCollator:
         self.corrector = corrector
         self.related = bool(related)
         self.twc_labels = bool(twc_labels)
+        self.related_mode = str(related_mode)
+        if self.related_mode not in ("augment", "correct"):
+            raise ValueError("related_mode must be augment|correct.")
+        if self.twc_labels and self.related_mode != "augment":
+            raise ValueError("TWC labels come from the TWA augmentation (related_mode='augment').")
         self.return_ocr_words = False  # chỉ dùng cho scripts/visualize_attention.py
         if self.related and corrector is None:
             raise ValueError("The related OCR copy needs an OCRCorrector.")
@@ -124,6 +131,8 @@ class ViT5VQADataCollator:
         texts = item["texts"]
         if item["placeholder"]:
             return list(texts), None, None
+        if self.related_mode == "correct":
+            return self.corrector.correct(texts), None, None
         return self.corrector.augment(texts, self.cfg.twc_adv_probability, random.Random(TWA_SEED))
 
     def _encode_ocr_text(self, texts, word_count):
