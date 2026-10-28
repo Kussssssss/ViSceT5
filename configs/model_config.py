@@ -45,6 +45,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_temperature_init: float = 0.07,
         ocr_feature_norm: Optional[str] = None,
         ocr_full_features: Optional[bool] = None,
+        twc_eval_related: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -138,6 +139,13 @@ class OpenViVQAConfig(PretrainedConfig):
         # (SemanticOCREmbedding). None (configs before this field) = False: without Consformer the
         # OCR was text-only (ViT5 embedding → RMSNorm → Linear), so those checkpoints load as trained.
         self.ocr_full_features = bool(ocr_full_features) if ocr_full_features is not None else False
+        # Related OCR copy at evaluation / test (training always uses the TWA augmentation):
+        # correct = every correctable word corrected, no character noise (the noise only trains
+        # TWC, it carries no information about the answer); augment = the training procedure.
+        # None (configs before this field) = augment, so those checkpoints predict as trained.
+        self.twc_eval_related = str(twc_eval_related or "augment")
+        if self.twc_eval_related not in ("augment", "correct"):
+            raise ValueError("twc_eval_related must be augment|correct.")
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text

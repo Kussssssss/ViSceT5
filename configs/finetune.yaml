@@ -13,6 +13,7 @@ use_twc: false
 twc_weight: 1.0
 twc_adv_probability: 0.6     # TWA adv_pro: xác suất một từ của bản related bị đổi; notebook: TWC_AUG_P
 twc_temperature_init: 0.1    # τ khởi tạo (học được; TWA 0.07); notebook: TWC_TAU
+twc_eval_related: "correct"  # bản related lúc val/test/predict: sửa 100% từ sửa được, không nhiễu (train: tăng cường TWA)
 
 output_dir: "./output/finetune"
 logging_dir: "./output/finetune/logs"

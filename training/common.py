@@ -110,8 +110,9 @@ def build_corrector(config, train_frame, term_vocab_path="configs/data/term_voca
 
 
 def build_collator(model, tokenizer, corrector=None, training=False):
-    """With TWC the related OCR copy is built by the same TWA procedure at train and at test;
-    only training also emits the TWC labels."""
+    """With TWC the related OCR copy is the TWA augmentation (keep / noise / correct) at train,
+    with the TWC labels; at evaluation / test it is config.twc_eval_related (correct = every
+    correctable word corrected, no noise; augment = the training procedure, older runs)."""
     config = model.config
     ocr_config = {
         "ocr_embedding": {
@@ -129,4 +130,5 @@ def build_collator(model, tokenizer, corrector=None, training=False):
         corrector=corrector,
         related=config.use_twc,
         twc_labels=training and config.use_twc,
+        related_mode="augment" if training else config.twc_eval_related,
     )

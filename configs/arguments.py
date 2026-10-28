@@ -41,6 +41,9 @@ class ModelArguments:
     ocr_feature_norm: str = field(
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
     )
+    twc_eval_related: str = field(
+        default="correct", metadata={"help": "Related OCR copy at eval/test: correct (100% correction, no noise) | augment."}
+    )
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )
