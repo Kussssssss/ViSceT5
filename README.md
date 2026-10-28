@@ -9,12 +9,12 @@ pairs. The configured loss combines decoder cross-entropy over answer tokens
 
 ## Training
 
-The current YAML and Colab notebook run an ablation with **no OCR augmentation,
-no TWC and no OCR ConsFormer**. The OCR text uses ViT5's shared token embedding
-directly, then the existing character/bbox/det/rec fusion. Image patches and the
-question remain enabled. YAML output is isolated in
-`output/finetune_no_aug_no_twc_no_consformer`; the notebook adds `noaug-notwc-noconsformer`
-to the run name. Architecture flags are saved with checkpoints for evaluation.
+The current YAML and Colab notebook run an ablation with **OCR ConsFormer enabled,
+no OCR augmentation and no TWC**. OCR Origin goes through the corrected GroupAttention,
+then character/bbox/det/rec fusion. Image patches and the question remain enabled.
+YAML output is `output/finetune_no_aug_no_twc_consformer_fixed`; notebook runs use
+the `groupfix` suffix to avoid resuming a checkpoint trained with the old equations.
+Architecture flags are saved with checkpoints for evaluation.
 
 Install dependencies with `bash setup.sh`, then run from the repository root:
 

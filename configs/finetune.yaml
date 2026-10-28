@@ -1,10 +1,10 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
-# Ablation: không augmentation, không TWC, OCR text không qua ConsFormer.
+# Ablation: bật ConsFormer với GroupAttention đã sửa; không augmentation/TWC.
 ablation_use_image: true
 ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
-ablation_use_consformer: false # giữ OCR text embedding + character/bbox/det/rec
+ablation_use_consformer: true # GroupAttention đã khớp công thức gốc
 ablation_use_ocr_aug: false
 ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
 ocr_aug_mode: "separate"      # hai lượt ConsFormer riêng; concat toàn bộ Origin + Related rồi cộng feature OCR
@@ -24,8 +24,8 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune_no_aug_no_twc_no_consformer"
-logging_dir: "./output/finetune_no_aug_no_twc_no_consformer/logs"
+output_dir: "./output/finetune_no_aug_no_twc_consformer_fixed"
+logging_dir: "./output/finetune_no_aug_no_twc_consformer_fixed/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
