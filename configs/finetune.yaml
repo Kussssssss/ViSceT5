@@ -4,6 +4,7 @@ data_dir: "./datasets"
 ablation_use_image: true
 ablation_use_qaclip: false   # QA-ViT: câu hỏi vào CLIP qua adapter học được · false = CLIP thường, không adapter
 ablation_use_ocr: true       # Consformer (ConsFormer mã hoá chữ OCR) · false = embedding token ViT5
+consformer_constituent: "tree"   # prior thành phần của ConsFormer như Tree Transformer / ViConsFormer (legacy = code cũ, prior ≈ 0)
 ocr_full_features: true      # mọi run đều có đặc trưng OCR: chữ + ký tự + box + det + rec (baseline cũng vậy)
 ocr_feature_norm: "layernorm"   # chuẩn hoá từng luồng OCR như code trước refactor
 # TWC như TWA: bản OCR related (tăng cường TWA = OCR Augmentation) đứng sau bản gốc trong input

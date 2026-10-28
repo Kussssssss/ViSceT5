@@ -87,6 +87,7 @@ class OpenViVQAModel(PreTrainedModel):
                         self.d_model,
                         self.vit5.config.d_kv,
                         self.vit5.config.d_ff,
+                        constituent=config.consformer_constituent,
                     )
                 self.semantic_ocr_embedding = SemanticOCREmbedding(
                     SimpleNamespace(

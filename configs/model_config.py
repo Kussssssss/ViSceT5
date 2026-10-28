@@ -46,6 +46,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_feature_norm: Optional[str] = None,
         ocr_full_features: Optional[bool] = None,
         twc_eval_related: Optional[str] = None,
+        consformer_constituent: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -146,6 +147,13 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_eval_related = str(twc_eval_related or "augment")
         if self.twc_eval_related not in ("augment", "correct"):
             raise ValueError("twc_eval_related must be augment|correct.")
+        # ConsFormer constituent prior: tree = Tree Transformer / ViConsFormer, C[i, j] =
+        # prod_{k=i}^{j-1} a[k, k+1], + output projection; legacy = the code before this field,
+        # whose prior is ~0 off the diagonal (gated self-attention ~ off). None (older configs) =
+        # legacy, so those checkpoints load and predict as trained.
+        self.consformer_constituent = str(consformer_constituent or "legacy")
+        if self.consformer_constituent not in ("tree", "legacy"):
+            raise ValueError("consformer_constituent must be tree|legacy.")
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
