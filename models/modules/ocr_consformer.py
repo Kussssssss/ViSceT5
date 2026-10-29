@@ -8,6 +8,12 @@ the gated self-attention (as Tree Transformer).
 constituent="legacy": the code every checkpoint before this field was trained with. Its prior misses
 the two masks of the reference (only a[k, k+1] enters the product; only i < j is kept), so C is ~0
 off the diagonal and the gated self-attention contributes almost nothing.
+
+residual=True: the output is the ViT5 token embedding plus the (normalised) ConsFormer output, so
+the pretrained embedding is never lost and ConsFormer adds the constituent context on top of it. No
+extra projection: the gain of the final LayerNorm already scales the added part per dimension, and a
+zero-initialised projection would block the gradient into ConsFormer until it opens.
+residual=False: the ConsFormer output replaces the pretrained embeddings (ViConsFormer).
 """
 
 import math
@@ -155,7 +161,7 @@ class OCREncoderLayer(nn.Module):
 
 class OCREncoder(nn.Module):
     def __init__(self, head, d_model, d_kv, d_ff, word_embed=None, num_layers: int = 3,
-                 constituent: str = "tree"):
+                 constituent: str = "tree", residual: bool = False):
         super().__init__()
         if constituent not in ("tree", "legacy"):
             raise ValueError("constituent must be tree|legacy.")
@@ -167,6 +173,7 @@ class OCREncoder(nn.Module):
         self._legacy_embed = word_embed if isinstance(word_embed, nn.Module) else None
         self.layers = clones(OCREncoderLayer(head, d_model, d_kv, d_ff, constituent=constituent), num_layers)
         self.norm = nn.LayerNorm(d_model)
+        self.residual = bool(residual)
 
     def set_word_embed_proxy(self, proxy_callable):
         self._word_embed_proxy = proxy_callable
@@ -179,12 +186,16 @@ class OCREncoder(nn.Module):
         else:
             raise RuntimeError("OCREncoder: No word embedding proxy set.")
         dtype_in = x.dtype
+        embeddings = x
         nb_mask_2d = build_neighbor_mask(mask_1d)
         break_probs = []
         group_prob = 0.0
         for layer in self.layers:
             x, group_prob, break_prob = layer(x, mask_1d, nb_mask_2d, group_prob)
             break_probs.append(break_prob)
-        x = self.norm(x).to(dtype_in)
+        x = self.norm(x)
+        if self.residual:
+            x = embeddings + x
+        x = x.to(dtype_in)
         break_probs = torch.stack(break_probs, dim=1)
         return x, break_probs

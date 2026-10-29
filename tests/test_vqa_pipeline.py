@@ -707,6 +707,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "rmsnorm",  # the fixture model; resume re-applies the architecture flags
         "--consformer_constituent",
         "legacy",  # the fixture model (config default)
+        "--consformer_residual",
+        "False",
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -1181,3 +1183,32 @@ def test_consformer_constituent_defaults(make_model):
     new = make_model(ablation_use_ocr=True, consformer_constituent="tree")
     assert any(".fc_o." in key and "ocr_encoder" in key for key in new.state_dict())
     assert new.ocr_encoder.layers[0].group_attn.constituent == "tree"
+
+
+
+def test_residual_consformer_adds_to_the_token_embeddings(make_model):
+    from models.modules.ocr_consformer import OCREncoder
+    torch.manual_seed(0)
+    table = torch.randn(20, 16)
+    plain = OCREncoder(2, 16, 8, 32)
+    residual = OCREncoder(2, 16, 8, 32, residual=True)
+    residual.load_state_dict(plain.state_dict())  # no extra parameters
+    for encoder in (plain, residual):
+        encoder.set_word_embed_proxy(lambda ids: torch.nn.functional.embedding(ids, table))
+    ids = torch.randint(1, 20, (2, 8))
+    mask = torch.ones(2, 8, dtype=torch.long)
+    plain.eval(), residual.eval()  # no dropout: both passes see the same sublayers
+    with torch.no_grad():
+        torch.testing.assert_close(residual(ids, mask)[0], table[ids] + plain(ids, mask)[0])
+    residual.train()
+    out, _ = residual(ids, mask)
+    out.pow(2).sum().backward()
+    assert all(p.grad is not None and p.grad.abs().sum() > 0 for p in residual.parameters())
+    assert OpenViVQAConfig().consformer_residual is False  # older checkpoints load as trained
+    assert ModelArguments().consformer_residual is True
+    import yaml
+    cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
+    assert cfg["consformer_residual"] is True
+    model = make_model(ablation_use_ocr=True, consformer_constituent="tree", consformer_residual=True)
+    assert model.ocr_encoder.residual
+    assert model.state_dict().keys() == make_model(ablation_use_ocr=True, consformer_constituent="tree").state_dict().keys()

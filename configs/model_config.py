@@ -47,6 +47,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_full_features: Optional[bool] = None,
         twc_eval_related: Optional[str] = None,
         consformer_constituent: Optional[str] = None,
+        consformer_residual: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -154,6 +155,9 @@ class OpenViVQAConfig(PretrainedConfig):
         self.consformer_constituent = str(consformer_constituent or "legacy")
         if self.consformer_constituent not in ("tree", "legacy"):
             raise ValueError("consformer_constituent must be tree|legacy.")
+        # ConsFormer output added to the ViT5 token embeddings (residual) instead of replacing them.
+        # None (older configs) = False, so those checkpoints load and predict as trained.
+        self.consformer_residual = bool(consformer_residual) if consformer_residual is not None else False
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
