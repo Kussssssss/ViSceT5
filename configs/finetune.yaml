@@ -12,7 +12,7 @@ qavit_mode: "off"   # off | no_question | question — CLIP thường (các run 
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
 use_twc: true
 twc_weight: 1.0
-twc_temperature_init: 0.07    # tau cố định, không gradient và không cập nhật bởi optimizer
+twc_temperature_init: 0.2     # tau khởi tạo; học log(1/tau) qua gradient
 twc_adv_probability: 0.35    # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
 twc_view: "shared"           # VQA và TWC dùng chung một lượt ViT5 encoder, cùng Origin + Related
 twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
@@ -24,8 +24,8 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune_aug_twc_consformer_fixed"
-logging_dir: "./output/finetune_aug_twc_consformer_fixed/logs"
+output_dir: "./output/finetune_aug_twc_consformer_fixed_tau02_trainable"
+logging_dir: "./output/finetune_aug_twc_consformer_fixed_tau02_trainable/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
@@ -37,7 +37,7 @@ per_device_eval_batch_size: 32
 gradient_accumulation_steps: 1   # batch hiệu dụng 32 = 32 x 1 trên một GPU
 learning_rate: 0.0001                  # ViT5 và projection của adapter CLIP
 new_module_learning_rate: 0.0001       # module OCR/ký tự khởi tạo ngẫu nhiên
-scalar_learning_rate: 0.001            # gate adapter có thể học, không weight decay; temperature TWC đã freeze
+scalar_learning_rate: 0.001            # temperature TWC và gate adapter, không weight decay
 weight_decay: 0.1
 warmup_ratio: 0.1
 lr_scheduler_type: "cosine"
