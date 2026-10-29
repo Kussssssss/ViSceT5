@@ -1008,6 +1008,7 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
     assert cfg["ablation_use_ocr"] and cfg["ablation_use_image"]
     assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
     assert cfg["twc_temperature_init"] == 0.2
+    assert cfg["twc_temperature_learning_rate"] == 1e-5 and cfg["weight_decay"] == 0.1
     model = make_model(use_twc=full_method, ablation_use_ocr_aug=full_method,
                        ablation_use_consformer=cfg["ablation_use_consformer"], ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
                        twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
@@ -1033,6 +1034,7 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     initial_scale = model.twc_logit_scale.detach().clone()
     args = CustomTrainingArguments(output_dir=str(tmp_path), learning_rate=3e-5, weight_decay=0.1,
                                    new_module_learning_rate=1e-4, scalar_learning_rate=1e-3,
+                                   twc_temperature_learning_rate=1e-5,
                                    max_steps=1, per_device_train_batch_size=2, logging_steps=1,
                                    remove_unused_columns=False, report_to="none", save_strategy="no",
                                    use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
@@ -1042,10 +1044,11 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     optimizer = trainer.create_optimizer()
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     named = dict(model.named_parameters())
-    assert by_id[id(named["twc_logit_scale"])]["lr"] == 1e-3
-    assert by_id[id(named["twc_logit_scale"])]["weight_decay"] == 0.0
+    assert by_id[id(named["twc_logit_scale"])]["lr"] == 1e-5
+    assert by_id[id(named["twc_logit_scale"])]["weight_decay"] == 0.1
     gate = next(n for n in named if n.endswith("instruction_proj_gate"))
     assert by_id[id(named[gate])]["lr"] == 1e-3
+    assert by_id[id(named[gate])]["weight_decay"] == 0.0
     consformer = next(n for n in named if n.startswith("ocr_encoder.") and n.endswith("weight"))
     assert by_id[id(named[consformer])]["lr"] == 1e-4
     t5 = "vit5.shared.weight"
@@ -1328,13 +1331,22 @@ def test_learnable_temperature_survives_checkpoint_and_optimizer_step(
         assert scale.requires_grad and scale.grad is None
         torch.testing.assert_close(scale, trained_scales[name], rtol=0, atol=0)
     args = CustomTrainingArguments(output_dir=str(tmp_path / "train"), use_cpu=True, report_to="none",
-                                   scalar_learning_rate=1e-3, weight_decay=0.1)
+                                   scalar_learning_rate=1e-3, twc_temperature_learning_rate=1e-5, weight_decay=0.1)
     trainer = VQATrainer(model=restored, args=args)
     optimizer = trainer.create_optimizer()
     groups = {id(p): group for group in optimizer.param_groups for p in group["params"]}
     for name in names:
         group = groups[id(getattr(restored, name))]
-        assert group["lr"] == 1e-3 and group["weight_decay"] == 0.0
+        assert group["lr"] == 1e-5 and group["weight_decay"] == 0.1
+    # With zero gradients and empty moments, AdamW must still decay the log scales.
+    for name in names:
+        getattr(restored, name).grad = torch.zeros_like(getattr(restored, name))
+    optimizer.step()
+    for name in names:
+        torch.testing.assert_close(
+            getattr(restored, name), trained_scales[name] * (1 - 1e-5 * 0.1), rtol=0, atol=0
+        )
+    optimizer.zero_grad(set_to_none=True)
     batch = build_collator(restored, tokenizer, corrector, training=True)(samples)
     output = restored(**batch)
     terms = [value for key, value in output.items() if key in ("twc_loss", "twc_answer_loss")]
