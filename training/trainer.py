@@ -17,7 +17,8 @@ except ImportError:
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "twc_answer_query",
                "ocr_type_embedding")
-SCALARS = ("twc_logit_scale", "twc_answer_logit_scale", "instruction_proj_gate")
+TEMPERATURES = ("twc_logit_scale", "twc_answer_logit_scale")
+SCALARS = ("instruction_proj_gate",)
 
 
 class VQATrainer(Seq2SeqTrainer):
@@ -59,11 +60,11 @@ class VQATrainer(Seq2SeqTrainer):
             return super()._load_rng_state(checkpoint)
 
     def create_optimizer(self):
-        """Three parameter groups (each keeps its own LR under the shared warmup/cosine schedule):
+        """Parameter groups keep their own LR under the shared warmup/cosine schedule:
         pretrained (ViT5, CLIP adapter projections) = learning_rate; randomly initialised
-        modules = new_module_learning_rate; trainable scalars (temperatures, adapter gates) =
-        scalar_learning_rate without weight decay (as CLIP's logit scale). Unset rates fall back
-        to learning_rate (and scalars to the usual weight-decay rule), i.e. the stock optimizer."""
+        modules = new_module_learning_rate; adapter gates = scalar_learning_rate without decay;
+        TWC temperatures = twc_temperature_learning_rate with the configured weight_decay.
+        Other unset rates fall back to the stock Trainer's rules."""
         if self.optimizer is not None:
             return self.optimizer
         args = self.args
@@ -71,6 +72,7 @@ class VQATrainer(Seq2SeqTrainer):
             "pretrained": args.learning_rate,
             "new": getattr(args, "new_module_learning_rate", None) or args.learning_rate,
             "scalar": getattr(args, "scalar_learning_rate", None) or args.learning_rate,
+            "temperature": getattr(args, "twc_temperature_learning_rate", 1e-5),
         }
         decay = set(self.get_decay_parameter_names(self.model))
         groups = {}
@@ -79,7 +81,9 @@ class VQATrainer(Seq2SeqTrainer):
                 continue
             # scalar_learning_rate unset: scalars are ordinary parameters (base LR, HF weight-decay
             # rule), so with both rates unset the groups equal the stock Trainer's (old code).
-            if name.split(".")[-1] in SCALARS and getattr(args, "scalar_learning_rate", None) is not None:
+            if name.split(".")[-1] in TEMPERATURES:
+                kind, weight_decay = "temperature", args.weight_decay
+            elif name.split(".")[-1] in SCALARS and getattr(args, "scalar_learning_rate", None) is not None:
                 kind, weight_decay = "scalar", 0.0
             else:
                 kind = "new" if name.split(".")[0] in NEW_MODULES else "pretrained"

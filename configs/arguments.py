@@ -126,8 +126,12 @@ class CustomTrainingArguments(Seq2SeqTrainingArguments):
     )
     scalar_learning_rate: Optional[float] = field(
         default=None,
-        metadata={"help": "LR of trainable scalar parameters (TWC temperatures, CLIP adapter gates), without weight decay; "
+        metadata={"help": "LR of CLIP adapter gates, without weight decay; "
                           "None = learning_rate. Adam moves a scalar by ~lr per step, so 3e-5 barely moves it."},
+    )
+    twc_temperature_learning_rate: float = field(
+        default=1e-5,
+        metadata={"help": "LR for TWC logit scales only; apply the configured weight_decay."},
     )
     smoke_test: bool = field(
         default=False,
