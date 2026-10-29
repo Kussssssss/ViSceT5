@@ -53,7 +53,7 @@ class ModelArguments:
     )
     twc_answer_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-grounded TWC loss."})
     twc_temperature_init: float = field(
-        default=0.07, metadata={"help": "Fixed TWC temperature tau (legacy option name); not trainable."}
+        default=0.2, metadata={"help": "Initial TWC temperature tau; optimize log(1/tau), restore trained values from checkpoints."}
     )
     ocr_aug_mode: str = field(
         default="separate", metadata={"help": "OCR Augmentation: separate (two ConsFormer passes, full concatenation) | concat (one pass) | "
@@ -126,7 +126,7 @@ class CustomTrainingArguments(Seq2SeqTrainingArguments):
     )
     scalar_learning_rate: Optional[float] = field(
         default=None,
-        metadata={"help": "LR of trainable scalar parameters (CLIP adapter gates), without weight decay; "
+        metadata={"help": "LR of trainable scalar parameters (TWC temperatures, CLIP adapter gates), without weight decay; "
                           "None = learning_rate. Adam moves a scalar by ~lr per step, so 3e-5 barely moves it."},
     )
     smoke_test: bool = field(

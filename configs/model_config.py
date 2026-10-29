@@ -46,7 +46,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_related_train: str = "correct",
         ocr_feature_norm: Optional[str] = None,
         clip_late_adapter: Optional[bool] = None,
-        twc_temperature_init: float = 0.07,
+        twc_temperature_init: float = 0.2,
         twc_view: str = "shared",
         ocr_aug_mode: Optional[str] = None,
         ocr_related: Optional[str] = None,
@@ -159,8 +159,8 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
-        # Fixed TWC temperature tau: scale = exp(theta) = 1/tau, no optimizer updates.
-        # Keep the legacy field name for checkpoint/CLI compatibility.
+        # Initial learnable TWC temperature: theta=log(1/tau), scale=exp(theta).
+        # Trained values are checkpoint weights; loading must not reset them.
         self.twc_temperature_init = float(twc_temperature_init)
         if not 0.01 <= self.twc_temperature_init <= 100:
             raise ValueError("twc_temperature_init must lie in [0.01, 100] (the logit-scale clamp).")

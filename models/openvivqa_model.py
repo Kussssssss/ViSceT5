@@ -118,9 +118,9 @@ class OpenViVQAModel(PreTrainedModel):
             self.ocr_type_embedding = nn.Embedding(2, self.d_model)
             nn.init.zeros_(self.ocr_type_embedding.weight)
         if config.use_twc and config.twc_objective in ("lexical", "both"):
-            # Fixed temperature: exp(logit_scale) = 1/tau; retain checkpoint key compatibility.
+            # Learn theta=log(1/tau); exp(theta) is the positive contrastive logit scale.
             self.twc_logit_scale = nn.Parameter(
-                torch.tensor(math.log(1 / config.twc_temperature_init)), requires_grad=False
+                torch.tensor(math.log(1 / config.twc_temperature_init))
             )
         if config.use_twc and config.twc_objective in ("answer", "both"):
             # Answer-grounded TWC: câu hỏi (đã qua encoder) → truy vấn; khởi tạo đồng nhất.
@@ -130,7 +130,7 @@ class OpenViVQAModel(PreTrainedModel):
                 self.twc_answer_query.weight.copy_(torch.eye(self.d_model))
                 self.twc_answer_query.bias.zero_()
             self.twc_answer_logit_scale = nn.Parameter(
-                torch.tensor(math.log(1 / config.twc_temperature_init)), requires_grad=False
+                torch.tensor(math.log(1 / config.twc_temperature_init))
             )
 
         self.generation_config = GenerationConfig(
@@ -151,14 +151,8 @@ class OpenViVQAModel(PreTrainedModel):
         model = loaded[0] if isinstance(loaded, tuple) else loaded
         if hasattr(model, "qa_clip"):
             model.qa_clip._apply_freeze()
-        # Loading may recreate parameters or restore a previously learned temperature.
-        # The configured fixed tau must remain authoritative on warm-start/evaluation.
-        with torch.no_grad():
-            for name in ("twc_logit_scale", "twc_answer_logit_scale"):
-                if hasattr(model, name):
-                    scale = getattr(model, name)
-                    scale.fill_(math.log(1 / model.config.twc_temperature_init))
-                    scale.requires_grad_(False)
+        # Preserve learned temperature values from the checkpoint; *_init only
+        # initializes new parameters and must not reset them on resume/evaluation.
         return loaded
 
     @property
@@ -490,7 +484,7 @@ class OpenViVQAModel(PreTrainedModel):
 
     def _twc(self, tokens, word_map, token_mask, o2r, r2o, groups, text_ids=None):
         """TWC (TWA §3.4–3.6): word features of the original and related OCR copies,
-        cosine similarity with fixed temperature; softmax InfoNCE (paper) or
+        cosine similarity with learnable temperature; softmax InfoNCE (paper) or
         sigmoid BCE (TWA code) on the soft labels. tokens: [B, L_ocr, D].
         text_ids: [B, 2W] hashed word texts (original half, related half), -1 = PAD.
         With twc_queue_size > 0 the softmax also sees the features of earlier batches."""
