@@ -47,6 +47,9 @@ class ModelArguments:
     consformer_constituent: str = field(
         default="tree", metadata={"help": "ConsFormer constituent prior: tree (Tree Transformer / ViConsFormer) | legacy."}
     )
+    consformer_residual: bool = field(
+        default=True, metadata={"help": "OCR text = ViT5 token embedding + ConsFormer output (False: ConsFormer output only)."}
+    )
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )
