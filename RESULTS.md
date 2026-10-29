@@ -60,12 +60,24 @@ Run `consformer` ở `a04a02e` vẫn dùng ConsFormer lỗi (mục 6). Mọi run
 
 ### 1d. `377099e`: ConsFormer có prior thành phần đúng (Tree Transformer / ViConsFormer)
 
-Chưa có run.
+| Batch, LR | Consformer | TWC | Dev best | Dev ep5 | **Test** | Repo |
+|---|:-:|:-:|---|---|---|---|
+| 32×1, 1e-4 | ✓ | – | ep5 31.35 / 57.06 | 31.35 / 57.06 | 32.15 / 56.20 | `ViSceT5-377099e-vitextvqa-consformer-bs32x1` |
 
-| Batch, LR | Consformer | TWC | Dev | Test | Repo |
-|---|:-:|:-:|---|---|---|
-| 32×1, 1e-4 | ✓ | – | – | – | `ViSceT5-377099e-vitextvqa-consformer-bs32x1` |
-| 32×1, 1e-4 | ✓ | ✓ | – | – | `ViSceT5-377099e-vitextvqa-consformer-twc-p35-tau0.07-bs32x1` |
+So sánh có cặp trên từng câu test (bootstrap CI 95%, McNemar), với các run 32×1 ở `cc773b0`:
+
+| So sánh | ΔEM [CI 95%] | McNemar p |
+|---|---|---|
+| Consformer đã sửa − baseline | −0.41 [−1.03, +0.21] | 0.21 |
+| Consformer đã sửa − Consformer lỗi | +0.41 [−0.17, +1.01] | 0.18 |
+| Consformer đã sửa − TWC | +0.02 [−0.57, +0.63] | 0.97 |
+| Consformer lỗi − baseline | −0.82 [−1.44, −0.20] | 0.009 |
+
+Hai run bất kỳ trả lời khác nhau ở khoảng 1.000 câu test (trùng nhau khoảng 90% trên EM). Vì vậy với một seed, chênh lệch dưới khoảng ±0.6 EM là nhiễu.
+
+### 1e. `b744ce2`: ConsFormer residual (embedding token ViT5 + đầu ra ConsFormer)
+
+Chưa có run.
 
 ### Nhận xét
 
@@ -175,6 +187,7 @@ Phiên bản paper cũ (đã comment trong `paper/sections/5_experiments_and_res
 | `6f990d9` | twc-bs4x2-ablation | LR mặc định 1e-4, batch 32×1 | `ViSceT5-cc773b0-*-bs32x1`³ |
 | **`a04a02e`** | twc-bs4x2-ablation | bản related lúc val/test/predict được sửa 100% | `ViSceT5-a04a02e-*` |
 | **`377099e`** | twc-bs4x2-ablation | ConsFormer có prior thành phần đúng (Tree Transformer / ViConsFormer) + output projection | `ViSceT5-377099e-*` |
+| **`b744ce2`** | twc-bs4x2-ablation | ConsFormer residual: đầu ra cộng vào embedding token thay vì thay thế | `ViSceT5-b744ce2-*` |
 
 ³ Các run bs32x1 vẫn chạy code `cc773b0`; chỉ notebook đặt LR 1e-4 và batch 32.
 
