@@ -12,7 +12,7 @@ pairs. The configured loss combines decoder cross-entropy over answer tokens
 The current YAML and Colab notebook enable **OCR ConsFormer, OCR augmentation and TWC**.
 Origin and Related go separately through the corrected GroupAttention, then the full
 pair enters character/bbox/det/rec fusion and ViT5. Image patches and the question remain enabled.
-YAML output is `output/finetune_aug_twc_consformer_fixed_tau02_trainable_templr1e5_wd01`; notebook runs use
+YAML output is `output/finetune_aug_twc_consformer_fixed_tau02_trainable_templr1e5_wd01_min006`; notebook runs use
 the `groupfix` suffix to avoid resuming a checkpoint trained with the old equations.
 Architecture flags are saved with checkpoints for evaluation.
 
@@ -92,14 +92,19 @@ the VQA decoder to OCR entry level, normalizes them, then computes the contrasti
 loss. When enabled, TWC uses BCE, `twc_feature: fused`, `twc_view: shared`.
 `ocr_related: augment` uses keep/correct/character-noise with probability **0.35**
 at both train and test, reproducibly seeded per sample. No extra ViT5 pass is needed.
-Temperature starts at `tau=0.2` and learns `theta=log(1/tau)`; the positive
-scale is `exp(theta)`. Temperature parameters use their own `twc_temperature_learning_rate=1e-5`
+Temperature starts at `tau=0.2`, stays in **[0.06, 100]**, and learns `theta=log(1/tau)`; the positive
+scale is `exp(theta)` (at most `1/0.06`, approximately 16.67). Both TWC objectives
+use this bound; the Trainer projects log scales after every optimizer step and
+before training forwards, and loading a checkpoint also projects out-of-range values.
+Temperature parameters use their own `twc_temperature_learning_rate=1e-5`
 with the configured `weight_decay` (currently **0.1**). Adapter gates keep
 `scalar_learning_rate=1e-3` without decay. Checkpoint loading preserves the trained scale instead of
 resetting it to the initial value. Use a fresh optimizer when warm-starting a
 checkpoint whose temperature was frozen; its optimizer omitted that parameter.
-Notebook run names include `tau0p2-learn-templr1e-05-decay` to isolate this experiment
+Notebook run names include `tau0p2-learn-templr1e-05-decay-min0p06` to isolate this experiment
 from the former optimizer groups; start a fresh optimizer when switching groups.
+The Colab notebook/launcher select branch `tmp`; generated Hub repository names
+longer than 96 characters are shortened with a deterministic configuration hash.
 Legacy `concat` and `lattice` modes remain available to load old experiments.
 To warm-start a lattice checkpoint into the new architecture, use a fresh optimizer;
 the old type embedding is unused. New checkpoints save their mode for evaluation.

@@ -47,6 +47,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_feature_norm: Optional[str] = None,
         clip_late_adapter: Optional[bool] = None,
         twc_temperature_init: float = 0.2,
+        twc_temperature_min: float = 0.06,
         twc_view: str = "shared",
         ocr_aug_mode: Optional[str] = None,
         ocr_related: Optional[str] = None,
@@ -162,8 +163,9 @@ class OpenViVQAConfig(PretrainedConfig):
         # Initial learnable TWC temperature: theta=log(1/tau), scale=exp(theta).
         # Trained values are checkpoint weights; loading must not reset them.
         self.twc_temperature_init = float(twc_temperature_init)
-        if not 0.01 <= self.twc_temperature_init <= 100:
-            raise ValueError("twc_temperature_init must lie in [0.01, 100] (the logit-scale clamp).")
+        self.twc_temperature_min = float(twc_temperature_min)
+        if not 0.01 <= self.twc_temperature_min <= self.twc_temperature_init <= 100:
+            raise ValueError("Require 0.01 <= twc_temperature_min <= twc_temperature_init <= 100.")
         # Which related copy lexical TWC contrasts (with twc_related_train=twa):
         # shared   = the one the decoder reads (TWA-augmented at train, corrected at test);
         # separate = the decoder always reads the deterministic correction (as at test) and

@@ -153,7 +153,21 @@ class OpenViVQAModel(PreTrainedModel):
             model.qa_clip._apply_freeze()
         # Preserve learned temperature values from the checkpoint; *_init only
         # initializes new parameters and must not reset them on resume/evaluation.
+        model.clamp_twc_temperatures_()
         return loaded
+
+    @torch.no_grad()
+    def clamp_twc_temperatures_(self):
+        """Project parameters without detaching future temperature gradients."""
+        for name in ("twc_logit_scale", "twc_answer_logit_scale"):
+            if hasattr(self, name):
+                getattr(self, name).clamp_(math.log(1 / 100), math.log(1 / self.config.twc_temperature_min))
+
+    def _twc_scale(self, logit_scale):
+        """Bound the effective scale even before projection (e.g. external weight loading)."""
+        return logit_scale.float().clamp(
+            math.log(1 / 100), math.log(1 / self.config.twc_temperature_min)
+        ).exp()
 
     @property
     def target_dtype(self):
@@ -460,7 +474,7 @@ class OpenViVQAModel(PreTrainedModel):
         question = (hidden.float() * mask).sum(1) / mask.sum(1).clamp_min(1)
         query = F.normalize(self.twc_answer_query(question.to(self.twc_answer_query.weight.dtype)).float(),
                             dim=-1, eps=1e-6)
-        scale = self.twc_answer_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
+        scale = self._twc_scale(self.twc_answer_logit_scale)
         scores = scale * query @ words.t()  # [B, B·S]
 
         flat = labels.reshape(-1).float()
@@ -492,7 +506,7 @@ class OpenViVQAModel(PreTrainedModel):
         features = self._pool_words(tokens, word_map, token_mask, 2 * words)
         original = features[:, :words].reshape(batch * words, -1)
         related = features[:, words:].reshape(batch * words, -1)
-        scale = self.twc_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
+        scale = self._twc_scale(self.twc_logit_scale)
         logits = scale * original @ related.t()  # [B·W, B·W], mọi cặp trong batch
 
         # Nhãn: block-diagonal theo mẫu (khác ảnh = âm); cặp khác mẫu nhưng cùng

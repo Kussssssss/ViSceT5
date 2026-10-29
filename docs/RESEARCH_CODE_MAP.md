@@ -14,9 +14,9 @@ Kịch bản YAML/notebook hiện tại: `ablation_use_ocr_aug=true`, `use_twc=t
 `ablation_use_consformer=true`, `ablation_use_ocr=true` và có image.
 OCR Origin/Related qua ConsFormer riêng với GroupAttention đã sửa, rồi concat đầy đủ,
 fusion character/bbox/det/rec và ghép question/image vào ViT5 encoder. TWC lấy output
-ViT5 encoder. Augmentation p=0.35; loss tổng = VQA + 1.0*TWC, temperature học được khởi tạo 0.2.
+ViT5 encoder. Augmentation p=0.35; loss tổng = VQA + 1.0*TWC, temperature học được khởi tạo 0.2, min=0.06.
 Cờ ConsFormer được lưu trong checkpoint; checkpoint cũ mặc định vẫn bật nó.
-Output YAML: `output/finetune_aug_twc_consformer_fixed_tau02_trainable_templr1e5_wd01`; notebook có hậu tố `groupfix`.
+Output YAML: `output/finetune_aug_twc_consformer_fixed_tau02_trainable_templr1e5_wd01_min006`; notebook có hậu tố `groupfix`.
 
 `configs/data/*.yaml` → `scripts/prepare_dataset.py` → `DatasetHubLoader`
 → CSV train/validation/test → `ViT5VQADataset` → `ViT5VQADataCollator`.
@@ -88,7 +88,7 @@ dùng chung box/det/rec với entry gốc):
 
 TWC (`OpenViVQAModel._twc`): cắt đầy đủ Origin và Related từ cùng output ViT5 encoder
 mà decoder VQA sử dụng, rồi pool về entry theo mapping hai bản và chuẩn hóa L2.
-Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ với τ khởi tạo 0.2; logit_scale nhận gradient, LR riêng 1e-5 và weight decay 0.1; gate CLIP vẫn LR 1e-3, không decay;
+Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ với τ khởi tạo 0.2; logit_scale nhận gradient, LR riêng 1e-5 và weight decay 0.1, tau bị giới hạn [0.06,100] trong logits và sau optimizer step; gate CLIP vẫn LR 1e-3, không decay;
 nhãn block-diagonal theo mẫu, cặp khác mẫu cùng (ảnh, chữ) kế thừa nhãn, hàng/cột PAD bỏ;
 loss = sigmoid-BCE hai chiều trên ô hợp lệ (như code TWA). Tổng loss = VQA + λ·TWC.
 YAML bật `use_twc=true`, `twc_feature=fused`, `twc_view=shared`. TWC truyền gradient
