@@ -1004,7 +1004,7 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
     assert (cfg["per_device_train_batch_size"], cfg["per_device_eval_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (32, 32, 1, 0.1)
     assert cfg["learning_rate"] == 1e-4
     assert cfg["ocr_aug_mode"] == "separate"
-    assert not cfg["ablation_use_ocr_aug"] and not cfg["use_twc"] and cfg["ablation_use_consformer"]
+    assert cfg["ablation_use_ocr_aug"] and cfg["use_twc"] and cfg["ablation_use_consformer"]
     assert cfg["ablation_use_ocr"] and cfg["ablation_use_image"]
     assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
     assert cfg["twc_temperature_init"] == 0.07

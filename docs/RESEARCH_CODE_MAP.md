@@ -10,12 +10,13 @@ trong luồng hiện hành. Feature ảnh/OCR vào concat trực tiếp, không 
 
 ## Luồng dữ liệu
 
-Kịch bản YAML/notebook hiện tại: `ablation_use_ocr_aug=false`, `use_twc=false`,
+Kịch bản YAML/notebook hiện tại: `ablation_use_ocr_aug=true`, `use_twc=true`,
 `ablation_use_consformer=true`, `ablation_use_ocr=true` và có image.
-OCR Origin qua ConsFormer với GroupAttention đã sửa, rồi fusion character/bbox/det/rec
-và concat với question/image vào ViT5 encoder. Không có Related hay loss TWC.
+OCR Origin/Related qua ConsFormer riêng với GroupAttention đã sửa, rồi concat đầy đủ,
+fusion character/bbox/det/rec và ghép question/image vào ViT5 encoder. TWC lấy output
+ViT5 encoder. Augmentation p=0.35; loss tổng = VQA + 1.0*TWC, temperature cố định 0.07.
 Cờ ConsFormer được lưu trong checkpoint; checkpoint cũ mặc định vẫn bật nó.
-Output YAML: `output/finetune_no_aug_no_twc_consformer_fixed`; notebook có hậu tố `groupfix`.
+Output YAML: `output/finetune_aug_twc_consformer_fixed`; notebook có hậu tố `groupfix`.
 
 `configs/data/*.yaml` → `scripts/prepare_dataset.py` → `DatasetHubLoader`
 → CSV train/validation/test → `ViT5VQADataset` → `ViT5VQADataCollator`.

@@ -1,16 +1,16 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
-# Ablation: bật ConsFormer với GroupAttention đã sửa; không augmentation/TWC.
+# Bật ConsFormer với GroupAttention đã sửa, OCR augmentation và TWC.
 ablation_use_image: true
 ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
 ablation_use_consformer: true # GroupAttention đã khớp công thức gốc
-ablation_use_ocr_aug: false
+ablation_use_ocr_aug: true
 ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
 ocr_aug_mode: "separate"      # hai lượt ConsFormer riêng; concat toàn bộ Origin + Related rồi cộng feature OCR
 qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
-use_twc: false
+use_twc: true
 twc_weight: 1.0
 twc_temperature_init: 0.07    # tau cố định, không gradient và không cập nhật bởi optimizer
 twc_adv_probability: 0.35    # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
@@ -24,8 +24,8 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune_no_aug_no_twc_consformer_fixed"
-logging_dir: "./output/finetune_no_aug_no_twc_consformer_fixed/logs"
+output_dir: "./output/finetune_aug_twc_consformer_fixed"
+logging_dir: "./output/finetune_aug_twc_consformer_fixed/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
