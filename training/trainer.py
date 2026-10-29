@@ -94,11 +94,18 @@ class VQATrainer(Seq2SeqTrainer):
         optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(args, self.model)
         optimizer_kwargs.pop("lr", None)
         self.optimizer = optimizer_cls(list(groups.values()), **optimizer_kwargs)
+        base = getattr(self.model, "module", self.model)
+        if any(hasattr(base, name) for name in TEMPERATURES):
+            base.clamp_twc_temperatures_()
+            self.optimizer.register_step_post_hook(self._project_twc_after_step)
         if self.is_world_process_zero():
             summary = {f"{k}{'' if wd else ' (no decay)'}": f"{len(g['params'])} tensors @ lr {g['lr']:g}"
                        for (k, wd), g in groups.items()}
             print("[optimizer] parameter groups:", summary)
         return self.optimizer
+
+    def _project_twc_after_step(self, _optimizer, _args, _kwargs):
+        getattr(self.model, "module", self.model).clamp_twc_temperatures_()
 
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(**inputs)
@@ -153,6 +160,8 @@ class VQATrainer(Seq2SeqTrainer):
         return loss, tokens.detach(), labels.detach() if labels is not None else None
 
     def training_step(self, model, inputs):
+        # Trainer resume can load state_dict directly, bypassing from_pretrained.
+        getattr(model, "module", model).clamp_twc_temperatures_()
         loss = super().training_step(model, inputs)
         # Preserve the existing protection before gradient clipping/optimizer updates.
         bad = []
@@ -174,8 +183,8 @@ class VQATrainer(Seq2SeqTrainer):
             base = getattr(self.model, "module", self.model)
             for name, key in (("twc_logit_scale", "twc_tau"), ("twc_answer_logit_scale", "twc_answer_tau")):
                 if hasattr(base, name):  # learned temperature tau = 1 / exp(clamped logit scale)
-                    theta = float(getattr(base, name).detach().clamp(-4.6052, 4.6052))
-                    logs[key] = round(float(torch.exp(torch.tensor(-theta))), 4)
+                    tau = base._twc_scale(getattr(base, name)).detach().reciprocal()
+                    logs[key] = round(float(tau), 4)
             self._twc_sum = {}
             self._twc_count = 0
         super().log(logs)

@@ -1007,7 +1007,7 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
     assert cfg["ablation_use_ocr_aug"] and cfg["use_twc"] and cfg["ablation_use_consformer"]
     assert cfg["ablation_use_ocr"] and cfg["ablation_use_image"]
     assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
-    assert cfg["twc_temperature_init"] == 0.2
+    assert cfg["twc_temperature_init"] == 0.2 and cfg["twc_temperature_min"] == 0.06
     assert cfg["twc_temperature_learning_rate"] == 1e-5 and cfg["weight_decay"] == 0.1
     model = make_model(use_twc=full_method, ablation_use_ocr_aug=full_method,
                        ablation_use_consformer=cfg["ablation_use_consformer"], ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
@@ -1418,3 +1418,88 @@ def test_disabling_consformer_preserves_initialization_of_shared_modules(make_mo
         torch.testing.assert_close(value, full_state[name], rtol=0, atol=0)
     assert set(full_state) - set(ablated.state_dict())
     assert all(name.startswith("ocr_encoder.") for name in set(full_state) - set(ablated.state_dict()))
+
+
+
+def test_temperature_floor_applies_after_optimizer_and_still_allows_learning(
+    make_model, tokenizer, samples, corrector, tmp_path
+):
+    import math
+    model = make_model(use_twc=True, twc_objective="both", twc_feature="fused", twc_queue_size=0,
+                       twc_temperature_min=0.06)
+    model.eval()
+    names = ("twc_logit_scale", "twc_answer_logit_scale")
+    args = CustomTrainingArguments(output_dir=str(tmp_path), use_cpu=True, report_to="none",
+                                   twc_temperature_learning_rate=0.5, weight_decay=0.0)
+    trainer = VQATrainer(model=model, args=args)
+    optimizer = trainer.create_optimizer()
+    with torch.no_grad():
+        for name in names:
+            getattr(model, name).fill_(math.log(1 / 0.061))
+    # An aggressive test step tries to lower tau below the floor.
+    for name in names:
+        getattr(model, name).grad = -torch.ones_like(getattr(model, name))
+    optimizer.step()
+    for name in names:
+        raw_tau = getattr(model, name).detach().neg().exp()
+        torch.testing.assert_close(raw_tau, torch.tensor(0.06), rtol=0, atol=1e-7)
+        assert getattr(model, name).requires_grad
+    # The same parameter must be able to leave the boundary in the opposite direction.
+    for name in names:
+        getattr(model, name).grad = torch.ones_like(getattr(model, name))
+    optimizer.step()
+    for name in names:
+        assert float(getattr(model, name).detach().neg().exp()) > 0.06001
+    optimizer.zero_grad(set_to_none=True)
+    with torch.no_grad():
+        for name in names:
+            getattr(model, name).fill_(math.log(1 / 0.06))
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    output = model(**batch)
+    contrastive = output["twc_loss"] + output["twc_answer_loss"]
+    assert torch.isfinite(contrastive)
+    contrastive.backward()
+    grad = model.vit5.encoder.block[0].layer[0].SelfAttention.q.weight.grad
+    assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0
+    logs = {"loss": float(contrastive.detach())}
+    trainer._twc_count = 1
+    trainer.log(logs)
+    assert logs["twc_tau"] >= 0.06 and logs["twc_answer_tau"] >= 0.06
+
+
+def test_temperature_floor_bounds_logits_and_projects_loaded_checkpoint(
+    make_model, tokenizer, samples, corrector, tmp_path
+):
+    import math
+    model = make_model(use_twc=True, twc_objective="both", twc_feature="fused", twc_queue_size=0,
+                       twc_temperature_min=0.06)
+    names = ("twc_logit_scale", "twc_answer_logit_scale")
+    with torch.no_grad():
+        for name in names:
+            getattr(model, name).fill_(math.log(1 / 0.01))
+    # Effective logits are bounded even if an external state_dict loaded an invalid raw parameter.
+    for name in names:
+        torch.testing.assert_close(model._twc_scale(getattr(model, name)), torch.tensor(1 / 0.06))
+    model.eval()
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    with torch.no_grad():
+        bounded = model(**batch)
+    model.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
+    restored, _ = load_model_and_tokenizer(str(tmp_path))
+    restored.eval()
+    assert restored.config.twc_temperature_min == 0.06
+    for name in names:
+        raw_tau = getattr(restored, name).detach().neg().exp()
+        torch.testing.assert_close(raw_tau, torch.tensor(0.06), rtol=0, atol=1e-7)
+        assert getattr(restored, name).requires_grad
+    with torch.no_grad():
+        projected = restored(**batch)
+    for loss in ("twc_loss", "twc_answer_loss"):
+        torch.testing.assert_close(bounded[loss], projected[loss])
+
+
+@pytest.mark.parametrize("minimum,initial", [(0.0, 0.2), (0.3, 0.2), (0.06, 101)])
+def test_temperature_bounds_validate_initialization(minimum, initial):
+    with pytest.raises(ValueError, match="twc_temperature_min"):
+        OpenViVQAConfig(twc_temperature_min=minimum, twc_temperature_init=initial)
