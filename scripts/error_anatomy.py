@@ -98,15 +98,21 @@ def main():
         frame = pd.read_csv(path)
         answers = {int(r.iloc[0]): "" if pd.isna(r.iloc[1]) else str(r.iloc[1]) for _, r in frame.iterrows()}
         counts = dict.fromkeys(CLASSES, 0)
-        em, f1 = [], []
+        em, f1, lengths, over, under = [], [], [], 0, 0
         for question, original, union_words in questions:
             prediction = prep(answers.get(question, "")).split()
             counts[classify(gold[question], prediction, set(original), union_words)] += 1
             em.append(float(prediction == gold[question]))
             f1.append(_f1_single(prediction, gold[question]))
+            lengths.append(len(prediction))
+            if prediction != gold[question]:
+                over += contains_span(prediction, gold[question])
+                under += bool(prediction) and contains_span(gold[question], prediction)
         table[name] = {k: round(100 * v / count, 2) for k, v in counts.items()}
         scores[name] = np.array(em)
-        print(f"{name}: EM {100 * np.mean(em):.2f} F1 {100 * np.mean(f1):.2f}")
+        print(f"{name}: EM {100 * np.mean(em):.2f} F1 {100 * np.mean(f1):.2f}"
+              f" | words per answer {np.mean(lengths):.2f} (gold {np.mean([len(gold[q[0]]) for q in questions]):.2f})"
+              f" | right start and words, too long {100 * over / count:.2f}% too short {100 * under / count:.2f}%")
     print("\n% of all questions")
     print(pd.DataFrame(table).to_string())
 
