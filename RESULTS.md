@@ -77,7 +77,10 @@ Hai run bất kỳ trả lời khác nhau ở khoảng 1.000 câu test (trùng n
 
 ### 1e. `b744ce2`: ConsFormer residual (embedding token ViT5 + đầu ra ConsFormer)
 
-Chưa có run.
+| Batch, LR | Consformer | TWC | Dev ep5 | **Test** | Repo |
+|---|:-:|:-:|---|---|---|
+| 32×1, 1e-4 | ✓ | – | 31.12 / 57.26 | 31.87 / 56.19 | `ViSceT5-b744ce2-vitextvqa-consformer-bs32x1` |
+| 32×1, 1e-4 | ✓ | ✓ (p 0.35, τ 0.07) | 30.22 / 56.01 | chưa predict | `ViSceT5-b744ce2-vitextvqa-consformer-twc-p35-tau0.07-bs32x1` |
 
 ### Nhận xét
 
