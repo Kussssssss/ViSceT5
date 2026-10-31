@@ -2,8 +2,9 @@
 
     python -m training.predict --ckpt_dir output/finetune --dataset ViTextVQA --split both
 
-The related OCR copy (TWC models) is built by the same TWA procedure as in training,
-with the lexicon from the TRAIN split.
+The related OCR copy (TWC models) follows config.twc_eval_related, or --related_mode: correct
+(every correctable word corrected), augment (the training procedure) or none (no related copy);
+the lexicon comes from the TRAIN split.
 Test answers are never read (the public test JSON may hold placeholders); dev EM/F1
 use the same normalisation as the validation metric during training.
 """
@@ -60,10 +61,17 @@ def main(args_list=None):
     parser.add_argument("--num_beams", type=int, default=0, help="0 = config value")
     parser.add_argument("--max_new_tokens", type=int, default=0, help="0 = config value")
     parser.add_argument("--limit", type=int, default=0, help="only the first N questions (smoke test)")
+    parser.add_argument("--related_mode", choices=("correct", "augment", "none"), default=None,
+                        help="related OCR copy of a TWC model; default = the checkpoint's twc_eval_related")
     args = parser.parse_args(args_list)
 
     model, tokenizer = load_model_and_tokenizer(args.ckpt_dir)
     model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
+    if args.related_mode:
+        model.config.twc_eval_related = args.related_mode
+    if model.config.use_twc:
+        print(f"[predict] related OCR copy: {model.config.twc_eval_related}"
+              f" (train augmentation p={model.config.twc_adv_probability})")
     frames = load_dataframes(args.dataset, args.data_dir)
     corrector = build_corrector(model.config, frames["train"]) if model.config.use_twc else None
     collator = build_collator(model, tokenizer, corrector, training=False)

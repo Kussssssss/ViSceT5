@@ -6,7 +6,7 @@ Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             module switches ABLATION_USE_QACLIP (QA-ViT), ABLATION_USE_OCR (Consformer), USE_TWC,
             TWC_ADV_PROBABILITY, TWC_TEMPERATURE, TWC_WEIGHT, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
-Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE.
+Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE, PREDICT_RELATED.
 """
 
 import os
@@ -92,6 +92,8 @@ def run():
                 arguments += ["--batch_size", _env("PREDICT_BATCH_SIZE")]
             if _env("PREDICT_LIMIT"):
                 arguments += ["--limit", _env("PREDICT_LIMIT")]
+            if _env("PREDICT_RELATED"):
+                arguments += ["--related_mode", _env("PREDICT_RELATED")]
             return predict(arguments)
         from training.finetune import main
 
