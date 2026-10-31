@@ -267,7 +267,8 @@ class OpenViVQAModel(PreTrainedModel):
         pieces.append(self._encode_ocr(ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map,
                                        ocr_char_ids, ocr_char_mask))
         masks.append(ocr_attention_mask)
-        if self.config.use_twc:
+        if self.config.use_twc and (ocr_rel_input_ids is not None or self.training
+                                    or self.config.twc_eval_related != "none"):
             if ocr_rel_input_ids is None:
                 raise ValueError("TWC needs the related OCR copy (ocr_rel_* batch fields).")
             if ocr_rel_attention_mask is None:

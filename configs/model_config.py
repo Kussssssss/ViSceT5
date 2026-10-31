@@ -143,11 +143,12 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ocr_full_features = bool(ocr_full_features) if ocr_full_features is not None else False
         # Related OCR copy at evaluation / test (training always uses the TWA augmentation):
         # correct = every correctable word corrected, no character noise (the noise only trains
-        # TWC, it carries no information about the answer); augment = the training procedure.
+        # TWC, it carries no information about the answer); augment = the training procedure;
+        # none = no related copy in the encoder input.
         # None (configs before this field) = augment, so those checkpoints predict as trained.
         self.twc_eval_related = str(twc_eval_related or "augment")
-        if self.twc_eval_related not in ("augment", "correct"):
-            raise ValueError("twc_eval_related must be augment|correct.")
+        if self.twc_eval_related not in ("augment", "correct", "none"):
+            raise ValueError("twc_eval_related must be augment|correct|none.")
         # ConsFormer constituent prior: tree = Tree Transformer / ViConsFormer, C[i, j] =
         # prod_{k=i}^{j-1} a[k, k+1], + output projection; legacy = the code before this field,
         # whose prior is ~0 off the diagonal (gated self-attention ~ off). None (older configs) =

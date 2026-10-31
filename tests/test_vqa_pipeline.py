@@ -1116,6 +1116,24 @@ def test_related_copy_is_augmented_at_train_and_corrected_at_eval(make_model, to
                              twc_labels=True, related_mode="correct")
 
 
+def test_predict_without_the_related_copy(make_model, tokenizer, samples):
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}))
+    model = make_model(use_twc=True, twc_eval_related="none").eval()
+    train = build_collator(model, tokenizer, corrector, training=True)
+    test = build_collator(model, tokenizer, corrector, training=False)
+    assert train.related and train.related_mode == "augment" and train.twc_labels
+    assert not test.related
+    batch = {k: v for k, v in test(samples).items() if k != "labels"}
+    assert "ocr_rel_input_ids" not in batch
+    with torch.no_grad():
+        encoded, mask, _ = model.encode(**batch)
+        model.generate(**batch)
+    assert encoded.last_hidden_state.shape[1] == mask.shape[1]
+    model.train()
+    with pytest.raises(ValueError):
+        model.encode(**batch)
+
+
 def test_configs_before_eval_related_keep_the_training_procedure():
     assert OpenViVQAConfig(use_twc=True).twc_eval_related == "augment"
     import yaml

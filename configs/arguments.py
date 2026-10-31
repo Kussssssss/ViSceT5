@@ -42,7 +42,7 @@ class ModelArguments:
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
     )
     twc_eval_related: str = field(
-        default="correct", metadata={"help": "Related OCR copy at eval/test: correct (100% correction, no noise) | augment."}
+        default="correct", metadata={"help": "Related OCR copy at eval/test: correct (100% correction, no noise) | augment | none."}
     )
     consformer_constituent: str = field(
         default="tree", metadata={"help": "ConsFormer constituent prior: tree (Tree Transformer / ViConsFormer) | legacy."}
