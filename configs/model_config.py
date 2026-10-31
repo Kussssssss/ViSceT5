@@ -48,8 +48,6 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_eval_related: Optional[str] = None,
         consformer_constituent: Optional[str] = None,
         consformer_residual: Optional[bool] = None,
-        twc_copy: Optional[bool] = None,
-        consformer_link_weight: Optional[float] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -161,11 +159,6 @@ class OpenViVQAConfig(PretrainedConfig):
         # ConsFormer output added to the ViT5 token embeddings (residual) instead of replacing them.
         # None (older configs) = False, so those checkpoints load and predict as trained.
         self.consformer_residual = bool(consformer_residual) if consformer_residual is not None else False
-        # With TWC, the answer can be copied from the OCR tokens (models/modules/copy_t5.py).
-        # None (older configs) = False, so those checkpoints load and predict as trained.
-        self.twc_copy = bool(twc_copy) if twc_copy is not None else False
-        # Weight of the loss supervising the ConsFormer links with the answer span. None = 0.
-        self.consformer_link_weight = float(consformer_link_weight or 0.0)
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
