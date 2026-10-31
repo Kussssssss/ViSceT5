@@ -16,8 +16,7 @@ except ImportError:
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj")
-SCALARS = ("twc_logit_scale", "instruction_proj_gate", "copy_continue", "copy_link_gain")
-AUXILIARY = ("twc_loss", "twc_acc", "link_loss")
+SCALARS = ("twc_logit_scale", "instruction_proj_gate")
 
 
 class VQATrainer(Seq2SeqTrainer):
@@ -101,21 +100,16 @@ class VQATrainer(Seq2SeqTrainer):
         if labels is None:
             raise ValueError("Training requires answer labels.")
         loss = (
-            # The copy head stops its logits at the last labelled step.
-            self.label_smoother(outputs, labels[:, : outputs["logits"].shape[1]])
+            self.label_smoother(outputs, labels)
             if self.label_smoother
             else outputs["loss"]
         )
-        config = getattr(model, "module", model).config
         if "twc_loss" in outputs:
-            loss = loss + config.twc_weight * outputs["twc_loss"]
-        if "link_loss" in outputs:
-            loss = loss + config.consformer_link_weight * outputs["link_loss"]
-        if model.training and any(key in outputs for key in AUXILIARY):
-            for key in AUXILIARY:
-                if key in outputs:
+            loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
+            if model.training:
+                for key in ("twc_loss", "twc_acc"):
                     self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
-            self._twc_count += 1
+                self._twc_count += 1
         return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
@@ -143,7 +137,6 @@ class VQATrainer(Seq2SeqTrainer):
             tokens = model.generate(
                 encoder_outputs=outputs["encoder_outputs"],
                 attention_mask=outputs["attention_mask"],
-                **{key: outputs[key] for key in ("copy_ids", "copy_prev", "copy_links") if key in outputs},
                 **generation,
             )
         return loss, tokens.detach(), labels.detach() if labels is not None else None
@@ -170,9 +163,6 @@ class VQATrainer(Seq2SeqTrainer):
             base = getattr(self.model, "module", self.model)
             if hasattr(base, "twc_logit_scale"):  # learned temperature τ = 1 / exp(logit scale)
                 logs["twc_tau"] = round(float(torch.exp(-base.twc_logit_scale.detach())), 4)
-            if getattr(base, "use_copy", False):
-                logs["copy_continue"] = round(float(base.vit5.copy_continue.detach()), 4)
-                logs["copy_link_gain"] = round(float(base.vit5.copy_link_gain.detach()), 4)
             self._twc_sum = {}
             self._twc_count = 0
         super().log(logs)

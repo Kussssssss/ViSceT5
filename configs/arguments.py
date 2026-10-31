@@ -50,12 +50,6 @@ class ModelArguments:
     consformer_residual: bool = field(
         default=True, metadata={"help": "OCR text = ViT5 token embedding + ConsFormer output (False: ConsFormer output only)."}
     )
-    twc_copy: bool = field(
-        default=True, metadata={"help": "With TWC: the answer distribution mixes generation with a copy from the OCR tokens."}
-    )
-    consformer_link_weight: float = field(
-        default=0.5, metadata={"help": "With Consformer: weight of the loss supervising its links with the answer span (0 = off)."}
-    )
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )

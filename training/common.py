@@ -132,6 +132,5 @@ def build_collator(model, tokenizer, corrector=None, training=False):
         corrector=corrector,
         related=config.use_twc and (training or eval_related != "none"),
         twc_labels=training and config.use_twc,
-        link_labels=training and config.ablation_use_ocr and config.consformer_link_weight > 0,
         related_mode="augment" if training or eval_related == "none" else eval_related,
     )
