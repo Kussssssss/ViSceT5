@@ -191,6 +191,7 @@ Phiên bản paper cũ (đã comment trong `paper/sections/5_experiments_and_res
 | **`a04a02e`** | twc-bs4x2-ablation | bản related lúc val/test/predict được sửa 100% | `ViSceT5-a04a02e-*` |
 | **`377099e`** | twc-bs4x2-ablation | ConsFormer có prior thành phần đúng (Tree Transformer / ViConsFormer) + output projection | `ViSceT5-377099e-*` |
 | **`b744ce2`** | twc-bs4x2-ablation | ConsFormer residual: đầu ra cộng vào embedding token thay vì thay thế | `ViSceT5-b744ce2-*` |
+| **`37a73f4`** | twc-bs4x2-ablation | TWC có copy từ OCR; Consformer có loss liên kết theo đáp án; bật cả hai thì liên kết nâng điểm chép cụm từ | `ViSceT5-37a73f4-*` |
 
 ³ Các run bs32x1 vẫn chạy code `cc773b0`; chỉ notebook đặt LR 1e-4 và batch 32.
 
