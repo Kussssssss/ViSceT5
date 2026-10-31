@@ -82,7 +82,7 @@ Hai run bất kỳ trả lời khác nhau ở khoảng 1.000 câu test (trùng n
 | 32×1, 1e-4 | ✓ | – | 31.12 / 57.26 | 31.87 / 56.19 | `ViSceT5-b744ce2-vitextvqa-consformer-bs32x1` |
 | 32×1, 1e-4 | ✓ | ✓ (p 0.35, τ 0.07) | 30.22 / 56.01 | chưa predict | `ViSceT5-b744ce2-vitextvqa-consformer-twc-p35-tau0.07-bs32x1` |
 
-### 1f. `0bbd575`: copy head, loss liên kết, chép cụm từ
+### 1f. `0bbd575`: copy head, loss liên kết, chép cụm từ (đã gỡ ở `2ec2fd7`)
 
 | Batch, LR | Consformer | TWC | Dev ep1→5 (EM) | Dev ep5 | **Test** | Repo |
 |---|:-:|:-:|---|---|---|---|
@@ -198,6 +198,7 @@ Phiên bản paper cũ (đã comment trong `paper/sections/5_experiments_and_res
 | **`377099e`** | twc-bs4x2-ablation | ConsFormer có prior thành phần đúng (Tree Transformer / ViConsFormer) + output projection | `ViSceT5-377099e-*` |
 | **`b744ce2`** | twc-bs4x2-ablation | ConsFormer residual: đầu ra cộng vào embedding token thay vì thay thế | `ViSceT5-b744ce2-*` |
 | **`37a73f4`** | twc-bs4x2-ablation | TWC có copy từ OCR; Consformer có loss liên kết theo đáp án; bật cả hai thì liên kết nâng điểm chép cụm từ | `ViSceT5-37a73f4-*` |
+| **`1e5b8ef`** | twc-bs4x2-ablation | Gỡ copy head; TWC hai lượt encoder, bản related chỉ là tăng cường lúc train | `ViSceT5-1e5b8ef-*` |
 
 ³ Các run bs32x1 vẫn chạy code `cc773b0`; chỉ notebook đặt LR 1e-4 và batch 32.
 
