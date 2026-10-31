@@ -65,6 +65,7 @@ def visualize_samples(model, dataset, collator, tokenizer, num_samples=5, seed=4
             ids = model.generate(
                 encoder_outputs=output["encoder_outputs"],
                 attention_mask=output["attention_mask"],
+                **{key: output[key] for key in ("copy_ids", "copy_prev", "copy_links") if key in output},
             )
             print("Question:", sample["question"])
             print("Reference:", sample.get("answer", ""))

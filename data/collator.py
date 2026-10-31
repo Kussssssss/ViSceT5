@@ -28,10 +28,12 @@ class ViT5VQADataCollator:
       augment — TWA keep / noise / correct with probability twc_adv_probability (training);
       correct — every correctable word corrected, no noise (evaluation / test).
     twc_labels: emit the TWC labels twc_o2r / twc_r2o (training, augment only).
+    link_labels: emit ocr_link_labels, the target of the ConsFormer links (training).
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
-                 corrector=None, related=False, twc_labels=False, related_mode="augment"):
+                 corrector=None, related=False, twc_labels=False, related_mode="augment",
+                 link_labels=False):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -43,6 +45,7 @@ class ViT5VQADataCollator:
         self.corrector = corrector
         self.related = bool(related)
         self.twc_labels = bool(twc_labels)
+        self.link_labels = bool(link_labels)
         self.related_mode = str(related_mode)
         if self.related_mode not in ("augment", "correct"):
             raise ValueError("related_mode must be augment|correct.")
@@ -152,6 +155,25 @@ class ViT5VQADataCollator:
                 char_mask[index, position] = 1.0
         return token_ids, word_map, char_ids, char_mask
 
+    def _link_targets(self, ids, word_map, answer, length):
+        """Target of the link between token j-1 and j of the original OCR, -1 = no target: 1 inside
+        a word and inside an occurrence of the answer, 0 where an occurrence starts or ends."""
+        targets = torch.full((length,), -1.0)
+        same_word = word_map[1:] == word_map[:-1]
+        targets[1 : len(ids)][same_word] = 1.0
+        text = _normalize_text(str(answer), lowercase=self.cfg.ocr_lowercase)
+        span = self.tokenizer.encode(text, add_special_tokens=False)
+        tokens = ids.tolist()
+        for start in range(len(tokens) - len(span) + 1 if span else 0):
+            if tokens[start : start + len(span)] == span:
+                for edge in (start, start + len(span)):
+                    if 0 < edge < len(tokens) and word_map[edge] != word_map[edge - 1]:
+                        targets[edge] = 0.0
+        for start in range(len(tokens) - len(span) + 1 if span else 0):
+            if tokens[start : start + len(span)] == span:
+                targets[start + 1 : start + len(span)] = 1.0
+        return targets
+
     def __call__(self, batch):
         if not batch:
             raise ValueError("Cannot collate an empty batch.")
@@ -251,6 +273,11 @@ class ViT5VQADataCollator:
                 return_tensors="pt",
             ).input_ids
             result["labels"] = labels.masked_fill(labels == self.pad_id, -100)
+            if self.link_labels:
+                result["ocr_link_labels"] = torch.stack([
+                    self._link_targets(sample_ids, sample_map, answer, ids.shape[1])
+                    for sample_ids, sample_map, answer in zip(token_ids, word_maps, answers)
+                ])
         elif any(answer is not None and str(answer).strip() for answer in answers):
             raise ValueError(
                 "A batch must be entirely labelled or entirely unlabelled."

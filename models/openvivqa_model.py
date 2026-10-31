@@ -16,6 +16,7 @@ from transformers import (
 from transformers.models.t5.modeling_t5 import T5LayerNorm
 
 from configs.model_config import OpenViVQAConfig
+from models.modules.copy_t5 import CopyT5ForConditionalGeneration
 from models.modules.ocr_consformer import OCREncoder
 from models.modules.ocr_spatial import SemanticOCREmbedding
 from models.modules.qa_clip import QACLIPEncoder
@@ -45,7 +46,11 @@ class OpenViVQAModel(PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         seed = torch.initial_seed()
-        self.vit5 = T5ForConditionalGeneration.from_pretrained(config.vit5_name)
+        self.use_copy = bool(config.use_twc and config.twc_copy)
+        vit5_class = CopyT5ForConditionalGeneration if self.use_copy else T5ForConditionalGeneration
+        self.vit5 = vit5_class.from_pretrained(config.vit5_name)
+        if self.use_copy:
+            self.vit5.reset_copy_parameters()
         self.d_model = self.vit5.config.d_model
         for name in ("pad_token_id", "eos_token_id", "decoder_start_token_id"):
             value = getattr(config, name)
@@ -191,7 +196,8 @@ class OpenViVQAModel(PreTrainedModel):
         features = self.char_embedding(ids) + self.char_position_embedding(positions)
         return self.ocr_char_layernorm((features * mask.unsqueeze(-1)).mean(dim=-2))
 
-    def _encode_ocr(self, info, ids, token_mask, word_map, char_ids, char_mask):
+    def _encode_ocr(self, info, ids, token_mask, word_map, char_ids, char_mask, extras=None):
+        """extras: list that receives the ConsFormer links [B, L], link[j] between tokens j-1 and j."""
         if not (self.config.ablation_use_ocr or self.config.ocr_full_features):
             # Older text-only baseline (configs without ocr_full_features).
             tokens = self.get_input_embeddings()(ids)
@@ -202,7 +208,10 @@ class OpenViVQAModel(PreTrainedModel):
         indices = word_map.clamp(0, char_ids.shape[1] - 1)
         boxes = torch.stack([item["boxes"] for item in info]).to(ids.device, self.target_dtype)
         if self.config.ablation_use_ocr:
-            text_features, _ = self.ocr_encoder(ids, token_mask)
+            text_features, breaks = self.ocr_encoder(ids, token_mask)
+            if extras is not None:
+                links = breaks[:, -1].mean(dim=1).diagonal(offset=1, dim1=-2, dim2=-1)
+                extras.append(F.pad(links, (1, 0)))
         else:  # Consformer off: the ViT5 token embeddings take the place of the ConsFormer output
             text_features = self.get_input_embeddings()(ids)
         results = []
@@ -242,6 +251,7 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_rel_to_word_map=None,
         ocr_rel_char_ids=None,
         ocr_rel_char_mask=None,
+        return_extras=False,
     ):
         """Encode [question, image patches, original OCR, related OCR] once for loss and generation.
 
@@ -250,7 +260,8 @@ class OpenViVQAModel(PreTrainedModel):
         shared weights), never as one concatenated sequence.
         image_features: precomputed (tokens, mask) to reuse CLIP.
 
-        Returns (encoder outputs, fused mask, start index of the OCR block).
+        Returns (encoder outputs, fused mask, start index of the OCR block), and with return_extras
+        a dict: ocr_links (ConsFormer links of the original OCR) and copy (arguments of the copy head).
         """
         if attention_mask is None:
             attention_mask = (input_ids != self.config.pad_token_id).long()
@@ -264,9 +275,11 @@ class OpenViVQAModel(PreTrainedModel):
             pieces.append(image_tokens)
             masks.append(image_mask)
         ocr_offset = sum(piece.shape[1] for piece in pieces)
+        links = []
         pieces.append(self._encode_ocr(ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map,
-                                       ocr_char_ids, ocr_char_mask))
+                                       ocr_char_ids, ocr_char_mask, links))
         masks.append(ocr_attention_mask)
+        copies = [(ocr_input_ids, ocr_attention_mask)]
         if self.config.use_twc and (ocr_rel_input_ids is not None or self.training
                                     or self.config.twc_eval_related != "none"):
             if ocr_rel_input_ids is None:
@@ -274,15 +287,33 @@ class OpenViVQAModel(PreTrainedModel):
             if ocr_rel_attention_mask is None:
                 ocr_rel_attention_mask = (ocr_rel_input_ids != self.config.pad_token_id).long()
             pieces.append(self._encode_ocr(ocr_info, ocr_rel_input_ids, ocr_rel_attention_mask,
-                                           ocr_rel_to_word_map, ocr_rel_char_ids, ocr_rel_char_mask))
+                                           ocr_rel_to_word_map, ocr_rel_char_ids, ocr_rel_char_mask, links))
             masks.append(ocr_rel_attention_mask)
+            copies.append((ocr_rel_input_ids, ocr_rel_attention_mask))
         if any(piece.shape[-1] != self.d_model for piece in pieces):
             raise ValueError("All vision/OCR backbone output dimensions must match ViT5 d_model.")
         fused_mask = torch.cat(masks, dim=1)
         encoded = self.vit5.encoder(
             inputs_embeds=torch.cat(pieces, dim=1), attention_mask=fused_mask, return_dict=True
         )
-        return encoded, fused_mask, ocr_offset
+        if not return_extras:
+            return encoded, fused_mask, ocr_offset
+        extras = {"ocr_links": links[0] if links else None, "copy": {}}
+        if self.use_copy:
+            extras["copy"] = self._copy_source(copies, links, ocr_offset)
+        return encoded, fused_mask, ocr_offset, extras
+
+    @staticmethod
+    def _copy_source(copies, links, offset):
+        """Arguments of the copy head over the whole encoder input: OCR token ids, the previous
+        token of the same OCR copy, ConsFormer links. -1 / 0 outside the OCR."""
+        ids = [item.masked_fill(mask == 0, -1) for item, mask in copies]
+        previous = [F.pad(item[:, :-1], (1, 0), value=-1) for item in ids]
+        first = ids[0].new_full((ids[0].shape[0], offset), -1)
+        source = {"copy_ids": torch.cat([first, *ids], dim=1), "copy_prev": torch.cat([first, *previous], dim=1)}
+        if links:
+            source["copy_links"] = torch.cat([links[0].new_zeros(first.shape), *links], dim=1)
+        return source
 
     @staticmethod
     def _pool_words(tokens, word_map, token_mask, slots):
@@ -351,12 +382,13 @@ class OpenViVQAModel(PreTrainedModel):
         twc_o2r=None,
         twc_r2o=None,
         ocr_words=None,
+        ocr_link_labels=None,
     ):
         if ocr_attention_mask is None:
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
         if ocr_rel_input_ids is not None and ocr_rel_attention_mask is None:
             ocr_rel_attention_mask = (ocr_rel_input_ids != self.config.pad_token_id).long()
-        encoded, mask, ocr_offset = self.encode(
+        encoded, mask, ocr_offset, extras = self.encode(
             input_ids,
             pixel_values,
             ocr_info,
@@ -372,8 +404,9 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_rel_to_word_map=ocr_rel_to_word_map,
             ocr_rel_char_ids=ocr_rel_char_ids,
             ocr_rel_char_mask=ocr_rel_char_mask,
+            return_extras=True,
         )
-        result = {"encoder_outputs": encoded, "attention_mask": mask}
+        result = {"encoder_outputs": encoded, "attention_mask": mask, **extras["copy"]}
         if labels is not None or decoder_input_ids is not None:
             decoded = self.vit5(
                 encoder_outputs=encoded,
@@ -383,8 +416,18 @@ class OpenViVQAModel(PreTrainedModel):
                 decoder_attention_mask=decoder_attention_mask,
                 use_cache=False,
                 return_dict=True,
+                **extras["copy"],
             )
             result.update(loss=decoded.loss, logits=decoded.logits)
+        if ocr_link_labels is not None and extras["ocr_links"] is not None:
+            # Links of the last layer against the answer span: the constituents ConsFormer forms
+            # are the phrases the answer is made of, and the copy head follows them.
+            keep = ocr_link_labels >= 0
+            result["link_loss"] = (
+                F.binary_cross_entropy_with_logits(
+                    torch.logit(extras["ocr_links"].float()[keep].clamp(1e-4, 1 - 1e-4)), ocr_link_labels[keep]
+                ) if keep.any() else extras["ocr_links"].sum() * 0.0
+            )
         if self.config.use_twc and twc_o2r is not None:
             # TWA: split the encoder output of the OCR block into the original and related copies.
             words = ocr_char_ids.shape[1]
@@ -417,11 +460,11 @@ class OpenViVQAModel(PreTrainedModel):
         generation_config=None,
         **generation_kwargs,
     ):
-        for name in ("twc_o2r", "twc_r2o", "ocr_words", "labels"):
+        for name in ("twc_o2r", "twc_r2o", "ocr_words", "labels", "ocr_link_labels"):
             generation_kwargs.pop(name, None)
         related = {name: generation_kwargs.pop(name) for name in RELATED_FIELDS if name in generation_kwargs}
         if encoder_outputs is None:
-            encoder_outputs, attention_mask, _ = self.encode(
+            encoder_outputs, attention_mask, _, extras = self.encode(
                 input_ids,
                 pixel_values,
                 ocr_info,
@@ -433,7 +476,11 @@ class OpenViVQAModel(PreTrainedModel):
                 attention_mask,
                 ocr_attention_mask,
                 **related,
+                return_extras=True,
             )
+            generation_kwargs.update(extras["copy"])
+        elif self.use_copy and "copy_ids" not in generation_kwargs:
+            raise ValueError("With encoder_outputs, the copy head also needs the copy_* outputs of forward().")
         return self.vit5.generate(
             encoder_outputs=encoder_outputs,
             attention_mask=attention_mask,

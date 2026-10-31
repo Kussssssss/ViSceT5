@@ -6,6 +6,8 @@ ablation_use_qaclip: false   # QA-ViT: câu hỏi vào CLIP qua adapter học đ
 ablation_use_ocr: true       # Consformer (ConsFormer mã hoá chữ OCR) · false = embedding token ViT5
 consformer_constituent: "tree"   # prior thành phần của ConsFormer như Tree Transformer / ViConsFormer (legacy = code cũ, prior ≈ 0)
 consformer_residual: true        # chữ OCR = embedding token ViT5 + đầu ra ConsFormer (residual) · false = ConsFormer thay embedding
+twc_copy: true                   # bật TWC: đáp án có thể chép từ token OCR (cả hai bản OCR), key là đầu ra encoder mà TWC căn chỉnh
+consformer_link_weight: 0.5      # bật Consformer: loss giám sát liên kết cụm bằng ranh giới đáp án · 0 = tắt
 ocr_full_features: true      # mọi run đều có đặc trưng OCR: chữ + ký tự + box + det + rec (baseline cũng vậy)
 ocr_feature_norm: "layernorm"   # chuẩn hoá từng luồng OCR như code trước refactor
 # TWC như TWA: bản OCR related (tăng cường TWA = OCR Augmentation) đứng sau bản gốc trong input
