@@ -15,6 +15,7 @@ python scripts/error_anatomy.py --gt eval_gt/ViTextVQA_test_gt.json --data_dir .
 """
 
 import argparse
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -58,7 +59,7 @@ def classify(gold, prediction, ocr, union):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gt", required=True)
-    parser.add_argument("--pred", nargs="+", required=True, help="name=submission.csv; the first is the reference")
+    parser.add_argument("--pred", nargs="+", required=True, help="name=submission.csv; paired EM difference of every pair")
     parser.add_argument("--dataset", default="ViTextVQA")
     parser.add_argument("--data_dir", default="./datasets")
     args = parser.parse_args()
@@ -112,10 +113,10 @@ def main():
     names = list(scores)
     rng = np.random.default_rng(0)
     boot = rng.integers(0, count, size=(2000, count))
-    for name in names[1:]:
-        diff = scores[name] - scores[names[0]]
+    for first, name in itertools.combinations(names, 2):
+        diff = scores[name] - scores[first]
         low, high = np.percentile(diff[boot].mean(1), [2.5, 97.5])
-        print(f"{name} - {names[0]}: dEM {100 * diff.mean():+.2f} [{100 * low:+.2f}, {100 * high:+.2f}]"
+        print(f"{name} - {first}: dEM {100 * diff.mean():+.2f} [{100 * low:+.2f}, {100 * high:+.2f}]"
               f" | wins {int((diff > 0).sum())} losses {int((diff < 0).sum())}")
 
 

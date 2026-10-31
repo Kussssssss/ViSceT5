@@ -55,13 +55,13 @@ def _to_dev(x):
 def answer_cross_attention(model, batch, num_beams, max_new_tokens, layer):
     """Sinh đáp án rồi trả (đáp án, vector attention trên toàn bộ vị trí encoder)."""
     inp = {k: _to_dev(batch[k]) for k in MODEL_KEYS if k in batch}
-    enc_out, enc_mask, _ = model.encode(**inp)
+    enc_out, enc_mask, _, extras = model.encode(**inp, return_extras=True)
     # generate (beam search) nhân bản encoder_outputs NGAY TRÊN object truyền vào → đưa bản sao.
     seq = model.vit5.generate(encoder_outputs=BaseModelOutput(last_hidden_state=enc_out.last_hidden_state.clone()),
                               attention_mask=enc_mask.clone(), use_cache=False,
                               max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=False,
                               pad_token_id=model.config.pad_token_id, eos_token_id=model.config.eos_token_id,
-                              decoder_start_token_id=model.config.decoder_start_token_id)[0]
+                              decoder_start_token_id=model.config.decoder_start_token_id, **extras["copy"])[0]
     ids = seq.tolist()
     start = model.config.decoder_start_token_id
     if not ids or ids[0] != start:
