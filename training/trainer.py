@@ -104,11 +104,16 @@ class VQATrainer(Seq2SeqTrainer):
             if self.label_smoother
             else outputs["loss"]
         )
+        if "view_logits" in outputs:
+            view_loss = (self.label_smoother({"logits": outputs["view_logits"]}, labels)
+                         if self.label_smoother else outputs["view_loss"])
+            loss = 0.5 * (loss + view_loss)
         if "twc_loss" in outputs:
             loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
             if model.training:
-                for key in ("twc_loss", "twc_acc"):
-                    self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
+                for key in ("twc_loss", "twc_acc", "view_loss"):
+                    if key in outputs:
+                        self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
                 self._twc_count += 1
         return (loss, outputs) if return_outputs else loss
 

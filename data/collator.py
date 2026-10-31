@@ -28,10 +28,13 @@ class ViT5VQADataCollator:
       augment — TWA keep / noise / correct with probability twc_adv_probability (training);
       correct — every correctable word corrected, no noise (evaluation / test).
     twc_labels: emit the TWC labels twc_o2r / twc_r2o (training, augment only).
+    fresh_noise: new random draws at every call instead of TWA's Random(13) for every sample, which
+    repeats the same copy each epoch; needed when the related copy is a training augmentation.
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
-                 corrector=None, related=False, twc_labels=False, related_mode="augment"):
+                 corrector=None, related=False, twc_labels=False, related_mode="augment",
+                 fresh_noise=False):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -43,6 +46,7 @@ class ViT5VQADataCollator:
         self.corrector = corrector
         self.related = bool(related)
         self.twc_labels = bool(twc_labels)
+        self.fresh_noise = bool(fresh_noise)
         self.related_mode = str(related_mode)
         if self.related_mode not in ("augment", "correct"):
             raise ValueError("related_mode must be augment|correct.")
@@ -133,7 +137,8 @@ class ViT5VQADataCollator:
             return list(texts), None, None
         if self.related_mode == "correct":
             return self.corrector.correct(texts), None, None
-        return self.corrector.augment(texts, self.cfg.twc_adv_probability, random.Random(TWA_SEED))
+        rng = random.Random(random.getrandbits(64) if self.fresh_noise else TWA_SEED)
+        return self.corrector.augment(texts, self.cfg.twc_adv_probability, rng)
 
     def _encode_ocr_text(self, texts, word_count):
         char_ids = torch.zeros(word_count, self.char_max_num, dtype=torch.long)

@@ -48,6 +48,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_eval_related: Optional[str] = None,
         consformer_constituent: Optional[str] = None,
         consformer_residual: Optional[bool] = None,
+        twc_two_views: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -159,6 +160,12 @@ class OpenViVQAConfig(PretrainedConfig):
         # ConsFormer output added to the ViT5 token embeddings (residual) instead of replacing them.
         # None (older configs) = False, so those checkpoints load and predict as trained.
         self.consformer_residual = bool(consformer_residual) if consformer_residual is not None else False
+        # TWC with two encoder passes at train, [question, image, original OCR] and [question, image,
+        # related OCR], the answer loss on both and TWC between them; the eval input is the first one.
+        # None (older configs) = False: one pass with both copies, so those checkpoints predict as trained.
+        self.twc_two_views = bool(twc_two_views) if twc_two_views is not None else False
+        if self.twc_two_views:
+            self.twc_eval_related = "none"
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
