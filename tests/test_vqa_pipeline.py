@@ -111,6 +111,7 @@ def test_memory_audit_uses_same_batch_and_real_optimizer(
 
 @pytest.fixture(autouse=True)
 def offline_backbones(monkeypatch):
+    from models.modules.copy_t5 import CopyT5ForConditionalGeneration
     torch.set_num_threads(1)
     torch.manual_seed(7)
     text_config = T5Config(
@@ -141,6 +142,11 @@ def offline_backbones(monkeypatch):
         T5ForConditionalGeneration,
         "from_pretrained",
         lambda *a, **k: T5ForConditionalGeneration(text_config),
+    )
+    monkeypatch.setattr(
+        CopyT5ForConditionalGeneration,
+        "from_pretrained",
+        lambda *a, **k: CopyT5ForConditionalGeneration(text_config),
     )
     monkeypatch.setattr(
         QACLIPEncoder,
@@ -709,6 +715,10 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "legacy",  # the fixture model (config default)
         "--consformer_residual",
         "False",
+        "--twc_copy",
+        "False",
+        "--consformer_link_weight",
+        "0",
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -1230,3 +1240,55 @@ def test_residual_consformer_adds_to_the_token_embeddings(make_model):
     model = make_model(ablation_use_ocr=True, consformer_constituent="tree", consformer_residual=True)
     assert model.ocr_encoder.residual
     assert model.state_dict().keys() == make_model(ablation_use_ocr=True, consformer_constituent="tree").state_dict().keys()
+
+
+def test_copy_head_mixes_a_distribution_and_the_full_model_links_it_to_consformer(make_model, tokenizer, samples):
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}))
+    flags = dict(use_twc=True, twc_copy=True, ablation_use_ocr=True, consformer_constituent="tree",
+                 consformer_residual=True, consformer_link_weight=0.5, twc_eval_related="correct",
+                 twc_adv_probability=0.5)
+    model = make_model(**flags)
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    assert batch["ocr_link_labels"].shape == batch["ocr_input_ids"].shape
+    outputs = model(**batch)
+    assert outputs["copy_ids"].shape == outputs["attention_mask"].shape == outputs["copy_links"].shape
+    torch.testing.assert_close(outputs["logits"].exp().sum(-1), torch.ones(outputs["logits"].shape[:2]), atol=1e-3, rtol=1e-3)
+    assert outputs["logits"].shape[1] == int((batch["labels"] != -100).any(0).nonzero().max()) + 1
+    loss = outputs["loss"] + outputs["twc_loss"] + outputs.get("link_loss", 0.0)
+    loss.backward()
+    for layer in (model.vit5.copy_query, model.vit5.copy_key, model.vit5.copy_gate):
+        assert layer.weight.grad is not None
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.ocr_encoder.parameters())
+    model.eval()
+    test = build_collator(model, tokenizer, corrector, training=False)
+    inputs = {k: v for k, v in test(samples).items() if k != "labels"}
+    with torch.no_grad():
+        direct = model.generate(**inputs)
+        beams = model.generate(**inputs, num_beams=3)
+        assert beams.shape[0] == direct.shape[0]
+        output = model(**inputs)
+        cached = model.generate(encoder_outputs=output["encoder_outputs"], attention_mask=output["attention_mask"],
+                                copy_ids=output["copy_ids"], copy_prev=output["copy_prev"], copy_links=output["copy_links"])
+        torch.testing.assert_close(direct, cached)
+        with pytest.raises(ValueError):
+            model.generate(encoder_outputs=output["encoder_outputs"], attention_mask=output["attention_mask"])
+    state = model.state_dict()
+    assert "vit5.copy_gate.bias" in state
+    assert "vit5.copy_gate.bias" not in make_model(use_twc=True).state_dict()  # older configs: no copy head
+    alone = make_model(use_twc=True, twc_copy=True, ablation_use_ocr=False, ocr_full_features=True)
+    assert "copy_links" not in alone(**build_collator(alone, tokenizer, corrector, training=True)(samples))
+
+
+def test_link_targets_follow_the_words_and_the_answer_span(make_model, tokenizer, corrector):
+    model = make_model(ablation_use_ocr=True, consformer_constituent="tree", consformer_link_weight=0.5)
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    assert collator.link_labels
+    assert not build_collator(model, tokenizer, corrector, training=False).link_labels
+    ids = torch.tensor([5, 6, 7, 8, 9])
+    word_map = torch.tensor([0, 0, 1, 2, 3])
+    collator.tokenizer = type("T", (), {"encode": staticmethod(lambda text, add_special_tokens=False: [7, 8])})()
+    try:
+        targets = collator._link_targets(ids, word_map, "x y", 6)
+    finally:
+        collator.tokenizer = tokenizer
+    assert targets.tolist() == [-1.0, 1.0, 0.0, 1.0, 0.0, -1.0]
