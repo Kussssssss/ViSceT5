@@ -709,6 +709,8 @@ def test_training_entrypoint_save_resume_and_evaluation(
         "legacy",  # the fixture model (config default)
         "--consformer_residual",
         "False",
+        "--twc_two_views",
+        "False",
     ]
     trainer = finetune.main(arguments)
     assert trainer.state.global_step == 1
@@ -1138,7 +1140,7 @@ def test_configs_before_eval_related_keep_the_training_procedure():
     assert OpenViVQAConfig(use_twc=True).twc_eval_related == "augment"
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
-    assert cfg["twc_eval_related"] == "correct"
+    assert cfg["twc_eval_related"] == "none" and cfg["twc_two_views"] is True
 
 
 
@@ -1230,3 +1232,25 @@ def test_residual_consformer_adds_to_the_token_embeddings(make_model):
     model = make_model(ablation_use_ocr=True, consformer_constituent="tree", consformer_residual=True)
     assert model.ocr_encoder.residual
     assert model.state_dict().keys() == make_model(ablation_use_ocr=True, consformer_constituent="tree").state_dict().keys()
+
+
+def test_two_views_train_on_both_copies_and_evaluate_on_the_original(make_model, tokenizer, samples):
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}))
+    model = make_model(use_twc=True, twc_two_views=True, twc_adv_probability=1.0, twc_eval_related="correct")
+    assert model.config.twc_eval_related == "none"
+    train = build_collator(model, tokenizer, corrector, training=True)
+    test = build_collator(model, tokenizer, corrector, training=False)
+    assert train.related and train.fresh_noise and train.twc_labels and not test.related
+    outputs = model(**train(samples))
+    assert outputs["view_logits"].shape == outputs["logits"].shape
+    (outputs["loss"] + outputs["view_loss"] + outputs["twc_loss"]).backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.ocr_encoder.parameters())
+    model.eval()
+    batch = {k: v for k, v in test(samples).items() if k != "labels"}
+    with torch.no_grad():
+        encoded, mask, offset = model.encode(**batch)
+        assert mask.shape[1] == offset + batch["ocr_input_ids"].shape[1]
+        assert "view_loss" not in model(**test(samples))
+        model.generate(**batch)
+    assert OpenViVQAConfig().twc_two_views is False  # older checkpoints predict as trained
+    assert ModelArguments().twc_two_views is True

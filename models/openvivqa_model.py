@@ -267,8 +267,8 @@ class OpenViVQAModel(PreTrainedModel):
         pieces.append(self._encode_ocr(ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map,
                                        ocr_char_ids, ocr_char_mask))
         masks.append(ocr_attention_mask)
-        if self.config.use_twc and (ocr_rel_input_ids is not None or self.training
-                                    or self.config.twc_eval_related != "none"):
+        if self.config.use_twc and not self.config.twc_two_views and (
+                ocr_rel_input_ids is not None or self.training or self.config.twc_eval_related != "none"):
             if ocr_rel_input_ids is None:
                 raise ValueError("TWC needs the related OCR copy (ocr_rel_* batch fields).")
             if ocr_rel_attention_mask is None:
@@ -356,6 +356,12 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
         if ocr_rel_input_ids is not None and ocr_rel_attention_mask is None:
             ocr_rel_attention_mask = (ocr_rel_input_ids != self.config.pad_token_id).long()
+        if attention_mask is None:
+            attention_mask = (input_ids != self.config.pad_token_id).long()
+        two_views = self.config.use_twc and self.config.twc_two_views and ocr_rel_input_ids is not None
+        image_features = None
+        if two_views and self.config.ablation_use_image:
+            image_features = self._encode_image(pixel_values, input_ids, attention_mask)
         encoded, mask, ocr_offset = self.encode(
             input_ids,
             pixel_values,
@@ -372,6 +378,7 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_rel_to_word_map=ocr_rel_to_word_map,
             ocr_rel_char_ids=ocr_rel_char_ids,
             ocr_rel_char_mask=ocr_rel_char_mask,
+            image_features=image_features,
         )
         result = {"encoder_outputs": encoded, "attention_mask": mask}
         if labels is not None or decoder_input_ids is not None:
@@ -385,14 +392,32 @@ class OpenViVQAModel(PreTrainedModel):
                 return_dict=True,
             )
             result.update(loss=decoded.loss, logits=decoded.logits)
+        if two_views:
+            # Second view: the related copy takes the place of the original one, same answer.
+            view, view_mask, _ = self.encode(
+                input_ids, pixel_values, ocr_info, ocr_rel_input_ids, ocr_rel_to_word_map, ocr_rel_char_ids,
+                ocr_rel_char_mask, None, attention_mask, ocr_rel_attention_mask, image_features=image_features,
+            )
+            if labels is not None:
+                decoded = self.vit5(encoder_outputs=view, attention_mask=view_mask, labels=labels,
+                                    decoder_input_ids=decoder_input_ids,
+                                    decoder_attention_mask=decoder_attention_mask, use_cache=False, return_dict=True)
+                result.update(view_loss=decoded.loss, view_logits=decoded.logits)
         if self.config.use_twc and twc_o2r is not None:
             # TWA: split the encoder output of the OCR block into the original and related copies.
             words = ocr_char_ids.shape[1]
             length = ocr_input_ids.shape[1] + ocr_rel_input_ids.shape[1]
             word_map = torch.cat([ocr_to_word_map, torch.where(
                 ocr_rel_to_word_map >= 0, ocr_rel_to_word_map + words, ocr_rel_to_word_map)], dim=1)
+            if two_views:
+                tokens = torch.cat([
+                    encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_input_ids.shape[1]],
+                    view.last_hidden_state[:, ocr_offset : ocr_offset + ocr_rel_input_ids.shape[1]],
+                ], dim=1)
+            else:
+                tokens = encoded.last_hidden_state[:, ocr_offset : ocr_offset + length]
             result["twc_loss"], result["twc_acc"] = self._twc(
-                encoded.last_hidden_state[:, ocr_offset : ocr_offset + length],
+                tokens,
                 word_map,
                 torch.cat([ocr_attention_mask, ocr_rel_attention_mask], dim=1),
                 twc_o2r,

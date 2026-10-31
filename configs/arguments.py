@@ -42,13 +42,16 @@ class ModelArguments:
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
     )
     twc_eval_related: str = field(
-        default="correct", metadata={"help": "Related OCR copy at eval/test: correct (100% correction, no noise) | augment | none."}
+        default="none", metadata={"help": "Related OCR copy at eval/test: none | correct (100% correction, no noise) | augment."}
     )
     consformer_constituent: str = field(
         default="tree", metadata={"help": "ConsFormer constituent prior: tree (Tree Transformer / ViConsFormer) | legacy."}
     )
     consformer_residual: bool = field(
         default=True, metadata={"help": "OCR text = ViT5 token embedding + ConsFormer output (False: ConsFormer output only)."}
+    )
+    twc_two_views: bool = field(
+        default=True, metadata={"help": "TWC: separate encoder passes for the original and the related OCR at train; only the original at eval."}
     )
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}

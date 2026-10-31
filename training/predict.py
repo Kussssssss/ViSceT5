@@ -67,7 +67,7 @@ def main(args_list=None):
 
     model, tokenizer = load_model_and_tokenizer(args.ckpt_dir)
     model.to("cuda" if torch.cuda.is_available() else "cpu").eval()
-    if args.related_mode:
+    if args.related_mode and not model.config.twc_two_views:
         model.config.twc_eval_related = args.related_mode
     if model.config.use_twc:
         print(f"[predict] related OCR copy: {model.config.twc_eval_related}"
