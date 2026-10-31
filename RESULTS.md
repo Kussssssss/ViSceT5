@@ -82,6 +82,12 @@ Hai run bất kỳ trả lời khác nhau ở khoảng 1.000 câu test (trùng n
 | 32×1, 1e-4 | ✓ | – | 31.12 / 57.26 | 31.87 / 56.19 | `ViSceT5-b744ce2-vitextvqa-consformer-bs32x1` |
 | 32×1, 1e-4 | ✓ | ✓ (p 0.35, τ 0.07) | 30.22 / 56.01 | chưa predict | `ViSceT5-b744ce2-vitextvqa-consformer-twc-p35-tau0.07-bs32x1` |
 
+### 1f. `0bbd575`: copy head, loss liên kết, chép cụm từ
+
+| Batch, LR | Consformer | TWC | Dev ep1→5 (EM) | Dev ep5 | **Test** | Repo |
+|---|:-:|:-:|---|---|---|---|
+| 32×1, 1e-4 | ✓ | ✓ (p 0.35, τ 0.07) | 17.21 · 24.85 · 28.44 · 29.27 · 29.58 | 29.58 / 55.78 | chưa predict | `ViSceT5-0bbd575-vitextvqa-consformer-twc-p35-tau0.07-bs32x1` |
+
 ### Nhận xét
 
 - **Đặc trưng OCR đầy đủ là yếu tố lớn nhất.** Baseline text-only đạt 28.55 test EM, còn baseline có ký tự, box, det và rec đạt 31.53. Chênh lệch là +3.0 EM, cùng batch 4×2 và LR 3e-5.
