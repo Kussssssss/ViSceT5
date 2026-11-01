@@ -997,7 +997,7 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
             "twc_related_train", "ocr_feature_norm")
     assert {k: cfg[k] for k in keys} == {
-        "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
+        "twc_loss": "paper_bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
         "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
     }
     assert cfg["qavit_mode"] == "off"
@@ -1503,3 +1503,50 @@ def test_temperature_floor_bounds_logits_and_projects_loaded_checkpoint(
 def test_temperature_bounds_validate_initialization(minimum, initial):
     with pytest.raises(ValueError, match="twc_temperature_min"):
         OpenViVQAConfig(twc_temperature_min=minimum, twc_temperature_init=initial)
+
+
+def test_paper_bce_matches_literal_softmax_bce_and_gradients():
+    scores = torch.tensor([[1., 2., -2.], [4., -1., 3.]], requires_grad=True)
+    labels = torch.tensor([[1., .9, 0.], [0., 1., .9]])
+    expected = torch.nn.functional.binary_cross_entropy(torch.softmax(scores, dim=1), labels)
+    actual = OpenViVQAModel._paper_bce(scores, labels)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(torch.autograd.grad(actual, scores, retain_graph=True)[0],
+                               torch.autograd.grad(expected, scores)[0])
+
+
+@pytest.mark.parametrize("labels", [
+    [[-1., .9, -1.]], [[-1., 1., 0., -1.]], [[-1., -1., -1.]], [[1.]],
+])
+def test_paper_bce_masks_and_extreme_scores_remain_finite(labels):
+    labels = torch.tensor(labels)
+    scores = torch.linspace(-100, 100, labels.numel()).reshape_as(labels).requires_grad_()
+    loss = OpenViVQAModel._paper_bce(scores, labels)
+    loss.backward()
+    assert torch.isfinite(loss) and torch.isfinite(scores.grad).all()
+    assert torch.count_nonzero(scores.grad[labels == -1]) == 0
+
+
+def test_twc_paper_loss_matches_bidirectional_reference_with_padding(make_model):
+    model = make_model(use_twc=True, twc_loss="paper_bce", twc_objective="lexical",
+                       twc_feature="fused", twc_queue_size=0, twc_mask_same_text=False)
+    tokens = torch.randn(2, 6, 32, requires_grad=True)
+    mapping = torch.arange(6).expand(2, -1)
+    mask = torch.tensor([[1, 1, 0, 1, 1, 0], [1, 0, 0, 1, 0, 0]])
+    labels = torch.tensor([[[1., 0., -1.], [0., .9, -1.], [-1., -1., -1.]],
+                           [[.9, -1., -1.], [-1., -1., -1.], [-1., -1., -1.]]])
+    groups = torch.tensor([[11, 12, -1], [21, -1, -1]])
+    actual, _ = model._twc(tokens, mapping, mask, labels, labels, groups)
+    original = torch.nn.functional.normalize(torch.stack([tokens[0, 0], tokens[0, 1], tokens[1, 0]]), dim=-1)
+    related = torch.nn.functional.normalize(torch.stack([tokens[0, 3], tokens[0, 4], tokens[1, 3]]), dim=-1)
+    logits = model._twc_scale(model.twc_logit_scale) * original @ related.t()
+    targets = torch.diag(torch.tensor([1., .9, .9]))
+    expected = .5 * (
+        torch.nn.functional.binary_cross_entropy(logits.softmax(dim=1), targets)
+        + torch.nn.functional.binary_cross_entropy(logits.t().softmax(dim=1), targets)
+    )
+    torch.testing.assert_close(actual, expected)
+    actual_grads = torch.autograd.grad(actual, (tokens, model.twc_logit_scale), retain_graph=True)
+    expected_grads = torch.autograd.grad(expected, (tokens, model.twc_logit_scale))
+    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+        torch.testing.assert_close(actual_grad, expected_grad)

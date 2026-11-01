@@ -37,7 +37,7 @@ class ModelArguments:
         default=False, metadata={"help": "Add the TWA token-word contrastive loss during training."}
     )
     twc_weight: float = field(default=1.0, metadata={"help": "Weight of the TWC loss."})
-    twc_loss: str = field(default="infonce", metadata={"help": "infonce (softmax, TWA paper) | bce (TWA code)."})
+    twc_loss: str = field(default="infonce", metadata={"help": "paper_bce (softmax then binary CE, paper Eq. 4-6) | infonce (softmax CE) | bce (legacy sigmoid BCE)."})
     twc_feature: str = field(default="fused", metadata={"help": "lexical (OCR text+chars) | fused (encoder output)."})
     twc_queue_size: int = field(
         default=16384, metadata={"help": "Cross-batch memory of word features used as extra negatives; 0 = in-batch."}

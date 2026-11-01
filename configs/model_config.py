@@ -118,14 +118,15 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_label_list = list(twc_label_list) if twc_label_list is not None else [0.9, 0.9]
         self.ocr_edit_distance = int(ocr_edit_distance)
         # infonce: softmax over all in-batch candidates with soft multi-positive targets
-        #          (TWA paper Eq. 4–6); bce: sigmoid BCE averaged over all cells (TWA code).
+        #          (a different objective); paper_bce: softmax then BCE (paper Eq. 4-6).
+        # bce: legacy sigmoid BCE averaged over all cells.
         self.twc_loss = str(twc_loss)
         # lexical: OCR features before fusion (ConsFormer text + characters, no box/det/rec);
         # fused: multimodal encoder output. The related copy shares box/det/rec with its
         # original, so on fused features a pair can be matched by layout alone.
         self.twc_feature = str(twc_feature)
-        if self.twc_loss not in ("infonce", "bce") or self.twc_feature not in ("lexical", "fused"):
-            raise ValueError("twc_loss must be infonce|bce and twc_feature lexical|fused.")
+        if self.twc_loss not in ("infonce", "bce", "paper_bce") or self.twc_feature not in ("lexical", "fused"):
+            raise ValueError("twc_loss must be infonce|bce|paper_bce and twc_feature lexical|fused.")
         # Cross-batch memory (XBM, Wang et al. CVPR'20): FIFO of detached word features
         # from previous steps, used as extra negatives for the softmax TWC. A batch of 8
         # gives ~300 candidates; 16384 entries cover the last ~55 steps. 0 = in-batch only.
