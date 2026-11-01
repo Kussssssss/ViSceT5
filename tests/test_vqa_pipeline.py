@@ -995,10 +995,11 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
-            "twc_related_train", "ocr_feature_norm")
+            "twc_related_train", "ocr_feature_norm", "twc_temperature_trainable")
     assert {k: cfg[k] for k in keys} == {
         "twc_loss": "paper_bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
         "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
+        "twc_temperature_trainable": False,
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["per_device_eval_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (32, 32, 1, 0.1)
@@ -1550,3 +1551,39 @@ def test_twc_paper_loss_matches_bidirectional_reference_with_padding(make_model)
     expected_grads = torch.autograd.grad(expected, (tokens, model.twc_logit_scale))
     for actual_grad, expected_grad in zip(actual_grads, expected_grads):
         torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.parametrize("objective", ["lexical", "answer", "both"])
+def test_fixed_temperature_has_no_optimizer_update_and_survives_loading(
+    make_model, tokenizer, samples, corrector, tmp_path, objective
+):
+    model = make_model(use_twc=True, twc_objective=objective, twc_loss="paper_bce",
+                       twc_feature="fused", twc_queue_size=0, ocr_aug_mode="separate",
+                       ocr_related="augment", twc_temperature_init=.2,
+                       twc_temperature_trainable=False)
+    names = [name for name in ("twc_logit_scale", "twc_answer_logit_scale") if hasattr(model, name)]
+    initial = {name: getattr(model, name).clone() for name in names}
+    assert all(name in dict(model.named_buffers()) for name in names)
+    assert all(name not in dict(model.named_parameters()) for name in names)
+    args = CustomTrainingArguments(output_dir=str(tmp_path / "train"), use_cpu=True,
+                                   report_to="none", learning_rate=1e-4, weight_decay=.1)
+    trainer = VQATrainer(model=model, args=args)
+    optimizer = trainer.create_optimizer()
+    optimizer_ids = {id(parameter) for group in optimizer.param_groups for parameter in group["params"]}
+    assert all(id(getattr(model, name)) not in optimizer_ids for name in names)
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    representation = model.vit5.shared.weight.detach().clone()
+    trainer.compute_loss(model, batch).backward()
+    optimizer.step()
+    assert not torch.equal(representation, model.vit5.shared.weight)
+    for name in names:
+        scale = getattr(model, name)
+        assert scale.grad is None
+        torch.testing.assert_close(scale, initial[name], rtol=0, atol=0)
+        torch.testing.assert_close(model._twc_scale(scale).reciprocal(), torch.tensor(.2))
+    model.save_pretrained(tmp_path / "fixed")
+    restored = OpenViVQAModel.from_pretrained(tmp_path / "fixed")
+    assert not restored.config.twc_temperature_trainable
+    for name in names:
+        assert name in dict(restored.named_buffers()) and name not in dict(restored.named_parameters())
+        torch.testing.assert_close(getattr(restored, name), initial[name], rtol=0, atol=0)

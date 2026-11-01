@@ -118,10 +118,11 @@ class OpenViVQAModel(PreTrainedModel):
             self.ocr_type_embedding = nn.Embedding(2, self.d_model)
             nn.init.zeros_(self.ocr_type_embedding.weight)
         if config.use_twc and config.twc_objective in ("lexical", "both"):
-            # Learn theta=log(1/tau); exp(theta) is the positive contrastive logit scale.
-            self.twc_logit_scale = nn.Parameter(
-                torch.tensor(math.log(1 / config.twc_temperature_init))
-            )
+            scale = torch.tensor(math.log(1 / config.twc_temperature_init))
+            if config.twc_temperature_trainable:
+                self.twc_logit_scale = nn.Parameter(scale)
+            else:
+                self.register_buffer("twc_logit_scale", scale)
         if config.use_twc and config.twc_objective in ("answer", "both"):
             # Answer-grounded TWC: câu hỏi (đã qua encoder) → truy vấn; khởi tạo đồng nhất.
             with _seeded(seed + 5):
@@ -129,9 +130,11 @@ class OpenViVQAModel(PreTrainedModel):
             with torch.no_grad():
                 self.twc_answer_query.weight.copy_(torch.eye(self.d_model))
                 self.twc_answer_query.bias.zero_()
-            self.twc_answer_logit_scale = nn.Parameter(
-                torch.tensor(math.log(1 / config.twc_temperature_init))
-            )
+            scale = torch.tensor(math.log(1 / config.twc_temperature_init))
+            if config.twc_temperature_trainable:
+                self.twc_answer_logit_scale = nn.Parameter(scale)
+            else:
+                self.register_buffer("twc_answer_logit_scale", scale)
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -160,7 +163,7 @@ class OpenViVQAModel(PreTrainedModel):
     def clamp_twc_temperatures_(self):
         """Project parameters without detaching future temperature gradients."""
         for name in ("twc_logit_scale", "twc_answer_logit_scale"):
-            if hasattr(self, name):
+            if isinstance(getattr(self, name, None), nn.Parameter):
                 getattr(self, name).clamp_(math.log(1 / 100), math.log(1 / self.config.twc_temperature_min))
 
     def _twc_scale(self, logit_scale):

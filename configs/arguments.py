@@ -55,6 +55,9 @@ class ModelArguments:
     twc_temperature_init: float = field(
         default=0.2, metadata={"help": "Initial TWC temperature tau; optimize log(1/tau), restore trained values from checkpoints."}
     )
+    twc_temperature_trainable: bool = field(
+        default=True, metadata={"help": "False stores TWC logit scales as fixed buffers, excluded from optimizer and weight decay."}
+    )
     twc_temperature_min: float = field(
         default=0.06, metadata={"help": "Minimum TWC temperature; bound scale and project logit scales after optimizer steps."}
     )
