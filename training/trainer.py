@@ -95,7 +95,8 @@ class VQATrainer(Seq2SeqTrainer):
         optimizer_kwargs.pop("lr", None)
         self.optimizer = optimizer_cls(list(groups.values()), **optimizer_kwargs)
         base = getattr(self.model, "module", self.model)
-        if any(hasattr(base, name) for name in TEMPERATURES):
+        if any(getattr(base, name, None) is not None and getattr(base, name).requires_grad
+               for name in TEMPERATURES):
             base.clamp_twc_temperatures_()
             self.optimizer.register_step_post_hook(self._project_twc_after_step)
         if self.is_world_process_zero():

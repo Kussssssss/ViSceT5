@@ -47,6 +47,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_feature_norm: Optional[str] = None,
         clip_late_adapter: Optional[bool] = None,
         twc_temperature_init: float = 0.2,
+        twc_temperature_trainable: bool = True,
         twc_temperature_min: float = 0.06,
         twc_view: str = "shared",
         ocr_aug_mode: Optional[str] = None,
@@ -161,9 +162,10 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
-        # Initial learnable TWC temperature: theta=log(1/tau), scale=exp(theta).
+        # TWC temperature: theta=log(1/tau), optionally trainable; scale=exp(theta).
         # Trained values are checkpoint weights; loading must not reset them.
         self.twc_temperature_init = float(twc_temperature_init)
+        self.twc_temperature_trainable = bool(twc_temperature_trainable)
         self.twc_temperature_min = float(twc_temperature_min)
         if not 0.01 <= self.twc_temperature_min <= self.twc_temperature_init <= 100:
             raise ValueError("Require 0.01 <= twc_temperature_min <= twc_temperature_init <= 100.")
