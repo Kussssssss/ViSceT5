@@ -8,7 +8,7 @@ over valid candidates, then symmetric binary cross entropy against the
 unchanged soft labels (0, 0.9, 1). Padding is excluded. The legacy `bce` and
 `infonce` modes remain available for existing checkpoints.
 
-Temperature is now fixed at 0.2 (`twc_temperature_trainable: false`), stored as
+Temperature is now fixed at 0.07 (`twc_temperature_trainable: false`), stored as
 checkpoint buffers with no gradient, optimizer entry, or weight decay. Other
 settings stay as in the base commit: augmentation 0.35, TWC weight 1.0,
 batch size 32, model LR 1e-4, and five epochs.

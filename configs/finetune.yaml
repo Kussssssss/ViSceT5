@@ -12,7 +12,7 @@ qavit_mode: "off"   # off | no_question | question — CLIP thường (các run 
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
 use_twc: true
 twc_weight: 1.0
-twc_temperature_init: 0.2     # tau cố định
+twc_temperature_init: 0.07    # tau cố định
 twc_temperature_trainable: false # không gradient, không optimizer/weight decay cho temperature
 twc_temperature_min: 0.06     # tau không giảm dưới 0.06
 twc_adv_probability: 0.35    # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
@@ -26,8 +26,8 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune_paperbce_aug_twc_consformer_tau02_fixed"
-logging_dir: "./output/finetune_paperbce_aug_twc_consformer_tau02_fixed/logs"
+output_dir: "./output/finetune_paperbce_aug_twc_consformer_tau007_fixed"
+logging_dir: "./output/finetune_paperbce_aug_twc_consformer_tau007_fixed/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
