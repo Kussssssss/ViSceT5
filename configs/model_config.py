@@ -49,6 +49,7 @@ class OpenViVQAConfig(PretrainedConfig):
         consformer_constituent: Optional[str] = None,
         consformer_residual: Optional[bool] = None,
         twc_two_views: Optional[bool] = None,
+        twc_loss: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -166,6 +167,11 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_two_views = bool(twc_two_views) if twc_two_views is not None else False
         if self.twc_two_views:
             self.twc_eval_related = "none"
+        # TWC loss: sigmoid = the released TWA code (independent BCE per pair); softmax = the TWA paper,
+        # Eq. 4-6 (softmax per word, then BCE). None (older configs) = sigmoid, as those runs trained.
+        self.twc_loss = str(twc_loss or "sigmoid")
+        if self.twc_loss not in ("sigmoid", "softmax"):
+            raise ValueError("twc_loss must be sigmoid|softmax.")
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text

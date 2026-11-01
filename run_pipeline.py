@@ -4,7 +4,7 @@ STAGE=finetune (default) | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, PER_DEVICE_TRAIN_BATCH_SIZE, GRADIENT_ACCUMULATION_STEPS,
             module switches ABLATION_USE_QACLIP (QA-ViT), ABLATION_USE_OCR (Consformer), USE_TWC,
-            TWC_ADV_PROBABILITY, TWC_TEMPERATURE, TWC_WEIGHT, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
+            TWC_ADV_PROBABILITY, TWC_TEMPERATURE, TWC_WEIGHT, TWC_LOSS, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE, PREDICT_RELATED.
 """
@@ -36,6 +36,7 @@ def training_arguments():
         "TWC_WEIGHT": "twc_weight",
         "TWC_TEMPERATURE": "twc_temperature_init",
         "TWC_ADV_PROBABILITY": "twc_adv_probability",
+        "TWC_LOSS": "twc_loss",
         "LEARNING_RATE": "learning_rate",
         "NEW_MODULE_LR": "new_module_learning_rate",
         "SCALAR_LR": "scalar_learning_rate",
