@@ -47,7 +47,7 @@ def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     return parser.parse_dict(values)
 
 
-def load_dataframes(dataset_name, data_dir):
+def load_dataframes(dataset_name, data_dir, splits=("train", "validation", "test")):
     paths = {
         split: Path(OUTPUT_PATH) / f"merged_{suffix}.csv"
         for split, suffix in (
@@ -56,6 +56,7 @@ def load_dataframes(dataset_name, data_dir):
             ("test", "test"),
         )
     }
+    paths = {split: paths[split] for split in splits}
     if all(path.is_file() for path in paths.values()):
         frames = {split: pd.read_csv(path) for split, path in paths.items()}
         if all(
@@ -71,6 +72,7 @@ def load_dataframes(dataset_name, data_dir):
         Namespace(
             config=str(PROJECT_ROOT / "configs" / "data" / f"{dataset_name}.yaml"),
             data_dir=data_dir,
+            splits=splits,
         )
     )
     return {split: pd.read_csv(path) for split, path in paths.items()}
@@ -103,7 +105,7 @@ def build_corrector(config, train_frame, term_vocab_path="configs/data/term_voca
     return OCRCorrector(
         term_vocab_path=str(root / term_vocab_path),
         viet_vocab_path=str(root / viet_vocab_path),
-        train_frame=train_frame,
+        train_frame=None if config.stage == "pretrain" else train_frame,
         edit_distance=config.ocr_edit_distance,
         label_list=config.twc_label_list,
     )
@@ -143,3 +145,34 @@ def build_collator(model, tokenizer, corrector=None, training=False, seed=42):
         twc_separate=(mode == "twa" and config.twc_view == "separate"
                       and config.ocr_aug_mode == "concat" and training),
     )
+
+
+def bootstrap_vqa(checkpoint, overrides):
+    """Load common weights while retaining a freshly pretrained ViT5 decoder."""
+    source_config = OpenViVQAConfig.from_pretrained(checkpoint)
+    if source_config.stage != "pretrain" or overrides.get("stage") != "vqa" or overrides.get("use_twc"):
+        raise ValueError("Bootstrap requires a pretraining source and VQA-only destination")
+    source = OpenViVQAModel.from_pretrained(checkpoint)
+    config_values = source_config.to_dict()
+    config_values.update(overrides)
+    config_values["pretrain_source"] = str(checkpoint)
+    config = OpenViVQAConfig(**config_values)
+    model = OpenViVQAModel(config)  # decoder comes directly from pretrained ViT5
+    source_state = source.state_dict()
+    destination = model.state_dict()
+    shared_keys = {k for k in destination if not (k.startswith("vit5.decoder.") or k == "vit5.lm_head.weight")}
+    if set(source_state) != shared_keys:
+        raise ValueError(f"Incompatible stage checkpoint: missing={sorted(shared_keys - set(source_state))}, "
+                         f"unexpected={sorted(set(source_state) - shared_keys)}")
+    info = model.load_state_dict(source_state, strict=False)
+    expected_missing = set(destination) - shared_keys
+    if set(info.missing_keys) != expected_missing or info.unexpected_keys:
+        raise ValueError(f"Incompatible stage checkpoint: {info}")
+    del source
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    processor_dir = Path(checkpoint) / "image_processor"
+    if processor_dir.is_dir():
+        model.image_processor = model.image_processor.from_pretrained(processor_dir)
+    model.tie_weights()
+    model.sync_tokenizer_ids(tokenizer)
+    return model, tokenizer

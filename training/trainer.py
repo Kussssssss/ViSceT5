@@ -110,6 +110,15 @@ class VQATrainer(Seq2SeqTrainer):
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(**inputs)
         labels = inputs.get("labels")
+        config = getattr(model, "module", model).config
+        if config.stage == "pretrain":
+            if labels is not None or "twc_loss" not in outputs:
+                raise ValueError("Pretraining requires only TWC targets")
+            if model.training:
+                for key in ("twc_loss", "twc_acc"):
+                    self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
+                self._twc_count += 1
+            return (outputs["twc_loss"], outputs) if return_outputs else outputs["twc_loss"]
         if labels is None:
             raise ValueError("Training requires answer labels.")
         loss = (

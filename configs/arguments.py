@@ -16,6 +16,10 @@ class ModelArguments:
             "help": "Path or Hub identifier of an OpenViVQA checkpoint for answer generation."
         },
     )
+    stage: str = field(default="vqa")
+    input_order: str = field(default="question_first")
+    twc_fixed_temperature: bool = field(default=False)
+    bootstrap_pretrain: Optional[str] = field(default=None)
     # Ablation Flags
     ablation_use_qaclip: bool = field(
         default=False, metadata={"help": "Feed the question into CLIP (QA-ViT). False = plain CLIP."}
@@ -37,7 +41,7 @@ class ModelArguments:
         default=False, metadata={"help": "Add the TWA token-word contrastive loss during training."}
     )
     twc_weight: float = field(default=1.0, metadata={"help": "Weight of the TWC loss."})
-    twc_loss: str = field(default="infonce", metadata={"help": "infonce (softmax, TWA paper) | bce (TWA code)."})
+    twc_loss: str = field(default="infonce", metadata={"help": "paper_bce (softmax then binary CE, paper Eq. 4-6) | infonce (softmax CE) | bce (sigmoid BCE)."})
     twc_feature: str = field(default="fused", metadata={"help": "lexical (OCR text+chars) | fused (encoder output)."})
     twc_queue_size: int = field(
         default=16384, metadata={"help": "Cross-batch memory of word features used as extra negatives; 0 = in-batch."}

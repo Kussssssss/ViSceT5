@@ -24,7 +24,7 @@ from training.trainer import VQATrainer
 from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
 
-ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "ablation_use_consformer",
+ARCHITECTURE_FLAGS = ("stage", "input_order", "twc_fixed_temperature", "ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "ablation_use_consformer",
                       "ablation_use_ocr_aug", "use_twc", "twc_weight", "twc_loss", "twc_feature",
                       "twc_queue_size", "twc_queue_start", "twc_mask_same_text", "twc_objective",
                       "twc_answer_weight", "twc_related_train", "ocr_feature_norm",
@@ -41,25 +41,32 @@ def main(args_list=None):
         args_list,
         PROJECT_ROOT / "configs" / "finetune.yaml",
     )
+    if model_args.stage == "pretrain":
+        training_args.eval_strategy = "no"
+        training_args.load_best_model_at_end = False
+        training_args.predict_with_generate = False
+    elif model_args.stage == "vqa" and model_args.bootstrap_pretrain and model_args.use_twc:
+        raise ValueError("Downstream bootstrap requires use_twc=false")
     # DataParallel chia sai các danh sách (ocr_info) giữa GPU → luôn chạy 1 GPU.
     if training_args.n_gpu > 1:
         training_args._n_gpu = 1
     set_seed(training_args.seed)
-    frames = load_dataframes(data_args.dataset_name, data_args.data_dir)
+    pretrain = model_args.stage == "pretrain"
+    frames = (load_dataframes(data_args.dataset_name, data_args.data_dir, splits=("train",))
+              if pretrain else load_dataframes(data_args.dataset_name, data_args.data_dir))
     if training_args.smoke_test:
         frames["train"] = frames["train"].head(training_args.smoke_train_samples)
-        frames["validation"] = frames["validation"].head(
-            training_args.smoke_eval_samples
-        )
+        if not pretrain:
+            frames["validation"] = frames["validation"].head(training_args.smoke_eval_samples)
         training_args.max_steps = training_args.smoke_max_steps
         training_args.logging_steps = 1
-        training_args.eval_strategy = "steps"
+        training_args.eval_strategy = "no" if pretrain else "steps"
         training_args.save_strategy = "steps"
         training_args.eval_steps = training_args.smoke_max_steps
         training_args.save_steps = training_args.smoke_max_steps
         training_args.load_best_model_at_end = False
         training_args.dataloader_num_workers = 0
-    if frames["train"].empty or frames["validation"].empty:
+    if frames["train"].empty or (not pretrain and frames["validation"].empty):
         raise ValueError("Both train and validation splits must contain samples.")
 
     # Checkpoint tốt nhất: trung bình EM và F1 trên val (OpenViVQA: CIDEr), không theo loss.
@@ -87,17 +94,31 @@ def main(args_list=None):
                 repo, token, training_args.output_dir
             )
         except Exception as error:
-            print(f"[HF] resume skipped ({type(error).__name__}: {error})")
+            from huggingface_hub.errors import RepositoryNotFoundError
+            if not isinstance(error, RepositoryNotFoundError):
+                raise
+            print("[HF] New repository; starting a new stage run.")
 
     flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS}
     # One QA-ViT switch → its two config fields (question fed / layers without question).
     mode = model_args.qavit_mode or ("question" if model_args.ablation_use_qaclip else "off")
     if mode not in QAVIT_MODES:
         raise ValueError(f"qavit_mode must be one of {QAVIT_MODES}, got {mode!r}.")
+    if pretrain and mode == "question":
+        raise ValueError("Pretraining must not feed questions to CLIP")
     flags["ablation_use_qaclip"] = mode == "question"
     flags["clip_late_adapter"] = mode == "no_question"
     checkpoint = model_args.model_name_or_path or training_args.resume_from_checkpoint
-    model, tokenizer = load_model_and_tokenizer(checkpoint, overrides=flags)
+    if training_args.resume_from_checkpoint:
+        from configs.model_config import OpenViVQAConfig
+        resume_config = OpenViVQAConfig.from_pretrained(training_args.resume_from_checkpoint)
+        if resume_config.stage != model_args.stage:
+            raise ValueError("Cannot resume optimizer from another training stage")
+    if model_args.bootstrap_pretrain and not checkpoint:
+        from training.common import bootstrap_vqa
+        model, tokenizer = bootstrap_vqa(model_args.bootstrap_pretrain, flags)
+    else:
+        model, tokenizer = load_model_and_tokenizer(checkpoint, overrides=flags)
     if training_args.should_log:
         print("Architecture:", {"qavit_mode": mode,
                                 **{name: getattr(model.config, name) for name in ARCHITECTURE_FLAGS}},
@@ -113,8 +134,8 @@ def main(args_list=None):
         model=model,
         args=training_args,
         tokenizer=tokenizer,
-        train_dataset=ViT5VQADataset(frames["train"]),
-        eval_dataset=ViT5VQADataset(frames["validation"]),
+        train_dataset=ViT5VQADataset(frames["train"], include_qa=not pretrain),
+        eval_dataset=None if pretrain else ViT5VQADataset(frames["validation"]),
         data_collator=build_collator(model, tokenizer, corrector, training=True,
                                      seed=training_args.seed),
         eval_data_collator=build_collator(model, tokenizer, corrector, training=False),
@@ -131,7 +152,8 @@ def main(args_list=None):
     )
     trainer.save_state()
     trainer.save_metrics("train", result.metrics)
-    trainer.save_metrics("eval", trainer.evaluate())
+    if not pretrain:
+        trainer.save_metrics("eval", trainer.evaluate())
     return trainer
 
 

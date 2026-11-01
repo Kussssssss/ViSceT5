@@ -1,6 +1,6 @@
 """Run VQA training or prediction, configured through environment variables.
 
-STAGE=finetune (default) | predict
+STAGE=finetune (default) | pretrain | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, ABLATION_USE_IMAGE/QACLIP/OCR/OCR_AUG/CONSFORMER, USE_TWC,
             TWC_WEIGHT, TWC_LOSS, TWC_FEATURE, TWC_QUEUE_SIZE, TWC_QUEUE_START,
@@ -21,11 +21,13 @@ def _env(name):
 
 
 def training_arguments():
-    arguments = [_env("TRAIN_CONFIG") or "configs/finetune.yaml"]
+    default_config = "configs/pretrain.yaml" if _env("STAGE").lower() == "pretrain" else "configs/finetune.yaml"
+    arguments = [_env("TRAIN_CONFIG") or default_config]
     overrides = {
         "DATASET_NAME": "dataset_name",
         "NUM_TRAIN_EPOCHS": "num_train_epochs",
         "MODEL_NAME_OR_PATH": "model_name_or_path",
+        "BOOTSTRAP_PRETRAIN": "bootstrap_pretrain",
         "RESUME_FROM_CHECKPOINT": "resume_from_checkpoint",
         "RESUME_CHECKPOINT_ID": "resume_checkpoint_id",
         "PER_DEVICE_EVAL_BATCH_SIZE": "per_device_eval_batch_size",
@@ -85,7 +87,7 @@ def upload_model(output_dir):
     api = HfApi(token=token)
     api.create_repo(repo_id=repository, repo_type="model", exist_ok=True)
     api.upload_folder(folder_path=output_dir, repo_id=repository, repo_type="model")
-    print(f"Uploaded VQA checkpoint to {repository}.")
+    print(f"Uploaded checkpoint to {repository}.")
 
 
 def stop_vast_instance():
