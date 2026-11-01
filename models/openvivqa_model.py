@@ -298,21 +298,11 @@ class OpenViVQAModel(PreTrainedModel):
         features = torch.nan_to_num(sums / counts.clamp_min(1), nan=0.0, posinf=0.0, neginf=0.0)
         return F.normalize(features, dim=-1, eps=1e-6)
 
-    @staticmethod
-    def _twc_softmax_loss(logits, labels):
-        """One direction of the TWA paper's TWC: p = softmax over the candidates of each word (Eq. 4/5),
-        binary cross-entropy between labels and p (Eq. 6), summed over the candidates of a word and
-        averaged over the words. logits, labels: [M, M] without ignored rows or columns."""
-        log_p = F.log_softmax(logits.float(), dim=1)
-        log_not_p = torch.log1p(-log_p.exp().clamp(max=1 - 1e-6))
-        return -(labels * log_p + (1 - labels) * log_not_p).sum(dim=1).mean()
-
     def _twc(self, tokens, word_map, token_mask, o2r, r2o):
         """TWC as TWA (_forward_pretrain_cons_output + loss_accuracy): encoder output of every
         original word vs every related word of the batch, logits = exp(logit_scale) · cos,
         labels = create_batch_labels (block-diagonal, cross-sample 0, PAD rows/columns -1),
-        symmetric loss over the cells != -1: config.twc_loss = sigmoid BCE (TWA code) or softmax
-        then BCE (TWA paper).
+        symmetric sigmoid BCE over the cells != -1.
         tokens: [B, L, D] encoder output of [original OCR | related OCR]; word_map: [B, L] word
         slot of each token (original 0..W-1, related W..2W-1); o2r, r2o: [B, W, W]."""
         batch, words = o2r.shape[:2]
@@ -328,18 +318,10 @@ class OpenViVQAModel(PreTrainedModel):
         keep = o2r != -1
         if not keep.any():
             return logits.sum() * 0.0, logits.new_zeros(())
-        if self.config.twc_loss == "softmax":
-            real = o2r.diagonal() != -1  # PAD words leave the softmax, not only the loss
-            scores = logits[real][:, real]
-            loss = 0.5 * (
-                self._twc_softmax_loss(scores, o2r[real][:, real])
-                + self._twc_softmax_loss(scores.t(), r2o[real][:, real])
-            )
-        else:
-            loss = 0.5 * (
-                F.binary_cross_entropy_with_logits(logits[keep], o2r[keep])
-                + F.binary_cross_entropy_with_logits(logits.t()[keep], r2o[keep])
-            )
+        loss = 0.5 * (
+            F.binary_cross_entropy_with_logits(logits[keep], o2r[keep])
+            + F.binary_cross_entropy_with_logits(logits.t()[keep], r2o[keep])
+        )
         with torch.no_grad():  # retrieval top-1 trong batch: từ gốc tìm đúng bản related của nó
             rows = (o2r.diagonal() != -1).nonzero(as_tuple=True)[0]
             best = logits.detach().masked_fill(~keep, -1e9)[rows].argmax(dim=1)
