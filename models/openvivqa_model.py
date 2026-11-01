@@ -407,6 +407,23 @@ class OpenViVQAModel(PreTrainedModel):
         return (weight * loss).sum() / weight.sum().clamp_min(1e-12)
 
     @staticmethod
+    def _paper_bce(scores, labels):
+        """Paper Eq. 4-6: row softmax then BCE, excluding ignored cells."""
+        valid = labels != -1
+        rows = valid.any(dim=1)
+        if not rows.any():
+            return scores.sum() * 0.0
+        scores, labels, valid = scores[rows].float(), labels[rows].float(), valid[rows]
+        log_p = torch.log_softmax(scores.masked_fill(~valid, -1e30), dim=1).clamp_min(-100)
+        # Compute log(1-p) without subtracting probabilities close to one.
+        masked = scores.masked_fill(~valid, -1e30)
+        negative = torch.full_like(masked[:, :1], -1e30)
+        left = torch.cat([negative, torch.logcumsumexp(masked[:, :-1], dim=1)], dim=1)
+        right = torch.cat([torch.logcumsumexp(masked[:, 1:].flip(1), dim=1).flip(1), negative], dim=1)
+        log_not_p = (torch.logaddexp(left, right) - torch.logsumexp(masked, dim=1, keepdim=True)).clamp_min(-100)
+        return (-(labels[valid] * log_p[valid] + (1 - labels[valid]) * log_not_p[valid])).mean()
+
+    @staticmethod
     def _text_collision(query_text, key_text):
         """[N, M] True where the (original, related) texts of a query and a candidate share
         a string. query_text: [N, 2], key_text: [M, 2] hashed texts, -1 = unknown."""
@@ -498,8 +515,8 @@ class OpenViVQAModel(PreTrainedModel):
 
     def _twc(self, tokens, word_map, token_mask, o2r, r2o, groups, text_ids=None):
         """TWC (TWA §3.4–3.6): word features of the original and related OCR copies,
-        cosine similarity with learnable temperature; softmax InfoNCE (paper) or
-        sigmoid BCE (TWA code) on the soft labels. tokens: [B, L_ocr, D].
+        cosine similarity with learnable temperature; paper softmax+BCE,
+        softmax cross-entropy, or legacy sigmoid+BCE. tokens: [B, L_ocr, D].
         text_ids: [B, 2W] hashed word texts (original half, related half), -1 = PAD.
         With twc_queue_size > 0 the softmax also sees the features of earlier batches."""
         batch, words = o2r.shape[:2]
@@ -561,6 +578,8 @@ class OpenViVQAModel(PreTrainedModel):
             )
             if use_memory:
                 self._twc_enqueue(memory, original[real].detach(), related[real].detach(), pair_text[real])
+        elif self.config.twc_loss == "paper_bce":
+            loss = 0.5 * (self._paper_bce(logits, o2r) + self._paper_bce(logits.t(), r2o))
         else:
             keep = o2r != -1
             loss = 0.5 * (

@@ -16,7 +16,7 @@ twc_temperature_init: 0.2     # tau khởi tạo; học log(1/tau) qua gradient
 twc_temperature_min: 0.06     # tau không giảm dưới 0.06
 twc_adv_probability: 0.35    # p của bản related (augment): từ đúng → nhiễu ký tự, từ sai → sửa; cùng quy trình lúc train và test
 twc_view: "shared"           # VQA và TWC dùng chung một lượt ViT5 encoder, cùng Origin + Related
-twc_loss: "bce"              # bce = bản code TWA (t1); infonce = softmax trên mọi ứng viên
+twc_loss: "paper_bce"        # Eq. (4)-(6): softmax cosine/tau rồi BCE hai chiều, nhãn 0/0.9/1
 twc_feature: "fused"         # Origin ↔ Related lấy từ output ViT5 encoder sau khi fusion image/question/OCR
 twc_queue_size: 0            # 0 = chỉ trong batch (t1); >0 = bộ nhớ cross-batch (cần infonce)
 twc_queue_start: 1000        # số forward train trước khi đọc bộ nhớ
@@ -25,8 +25,8 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune_aug_twc_consformer_fixed_tau02_trainable_templr1e5_wd01_min006"
-logging_dir: "./output/finetune_aug_twc_consformer_fixed_tau02_trainable_templr1e5_wd01_min006/logs"
+output_dir: "./output/finetune_paperbce_aug_twc_consformer_tau02_trainable_templr1e5_wd01_min006"
+logging_dir: "./output/finetune_paperbce_aug_twc_consformer_tau02_trainable_templr1e5_wd01_min006/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
