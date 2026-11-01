@@ -16,12 +16,14 @@ class ViT5VQADataset(Dataset):
         ocr_key="ocr_path",
         q_key="question",
         a_key="answer",
+        include_qa=True,
     ):
         self.df = dataframe.reset_index(drop=True)
         self.image_key = image_key
         self.ocr_key = ocr_key
         self.q_key = q_key
         self.a_key = a_key
+        self.include_qa = include_qa
 
     def __len__(self):
         return len(self.df)
@@ -34,6 +36,8 @@ class ViT5VQADataset(Dataset):
             if self.ocr_key in row and pd.notna(row[self.ocr_key])
             else None
         )
+        if not self.include_qa:
+            return {"image_path": img_path, "ocr_path": ocr_path, "uid": img_path}
         return {
             "image_path": img_path,
             "ocr_path": ocr_path,

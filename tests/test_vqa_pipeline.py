@@ -1503,3 +1503,174 @@ def test_temperature_floor_bounds_logits_and_projects_loaded_checkpoint(
 def test_temperature_bounds_validate_initialization(minimum, initial):
     with pytest.raises(ValueError, match="twc_temperature_min"):
         OpenViVQAConfig(twc_temperature_min=minimum, twc_temperature_init=initial)
+
+
+def test_paper_bce_literal_and_mask_gradients():
+    scores = torch.tensor([[1., 2., -2.], [4., -1., 3.]], requires_grad=True)
+    labels = torch.tensor([[1., .9, 0.], [0., 1., .9]])
+    expected = torch.nn.functional.binary_cross_entropy(torch.softmax(scores, dim=1), labels)
+    actual = OpenViVQAModel._paper_bce(scores, labels)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(torch.autograd.grad(actual, scores, retain_graph=True)[0],
+                               torch.autograd.grad(expected, scores)[0])
+    for labels in (torch.tensor([[-1., .9, -1.]]), torch.tensor([[-1., 1., 0., -1.]])):
+        x = torch.linspace(-100, 100, labels.numel()).reshape_as(labels).requires_grad_()
+        loss = OpenViVQAModel._paper_bce(x, labels)
+        loss.backward()
+        assert torch.isfinite(loss) and torch.isfinite(x.grad).all()
+
+
+def test_two_stage_checkpoint_transfer(tokenizer, samples, corrector, tmp_path, monkeypatch):
+    from transformers import T5EncoderModel
+    from training.common import bootstrap_vqa
+    config = T5Config(vocab_size=32, d_model=32, d_kv=8, d_ff=64, num_layers=1,
+                      num_decoder_layers=1, num_heads=4, dropout_rate=0,
+                      pad_token_id=0, eos_token_id=1, decoder_start_token_id=0)
+    torch.manual_seed(222)
+    original = T5ForConditionalGeneration(config)
+    monkeypatch.setattr(T5ForConditionalGeneration, "from_pretrained", lambda *a, **k: copy.deepcopy(original))
+    monkeypatch.setattr(T5EncoderModel, "from_pretrained", lambda *a, **k: T5EncoderModel(config))
+    options = dict(stage="pretrain", input_order="question_last", use_twc=True,
+                   twc_objective="lexical", twc_feature="fused", twc_loss="paper_bce",
+                   twc_queue_size=0, twc_fixed_temperature=True, twc_temperature_init=.07,
+                   ocr_aug_mode="separate", ocr_related="augment")
+    model = OpenViVQAModel(OpenViVQAConfig(**{**TINY, **options}))
+    assert not any(k.startswith(("vit5.decoder", "vit5.lm_head")) for k in model.state_dict())
+    assert "twc_logit_scale" not in dict(model.named_parameters())
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    batch = collator(samples)
+    assert "input_ids" not in batch and "labels" not in batch
+    model.train(); result = model(**batch); result["twc_loss"].backward()
+    assert torch.isfinite(result["twc_loss"]) and model.vit5.encoder.block[0].layer[0].SelfAttention.q.weight.grad is not None
+    model.save_pretrained(tmp_path); tokenizer.save_pretrained(tmp_path)
+    reloaded = OpenViVQAModel.from_pretrained(tmp_path)
+    torch.testing.assert_close(reloaded.vit5.shared.weight, model.vit5.shared.weight)
+    downstream, _ = bootstrap_vqa(str(tmp_path), {"stage": "vqa", "use_twc": False})
+    torch.testing.assert_close(downstream.vit5.shared.weight, model.vit5.shared.weight)
+    torch.testing.assert_close(downstream.vit5.encoder.block[0].layer[0].SelfAttention.q.weight,
+                               model.vit5.encoder.block[0].layer[0].SelfAttention.q.weight)
+    torch.testing.assert_close(downstream.vit5.decoder.block[0].layer[0].SelfAttention.q.weight,
+                               original.decoder.block[0].layer[0].SelfAttention.q.weight)
+    assert downstream.vit5.shared.weight is downstream.vit5.decoder.embed_tokens.weight
+    assert not any("twc_" in k for k, _ in downstream.named_parameters())
+    vqa_batch = build_collator(downstream, tokenizer, corrector, training=True)(samples)
+    captured = {}
+    def record(_module, _args, kwargs):
+        captured["inputs"] = kwargs["inputs_embeds"].detach()
+    hook = downstream.vit5.encoder.register_forward_pre_hook(record, with_kwargs=True)
+    output = downstream(**vqa_batch)
+    hook.remove()
+    question_length = vqa_batch["input_ids"].shape[1]
+    torch.testing.assert_close(captured["inputs"][:, -question_length:],
+                               downstream.vit5.shared(vqa_batch["input_ids"]).detach())
+    assert "loss" in output and "twc_loss" not in output
+    downstream.eval()
+    assert downstream.generate(**vqa_batch, max_new_tokens=2, num_beams=1).shape[0] == len(samples)
+
+
+def test_pretrain_loads_only_train_csv(tmp_path, monkeypatch):
+    from training import common
+    monkeypatch.setattr(common, "OUTPUT_PATH", str(tmp_path))
+    pd.DataFrame({"dataset": ["ViTextVQA"], "image_path": ["train.png"]}).to_csv(tmp_path / "merged_train.csv", index=False)
+    original = pd.read_csv
+    reads = []
+    def checked(path, *args, **kwargs):
+        reads.append(str(path))
+        assert str(path).endswith("merged_train.csv")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(common.pd, "read_csv", checked)
+    frames = common.load_dataframes("ViTextVQA", str(tmp_path), splits=("train",))
+    assert list(frames) == ["train"] and len(reads) == 1
+
+
+def test_pretrain_trainer_checkpoint_resume(tokenizer, samples, corrector, tmp_path, monkeypatch):
+    from transformers import T5EncoderModel
+    config = T5Config(vocab_size=32, d_model=32, d_kv=8, d_ff=64, num_layers=1,
+                      num_heads=4, dropout_rate=0, pad_token_id=0, eos_token_id=1,
+                      decoder_start_token_id=0)
+    monkeypatch.setattr(T5EncoderModel, "from_pretrained", lambda *a, **k: T5EncoderModel(config))
+    model = OpenViVQAModel(OpenViVQAConfig(**{**TINY, "stage": "pretrain", "input_order": "question_last",
+        "use_twc": True, "twc_objective": "lexical", "twc_feature": "fused", "twc_loss": "paper_bce",
+        "twc_queue_size": 0, "twc_fixed_temperature": True, "twc_temperature_init": .07,
+        "ocr_aug_mode": "separate", "ocr_related": "augment"}))
+    args = CustomTrainingArguments(output_dir=str(tmp_path), use_cpu=True, max_steps=1,
+        save_steps=1, per_device_train_batch_size=2, remove_unused_columns=False,
+        report_to="none", disable_tqdm=True, dataloader_pin_memory=False)
+    dataset = ViT5VQADataset(pd.DataFrame(samples), include_qa=False)
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer, train_dataset=dataset,
+                         data_collator=build_collator(model, tokenizer, corrector, training=True))
+    trainer.train()
+    assert (tmp_path / "checkpoint-1" / "optimizer.pt").is_file()
+    args.max_steps = 2
+    trainer = VQATrainer(model=OpenViVQAModel.from_pretrained(tmp_path / "checkpoint-1"), args=args,
+        tokenizer=tokenizer, train_dataset=dataset,
+        data_collator=build_collator(model, tokenizer, corrector, training=True))
+    trainer.train(resume_from_checkpoint=str(tmp_path / "checkpoint-1"))
+    assert trainer.state.global_step == 2
+
+
+def test_fresh_preparation_registers_train_only(tmp_path, monkeypatch):
+    import yaml
+    from argparse import Namespace
+    from scripts import prepare_dataset
+    config_path = tmp_path / "dataset.yaml"
+    config_path.write_text(yaml.safe_dump({"dataset_name": "Example", "image": {"dir": str(tmp_path)},
+        "ocr": {"dir": str(tmp_path)}, "dataset": {"train": {"dir": "train.json"},
+        "validation": {"dir": "never-val.json"}, "test": {"dir": "never-test.json"}}}))
+    class FakeHub:
+        def __init__(self, *args): pass
+        def register_dataset(self, **kwargs):
+            assert list(kwargs["splits"]) == ["train"]
+        def prepare(self, name): return {}
+        def load_task(self, name): return {"train": pd.DataFrame({"split": ["train"]})}
+    monkeypatch.setattr(prepare_dataset, "DatasetHubLoader", FakeHub)
+    monkeypatch.setattr(prepare_dataset, "OUTPUT_PATH", str(tmp_path / "out"))
+    prepare_dataset.main(Namespace(config=str(config_path), data_dir=str(tmp_path), splits=("train",)))
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["merged_train.csv"]
+
+
+def test_two_stage_finetune_entrypoints(tokenizer, samples, corrector, tmp_path, monkeypatch):
+    """Exercise the actual stage YAMLs, checkpoint handoff, and fresh VQA optimizer."""
+    from transformers import T5EncoderModel
+    from training import finetune
+    config = T5Config(vocab_size=32, d_model=32, d_kv=8, d_ff=64, num_layers=1,
+                      num_heads=4, dropout_rate=0, pad_token_id=0, eos_token_id=1,
+                      decoder_start_token_id=0)
+    monkeypatch.setattr(T5EncoderModel, "from_pretrained", lambda *a, **k: T5EncoderModel(config))
+    calls, evaluations = [], []
+    def frames(dataset, data_dir, splits=None):
+        calls.append(splits)
+        if splits is not None:
+            assert splits == ("train",)
+            return {"train": pd.DataFrame(samples)}
+        return {name: pd.DataFrame(samples) for name in ("train", "validation", "test")}
+    monkeypatch.setattr(finetune, "load_dataframes", frames)
+    monkeypatch.setattr(finetune, "hub_target", lambda: (None, None))
+    monkeypatch.setattr(finetune, "build_corrector", lambda *a, **k: corrector)
+    monkeypatch.setattr(finetune, "load_model_and_tokenizer",
+                        lambda checkpoint, overrides=None: (
+                            OpenViVQAModel(OpenViVQAConfig(**{**TINY, **overrides})), tokenizer))
+    real_evaluate = VQATrainer.evaluate
+    def evaluate(self, *args, **kwargs):
+        assert self.model.config.stage == "vqa", "Pretraining must never evaluate"
+        evaluations.append(self.model.config.stage)
+        return real_evaluate(self, *args, **kwargs)
+    monkeypatch.setattr(VQATrainer, "evaluate", evaluate)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    pre_dir, vqa_dir = tmp_path / "pretrain", tmp_path / "vqa"
+    def args(config_name, output):
+        return [str(PROJECT_ROOT / "configs" / config_name), "--output_dir", str(output),
+                "--logging_dir", str(output / "logs"), "--smoke_test", "true",
+                "--smoke_max_steps", "1", "--per_device_train_batch_size", "2",
+                "--per_device_eval_batch_size", "2", "--generation_max_length", "2",
+                "--generation_num_beams", "1", "--use_cpu", "true", "--disable_tqdm", "true",
+                "--dataloader_pin_memory", "false"]
+    pretrain = finetune.main(args("pretrain.yaml", pre_dir))
+    assert pretrain.state.global_step == 1 and calls == [("train",)] and not evaluations
+    assert (pre_dir / "model.safetensors").is_file()
+    vqa = finetune.main(args("twc_vqa.yaml", vqa_dir) + ["--bootstrap_pretrain", str(pre_dir)])
+    assert calls == [("train",), None] and evaluations
+    assert vqa.state.global_step == 1
+    assert vqa.model.config.pretrain_source == str(pre_dir)
+    assert vqa.optimizer.state
+    assert all(float(state["step"]) == 1 for state in vqa.optimizer.state.values() if "step" in state)

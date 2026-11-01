@@ -32,6 +32,9 @@ class OpenViVQAConfig(PretrainedConfig):
         ablation_use_consformer: bool = True,
         ablation_use_image: bool = True,
         ablation_use_ocr_aug: bool = True,
+        stage: str = "vqa",
+        input_order: str = "question_first",
+        twc_fixed_temperature: bool = False,
         use_twc: bool = False,
         twc_weight: float = 1.0,
         twc_adv_probability: float = 0.35,
@@ -101,6 +104,13 @@ class OpenViVQAConfig(PretrainedConfig):
             kwargs.pop(name, None)
         super().__init__(**kwargs)
 
+        self.stage = stage
+        self.input_order = input_order
+        self.twc_fixed_temperature = bool(twc_fixed_temperature)
+        if stage not in ("pretrain", "vqa") or input_order not in ("question_first", "question_last"):
+            raise ValueError("Invalid stage or input order")
+        if stage == "pretrain" and (ablation_use_qaclip or not use_twc or twc_objective != "lexical"):
+            raise ValueError("Pretraining requires question-free lexical TWC")
         self.vit5_name = vit5_name
         self.clip_vision_name = clip_vision_name
         self.ablation_use_qaclip = bool(ablation_use_qaclip)
@@ -118,14 +128,15 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_label_list = list(twc_label_list) if twc_label_list is not None else [0.9, 0.9]
         self.ocr_edit_distance = int(ocr_edit_distance)
         # infonce: softmax over all in-batch candidates with soft multi-positive targets
-        #          (TWA paper Eq. 4–6); bce: sigmoid BCE averaged over all cells (TWA code).
+        #          (a different objective); paper_bce: row-softmax then BCE (paper Eq. 4–6);
+        # bce: sigmoid BCE averaged over all cells (TWA code).
         self.twc_loss = str(twc_loss)
         # lexical: OCR features before fusion (ConsFormer text + characters, no box/det/rec);
         # fused: multimodal encoder output. The related copy shares box/det/rec with its
         # original, so on fused features a pair can be matched by layout alone.
         self.twc_feature = str(twc_feature)
-        if self.twc_loss not in ("infonce", "bce") or self.twc_feature not in ("lexical", "fused"):
-            raise ValueError("twc_loss must be infonce|bce and twc_feature lexical|fused.")
+        if self.twc_loss not in ("infonce", "bce", "paper_bce") or self.twc_feature not in ("lexical", "fused"):
+            raise ValueError("twc_loss must be infonce|bce|paper_bce and twc_feature lexical|fused.")
         # Cross-batch memory (XBM, Wang et al. CVPR'20): FIFO of detached word features
         # from previous steps, used as extra negatives for the softmax TWC. A batch of 8
         # gives ~300 candidates; 16384 entries cover the last ~55 steps. 0 = in-batch only.

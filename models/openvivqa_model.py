@@ -12,6 +12,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
     T5ForConditionalGeneration,
+    T5EncoderModel,
 )
 from transformers.models.t5.modeling_t5 import T5LayerNorm
 
@@ -42,7 +43,7 @@ class OpenViVQAModel(PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         seed = torch.initial_seed()
-        self.vit5 = T5ForConditionalGeneration.from_pretrained(config.vit5_name)
+        self.vit5 = (T5EncoderModel if config.stage == "pretrain" else T5ForConditionalGeneration).from_pretrained(config.vit5_name)
         self.d_model = self.vit5.config.d_model
         for name in ("pad_token_id", "eos_token_id", "decoder_start_token_id"):
             value = getattr(config, name)
@@ -119,9 +120,11 @@ class OpenViVQAModel(PreTrainedModel):
             nn.init.zeros_(self.ocr_type_embedding.weight)
         if config.use_twc and config.twc_objective in ("lexical", "both"):
             # Learn theta=log(1/tau); exp(theta) is the positive contrastive logit scale.
-            self.twc_logit_scale = nn.Parameter(
-                torch.tensor(math.log(1 / config.twc_temperature_init))
-            )
+            scale = torch.tensor(math.log(1 / config.twc_temperature_init))
+            if config.twc_fixed_temperature:
+                self.register_buffer("twc_logit_scale", scale, persistent=False)
+            else:
+                self.twc_logit_scale = nn.Parameter(scale)
         if config.use_twc and config.twc_objective in ("answer", "both"):
             # Answer-grounded TWC: câu hỏi (đã qua encoder) → truy vấn; khởi tạo đồng nhất.
             with _seeded(seed + 5):
@@ -160,7 +163,7 @@ class OpenViVQAModel(PreTrainedModel):
     def clamp_twc_temperatures_(self):
         """Project parameters without detaching future temperature gradients."""
         for name in ("twc_logit_scale", "twc_answer_logit_scale"):
-            if hasattr(self, name):
+            if isinstance(getattr(self, name, None), nn.Parameter):
                 getattr(self, name).clamp_(math.log(1 / 100), math.log(1 / self.config.twc_temperature_min))
 
     def _twc_scale(self, logit_scale):
@@ -330,13 +333,13 @@ class OpenViVQAModel(PreTrainedModel):
 
     def encode(
         self,
-        input_ids,
-        pixel_values,
-        ocr_info,
-        ocr_input_ids,
-        ocr_to_word_map,
-        ocr_char_ids,
-        ocr_char_mask,
+        input_ids=None,
+        pixel_values=None,
+        ocr_info=None,
+        ocr_input_ids=None,
+        ocr_to_word_map=None,
+        ocr_char_ids=None,
+        ocr_char_mask=None,
         ocr_word_mask=None,
         attention_mask=None,
         ocr_attention_mask=None,
@@ -344,18 +347,23 @@ class OpenViVQAModel(PreTrainedModel):
         image_features=None,
         **lattice,
     ):
-        """Encode [question, image patches, OCR] once for loss and generation.
+        """Encode image/OCR with the question first or last; pretraining omits it.
         image_features: precomputed (tokens, mask) to reuse CLIP across two passes.
 
         Returns (encoder outputs, fused mask, start index of the OCR block)
         [+ token-level lexical OCR features when return_lexical].
         """
-        if attention_mask is None:
+        if self.config.stage == "pretrain":
+            if input_ids is not None:
+                raise ValueError("Pretraining must not receive questions")
+        elif attention_mask is None:
             attention_mask = (input_ids != self.config.pad_token_id).long()
         if ocr_attention_mask is None:
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
-        pieces = [self.get_input_embeddings()(input_ids)]
-        masks = [attention_mask]
+        pieces, masks = [], []
+        if self.config.stage != "pretrain" and self.config.input_order == "question_first":
+            pieces.append(self.get_input_embeddings()(input_ids))
+            masks.append(attention_mask)
         if self.config.ablation_use_image:
             image_tokens, image_mask = (image_features if image_features is not None
                                         else self._encode_image(pixel_values, input_ids, attention_mask))
@@ -378,6 +386,9 @@ class OpenViVQAModel(PreTrainedModel):
             )
         pieces.append(ocr_features)
         masks.append(ocr_mask)
+        if self.config.stage != "pretrain" and self.config.input_order == "question_last":
+            pieces.append(self.get_input_embeddings()(input_ids))
+            masks.append(attention_mask)
         if any(piece.shape[-1] != self.d_model for piece in pieces):
             raise ValueError("All vision/OCR backbone output dimensions must match ViT5 d_model.")
         fused_mask = torch.cat(masks, dim=1)
@@ -405,6 +416,25 @@ class OpenViVQAModel(PreTrainedModel):
         log_prob = torch.log_softmax(scores.masked_fill(~valid, float("-inf")), dim=1)
         loss = -(target * log_prob.masked_fill(~valid, 0.0)).sum(dim=1)
         return (weight * loss).sum() / weight.sum().clamp_min(1e-12)
+
+    @staticmethod
+    def _paper_bce(scores, labels):
+        """Row softmax followed by binary cross entropy, excluding ignored cells."""
+        valid = labels != -1
+        rows = valid.any(dim=1)
+        if not rows.any():
+            return scores.sum() * 0.0
+        scores, labels, valid = scores[rows].float(), labels[rows].float(), valid[rows]
+        log_p = torch.log_softmax(scores.masked_fill(~valid, -1e30), dim=1).clamp_min(-100)
+        # log(1-p) via logsumexp of the other candidates avoids cancellation at p=1.
+        masked = scores.masked_fill(~valid, -1e30)
+        neg_inf = torch.full_like(masked[:, :1], -1e30)
+        left = torch.cat([neg_inf, torch.logcumsumexp(masked[:, :-1], dim=1)], dim=1)
+        right = torch.cat([torch.logcumsumexp(masked[:, 1:].flip(1), dim=1).flip(1), neg_inf], dim=1)
+        log_others = torch.logaddexp(left, right)
+        # BCE in PyTorch clamps log(0) to -100, including single-candidate rows.
+        log_not_p = (log_others - torch.logsumexp(masked, dim=1, keepdim=True)).clamp_min(-100)
+        return (-(labels[valid] * log_p[valid] + (1 - labels[valid]) * log_not_p[valid])).mean()
 
     @staticmethod
     def _text_collision(query_text, key_text):
@@ -498,8 +528,7 @@ class OpenViVQAModel(PreTrainedModel):
 
     def _twc(self, tokens, word_map, token_mask, o2r, r2o, groups, text_ids=None):
         """TWC (TWA §3.4–3.6): word features of the original and related OCR copies,
-        cosine similarity with learnable temperature; softmax InfoNCE (paper) or
-        sigmoid BCE (TWA code) on the soft labels. tokens: [B, L_ocr, D].
+        cosine similarity with learnable temperature; row-softmax BCE (paper), InfoNCE, or sigmoid BCE (TWA code) on the soft labels. tokens: [B, L_ocr, D].
         text_ids: [B, 2W] hashed word texts (original half, related half), -1 = PAD.
         With twc_queue_size > 0 the softmax also sees the features of earlier batches."""
         batch, words = o2r.shape[:2]
@@ -561,6 +590,8 @@ class OpenViVQAModel(PreTrainedModel):
             )
             if use_memory:
                 self._twc_enqueue(memory, original[real].detach(), related[real].detach(), pair_text[real])
+        elif self.config.twc_loss == "paper_bce":
+            loss = 0.5 * (self._paper_bce(logits, o2r) + self._paper_bce(logits.t(), r2o))
         else:
             keep = o2r != -1
             loss = 0.5 * (
@@ -575,13 +606,13 @@ class OpenViVQAModel(PreTrainedModel):
 
     def forward(
         self,
-        input_ids,
-        pixel_values,
-        ocr_info,
-        ocr_input_ids,
-        ocr_to_word_map,
-        ocr_char_ids,
-        ocr_char_mask,
+        input_ids=None,
+        pixel_values=None,
+        ocr_info=None,
+        ocr_input_ids=None,
+        ocr_to_word_map=None,
+        ocr_char_ids=None,
+        ocr_char_mask=None,
         ocr_word_mask=None,
         attention_mask=None,
         ocr_attention_mask=None,
@@ -608,6 +639,8 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_lattice_word_map=None,
         ocr_words=None,
     ):
+        if self.config.stage == "pretrain" and (labels is not None or decoder_input_ids is not None):
+            raise ValueError("Pretraining cannot consume answers or decoder inputs")
         lattice = {k: v for k, v in dict(
             ocr_rel_input_ids=ocr_rel_input_ids, ocr_rel_attention_mask=ocr_rel_attention_mask,
             ocr_rel_to_word_map=ocr_rel_to_word_map, ocr_rel_char_ids=ocr_rel_char_ids,
@@ -660,7 +693,8 @@ class OpenViVQAModel(PreTrainedModel):
         if self.config.use_twc and twc_answer_labels is not None and hasattr(self, "twc_answer_query"):
             questions = input_ids.shape[1]
             result["twc_answer_loss"], result["twc_answer_acc"] = self._twc_answer(
-                encoded.last_hidden_state[:, :questions],
+                (encoded.last_hidden_state[:, :questions] if self.config.input_order == "question_first"
+                 else encoded.last_hidden_state[:, -questions:]),
                 attention_mask if attention_mask is not None else (input_ids != self.config.pad_token_id).long(),
                 encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_length],
                 twc_word_map, twc_token_mask, twc_answer_labels, twc_text_ids, twc_answer_text_ids,
@@ -719,6 +753,8 @@ class OpenViVQAModel(PreTrainedModel):
         generation_config=None,
         **generation_kwargs,
     ):
+        if self.config.stage == "pretrain":
+            raise ValueError("Pretraining has no decoder or generation")
         for name in ("twc_o2r", "twc_r2o", "twc_group_ids", "twc_text_ids", "twc_answer_labels",
                      "twc_answer_text_ids", "ocr_words", "labels", *('twc_ocr_input_ids', 'twc_ocr_attention_mask', 'twc_ocr_to_word_map', 'twc_ocr_char_ids', 'twc_ocr_char_mask')):
             generation_kwargs.pop(name, None)

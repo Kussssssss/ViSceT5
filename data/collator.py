@@ -161,7 +161,8 @@ class ViT5VQADataCollator:
         # Separate/lattice: the same copy must come out at train and at test → a seed that does not depend
         # on the training seed (TWA builds its related copy with a fixed seed for every split).
         seed = 13 if self.separate else self.seed
-        rng = random.Random(_stable_hash(f"{seed}|{sample['image_path']}|{sample['question']}"))
+        identity = sample["image_path"] if self.cfg.stage == "pretrain" else f"{sample['image_path']}|{sample['question']}"
+        rng = random.Random(_stable_hash(f"{seed}|{identity}"))
         return self.corrector.augment(texts, self.cfg.twc_adv_probability, rng)
 
     def _encode_ocr_text(self, texts, word_count, offset=0):
@@ -192,7 +193,7 @@ class ViT5VQADataCollator:
                 if image.mode == "P" and "transparency" in image.info:
                     image = image.convert("RGBA")
                 images.append(image.convert("RGB"))
-        questions = self.tokenizer(
+        questions = None if self.cfg.stage == "pretrain" else self.tokenizer(
             [sample["question"] for sample in batch],
             padding="max_length",
             truncation=True,
@@ -301,8 +302,6 @@ class ViT5VQADataCollator:
             words.append({"orig": list(item["texts"]), "rel": related})
         ids = pad_sequence(token_ids, batch_first=True, padding_value=self.pad_id)
         result = {
-            "input_ids": questions.input_ids,
-            "attention_mask": questions.attention_mask,
             "pixel_values": self.image_processor(images=images, return_tensors="pt")[
                 "pixel_values"
             ],
@@ -316,6 +315,8 @@ class ViT5VQADataCollator:
             "ocr_char_mask": torch.stack(char_masks),
             "ocr_word_mask": torch.stack(word_masks).long(),
         }
+        if questions is not None:
+            result.update(input_ids=questions.input_ids, attention_mask=questions.attention_mask)
         if lexical:
             result.update(
                 twc_o2r=torch.stack(o2r_all),
@@ -364,8 +365,8 @@ class ViT5VQADataCollator:
         if self.return_ocr_words:
             result["ocr_words"] = words
         # Unlabelled inference batches do not create an all-ignored decoder loss.
-        answers = [sample.get("answer") for sample in batch]
-        if all(answer is not None and str(answer).strip() for answer in answers):
+        answers = [] if self.cfg.stage == "pretrain" else [sample.get("answer") for sample in batch]
+        if answers and all(answer is not None and str(answer).strip() for answer in answers):
             labels = self.tokenizer(
                 answers,
                 padding="max_length",

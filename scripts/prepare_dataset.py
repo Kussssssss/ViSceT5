@@ -3,12 +3,11 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-import shutil
 import pandas as pd
 import argparse
 import yaml
 
-from configs.base_config import configure_env, OUTPUT_PATH, SEED
+from configs.base_config import OUTPUT_PATH
 from data.dataset_hub import DatasetHubLoader
 
 def main(args):
@@ -67,9 +66,9 @@ def main(args):
             return local_dir
         return drive_id
 
-    train_id = resolve_split(config['dataset']['train'])
-    val_id = resolve_split(config['dataset']['validation'])
-    test_id = resolve_split(config['dataset']['test'])
+    selected_splits = getattr(args, "splits", None) or ("train", "validation", "test")
+    split_specs = {name: {"id": resolve_split(config["dataset"][name]), "url": None}
+                   for name in selected_splits}
 
     hub = DatasetHubLoader(RAW_DATASET_DIR, OUT_DIR)
 
@@ -81,15 +80,11 @@ def main(args):
         image_dir_override=image_dir_override,
         ocr_zip_id=ocr_zip_id,
         ocr_dir_override=ocr_dir_override,
-        splits={
-            "train":      {"id": train_id, "url": None},
-            "validation": {"id": val_id, "url": None},
-            "test":       {"id": test_id, "url": None},
-        },
+        splits=split_specs,
     )
 
     print(f"\n⬇️  Downloading & Extracting Dataset {NAME_SET1}...")
-    path_info1 = hub.prepare(NAME_SET1)
+    hub.prepare(NAME_SET1)
     dfs1 = hub.load_task(NAME_SET1)
     print(f"   ✅ {NAME_SET1} Ready: {len(dfs1['train'])} train samples.")
 
@@ -101,29 +96,17 @@ def main(args):
         return combined
 
     print("\n🔄 Preparing final dataset splits...")
-    final_train_df = merge_and_shuffle([dfs1["train"]], "train")
-    final_val_df = merge_and_shuffle([dfs1["validation"]], "validation")
-    final_test_df = merge_and_shuffle([dfs1["test"]], "test")
-
-    print("\n📊 FINAL DATASET STATISTICS:")
-    print(f"   - Training Samples:   {len(final_train_df)}")
-    print(f"   - Validation Samples: {len(final_val_df)}")
-    print(f"   - Test Samples:       {len(final_test_df)}")
-    print(f"   - Columns:            {list(final_train_df.columns)}")
-
-    print("\nSample Rows (Mixed):")
-    print(final_train_df.head(5))
-    
-    # Save to CSV in OUTPUT_PATH
     os.makedirs(OUTPUT_PATH, exist_ok=True)
-    final_train_df.to_csv(os.path.join(OUTPUT_PATH, "merged_train.csv"), index=False)
-    final_val_df.to_csv(os.path.join(OUTPUT_PATH, "merged_val.csv"), index=False)
-    final_test_df.to_csv(os.path.join(OUTPUT_PATH, "merged_test.csv"), index=False)
+    suffixes = {"train": "train", "validation": "val", "test": "test"}
+    for split in selected_splits:
+        frame = merge_and_shuffle([dfs1[split]], split)
+        frame.to_csv(os.path.join(OUTPUT_PATH, f"merged_{suffixes[split]}.csv"), index=False)
     print(f"   ✅ Saved prepared dataset CSVs to {OUTPUT_PATH}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare Dataset")
     parser.add_argument("--config", type=str, default="configs/data/ViTextVQA.yaml", help="Path to config file")
     parser.add_argument("--data_dir", type=str, default="./datasets", help="Path to store downloaded data")
+    parser.add_argument("--splits", nargs="+", choices=("train", "validation", "test"))
     args = parser.parse_args()
     main(args)

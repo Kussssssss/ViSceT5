@@ -36,11 +36,13 @@ class PushEachCheckpoint(TrainerCallback):
             print(f"[HF] {name} has non-finite weights — not pushed.")
             return
         try:
+            if model is not None:
+                model.image_processor.save_pretrained(os.path.join(folder, "image_processor"))
             self.api.upload_folder(folder_path=folder, path_in_repo=name, repo_id=self.repo,
                                    repo_type="model")
             print(f"[HF] pushed {name} → {self.repo}")
         except Exception as error:
-            print(f"[HF] push of {name} failed: {error}")
+            raise RuntimeError(f"[HF] push of {name} failed") from error
 
 
 def resume_from_hub(repo, token, output_dir):
