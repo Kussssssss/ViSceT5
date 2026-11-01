@@ -41,6 +41,9 @@ class ModelArguments:
     ocr_feature_norm: str = field(
         default="layernorm", metadata={"help": "OCR stream norms: layernorm (pre-refactor code) | rmsnorm (refactor)."}
     )
+    twc_activation: str = field(
+        default="sigmoid", metadata={"help": "TWC probabilities: sigmoid (released TWA code) | softmax (TWA paper, Eq. 4-6)."}
+    )
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )

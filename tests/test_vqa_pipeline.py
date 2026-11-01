@@ -1081,3 +1081,67 @@ def test_configs_before_full_ocr_features_keep_text_only_baseline(make_model):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     assert cfg["ocr_full_features"] is True
+
+
+def test_twc_softmax_by_hand():
+    # p = e²/(1+e²) on the diagonal, 1-p elsewhere; each row: -log p - log(1-(1-p)) = -2 log p.
+    logits = torch.tensor([[2.0, 0.0], [0.0, 2.0]])
+    loss = OpenViVQAModel._twc_softmax_loss(logits, torch.eye(2))
+    assert abs(float(loss) - 0.25385) < 1e-4
+    # A saturated softmax stays finite: label 1 cancels log(1-p), label 0 cancels log(p).
+    logits = (1000 * torch.eye(3)).requires_grad_()
+    loss = OpenViVQAModel._twc_softmax_loss(logits, torch.eye(3))
+    loss.backward()
+    assert torch.isfinite(loss) and torch.isfinite(logits.grad).all()
+
+
+def test_twc_softmax_follows_twa_paper_eq_4_to_6(make_model):
+    import math
+    torch.manual_seed(3)
+    W = 3  # sample 0: two words + PAD; sample 1: one word + two PAD; one token per word slot
+    word_map = torch.tensor([[0, 1, -1, 3, 4, -1], [0, -1, -1, 3, -1, -1]])
+    tokens = torch.randn(2, 6, 8)
+    o2r = torch.full((2, W, W), -1.0)
+    r2o = torch.full((2, W, W), -1.0)
+    o2r[0, :2, :2] = torch.tensor([[1.0, 0.0], [0.0, 0.9]])
+    r2o[0, :2, :2] = torch.tensor([[0.9, 0.0], [0.0, 1.0]])
+    o2r[1, 0, 0] = r2o[1, 0, 0] = 1.0
+    model = make_model(use_twc=True, twc_activation="softmax", twc_temperature_init=0.5)
+    loss, accuracy = model._twc(tokens, word_map, word_map >= 0, o2r.clone(), r2o.clone())
+
+    # Eq. 4-6 written out, over the 3 real words of the batch (a word of the other sample has label 0).
+    def direction(queries, candidates, labels, scale):
+        total = 0.0
+        for query, row in zip(queries.tolist(), labels):
+            scores = [math.exp(scale * sum(a * b for a, b in zip(query, other))) for other in candidates.tolist()]
+            for score, y in zip(scores, row):
+                p = score / sum(scores)
+                total -= y * math.log(p) + (1 - y) * math.log(1 - p)
+        return total / len(labels)
+
+    original = torch.nn.functional.normalize(tokens[[0, 0, 1], [0, 1, 0]], dim=-1)
+    related = torch.nn.functional.normalize(tokens[[0, 0, 1], [3, 4, 3]], dim=-1)
+    scale = float(model.twc_logit_scale.exp())
+    expected = 0.5 * (direction(original, related, [[1.0, 0, 0], [0, 0.9, 0], [0, 0, 1.0]], scale)
+                      + direction(related, original, [[0.9, 0, 0], [0, 1.0, 0], [0, 0, 1.0]], scale))
+    assert abs(float(loss) - expected) < 1e-3
+    assert 0 <= float(accuracy) <= 1
+    sigmoid, _ = make_model(use_twc=True, twc_temperature_init=0.5)._twc(tokens, word_map, word_map >= 0, o2r.clone(), r2o.clone())
+    assert abs(float(sigmoid) - expected) > 1e-2  # the switch really changes the loss
+
+
+def test_twc_softmax_switch_trains_and_is_wired(make_model, tokenizer, samples, corrector, tmp_path, monkeypatch):
+    from run_pipeline import training_arguments
+    model = make_model(use_twc=True, twc_activation="softmax")
+    outputs = model(**build_collator(model, tokenizer, corrector, training=True)(samples))
+    assert torch.isfinite(outputs["twc_loss"])
+    outputs["twc_loss"].backward()
+    assert model.twc_logit_scale.grad is not None and model.twc_logit_scale.grad.abs() > 0
+    model.save_pretrained(tmp_path)
+    assert OpenViVQAConfig.from_pretrained(tmp_path).twc_activation == "softmax"
+    assert OpenViVQAConfig().twc_activation == "sigmoid" and ModelArguments().twc_activation == "sigmoid"
+    with pytest.raises(ValueError):
+        OpenViVQAConfig(twc_activation="infonce")
+    monkeypatch.setenv("TWC_ACTIVATION", "softmax")
+    arguments = training_arguments()
+    assert arguments[arguments.index("--twc_activation") + 1] == "softmax"
