@@ -53,7 +53,7 @@ class ModelArguments:
     )
     twc_answer_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-grounded TWC loss."})
     twc_temperature_init: float = field(
-        default=0.2, metadata={"help": "Initial TWC temperature tau; optimize log(1/tau), restore trained values from checkpoints."}
+        default=0.07, metadata={"help": "Initial TWC temperature tau; optimize log(1/tau), restore trained values from checkpoints."}
     )
     twc_temperature_trainable: bool = field(
         default=True, metadata={"help": "False stores TWC logit scales as fixed buffers, excluded from optimizer and weight decay."}

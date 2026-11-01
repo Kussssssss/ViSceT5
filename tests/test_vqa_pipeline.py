@@ -1008,7 +1008,7 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
     assert cfg["ablation_use_ocr_aug"] and cfg["use_twc"] and cfg["ablation_use_consformer"]
     assert cfg["ablation_use_ocr"] and cfg["ablation_use_image"]
     assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
-    assert cfg["twc_temperature_init"] == 0.2 and cfg["twc_temperature_min"] == 0.06
+    assert cfg["twc_temperature_init"] == 0.07 and cfg["twc_temperature_min"] == 0.06
     assert cfg["twc_temperature_learning_rate"] == 1e-5 and cfg["weight_decay"] == 0.1
     model = make_model(use_twc=full_method, ablation_use_ocr_aug=full_method,
                        ablation_use_consformer=cfg["ablation_use_consformer"], ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
@@ -1559,7 +1559,7 @@ def test_fixed_temperature_has_no_optimizer_update_and_survives_loading(
 ):
     model = make_model(use_twc=True, twc_objective=objective, twc_loss="paper_bce",
                        twc_feature="fused", twc_queue_size=0, ocr_aug_mode="separate",
-                       ocr_related="augment", twc_temperature_init=.2,
+                       ocr_related="augment", twc_temperature_init=.07,
                        twc_temperature_trainable=False)
     names = [name for name in ("twc_logit_scale", "twc_answer_logit_scale") if hasattr(model, name)]
     initial = {name: getattr(model, name).clone() for name in names}
@@ -1580,7 +1580,7 @@ def test_fixed_temperature_has_no_optimizer_update_and_survives_loading(
         scale = getattr(model, name)
         assert scale.grad is None
         torch.testing.assert_close(scale, initial[name], rtol=0, atol=0)
-        torch.testing.assert_close(model._twc_scale(scale).reciprocal(), torch.tensor(.2))
+        torch.testing.assert_close(model._twc_scale(scale).reciprocal(), torch.tensor(.07))
     model.save_pretrained(tmp_path / "fixed")
     restored = OpenViVQAModel.from_pretrained(tmp_path / "fixed")
     assert not restored.config.twc_temperature_trainable

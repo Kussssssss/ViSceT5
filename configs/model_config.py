@@ -46,7 +46,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_related_train: str = "correct",
         ocr_feature_norm: Optional[str] = None,
         clip_late_adapter: Optional[bool] = None,
-        twc_temperature_init: float = 0.2,
+        twc_temperature_init: float = 0.07,
         twc_temperature_trainable: bool = True,
         twc_temperature_min: float = 0.06,
         twc_view: str = "shared",
