@@ -43,6 +43,7 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_adv_probability: float = 0.35,
         twc_label_list: Optional[List[float]] = None,
         twc_temperature_init: float = 0.07,
+        twc_activation: Optional[str] = None,
         ocr_feature_norm: Optional[str] = None,
         ocr_full_features: Optional[bool] = None,
         ocr_edit_distance: int = 2,
@@ -129,6 +130,12 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_temperature_init = float(twc_temperature_init)
         if self.twc_temperature_init <= 0:
             raise ValueError("twc_temperature_init must be positive.")
+        # TWC probabilities: sigmoid = the released TWA code (each pair on its own); softmax = the TWA
+        # paper, Eq. 4-6 (softmax over the candidates of each word). Both then take BCE with the labels.
+        # None (older configs) = sigmoid, as those runs trained.
+        self.twc_activation = str(twc_activation or "sigmoid")
+        if self.twc_activation not in ("sigmoid", "softmax"):
+            raise ValueError("twc_activation must be sigmoid|softmax.")
         # Norm of each OCR stream (box/det/rec/token/char) in SemanticOCREmbedding.
         # layernorm = pre-refactor code; None (configs saved before the field) = rmsnorm.
         self.ocr_feature_norm = str(ocr_feature_norm or "rmsnorm")
