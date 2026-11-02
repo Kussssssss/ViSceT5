@@ -13,16 +13,15 @@ import thêm trong kernel trộn hai phiên bản (ImportError: reset_sessions .
   python scripts/hf_io.py upload_checkpoints --repo USER/REPO --dir OUTPUT_DIR
 
 --ckpt nhận:
-  best              checkpoint tốt nhất theo trainer_state.json; dùng model gốc nếu không còn checkpoint đó
+  best              model tốt nhất ở thư mục gốc (trainer.save_model sau load_best_model_at_end)
   latest            checkpoint cuối cùng
   epoch3 / 3        checkpoint của epoch 3 (save_strategy=epoch)
   checkpoint-17580  hoặc 17580 — đúng checkpoint đó
 
 Bố cục (khớp thư mục train trên Colab):
-  best          → checkpoint-N theo trainer_state (cùng bố cục bên dưới); fallback model gốc: OUTPUT_DIR
+  best          → model: OUTPUT_DIR                    | kết quả: OUTPUT_DIR
   checkpoint-N  → model: OUTPUT_DIR/checkpoint-N       | kết quả: OUTPUT_DIR/predict_checkpoint-N
-Kết quả trên HF: predictions/checkpoint-N/ khi dùng checkpoint epoch;
-predictions/ khi dùng model export ở thư mục gốc.
+Kết quả trên HF: predictions/ (best) hoặc predictions/checkpoint-N/.
 """
 import argparse
 import glob
@@ -85,7 +84,7 @@ def print_table(cks, hist, best):
         mean = h.get("eval_em_f1", (em + f1) / 2 if em is not None and f1 is not None else None)
         fmt = lambda v, k=100: f"{k * v:.2f}" if v is not None else "-"
         print(f"  {i:>5}  {ck:<18} {fmt(em):>7} {fmt(f1):>7} {fmt(mean):>10} {fmt(h.get('eval_cider'), 1):>7}"
-              f"{'   ← best theo validation' if ck == best else ''}")
+              f"{'   ← best (thư mục gốc)' if ck == best else ''}")
 
 
 def resolve(spec, cks):
@@ -119,14 +118,6 @@ def prepare(a, token):
     cks, hist, best, files = list_checkpoints(api, a.repo, a.dir, token)
     print_table(cks, hist, best)
     ck = resolve(a.ckpt, cks)
-    if ck == "best":
-        if best in cks:
-            ck = best
-            print(f"\nChọn best từ trainer_state.json: {ck}")
-        elif not (os.path.isfile(os.path.join(a.dir, "model.safetensors"))
-                  or "model.safetensors" in files):
-            sys.exit("❌ Không có model gốc hoặc checkpoint best được ghi trong trainer_state.json. "
-                     "Chọn --ckpt checkpoint-N (hoặc latest) để dùng một checkpoint có sẵn.")
     sub = "" if ck == "best" else ck
     model_dir = os.path.join(a.dir, sub) if sub else a.dir
     pred_dir = os.path.join(a.dir, f"predict_{ck}") if sub else a.dir
@@ -149,7 +140,7 @@ def prepare(a, token):
         if os.path.isfile(f) and not os.path.exists(dst):
             shutil.copy2(f, dst)
 
-    info = {"ckpt": ck, "requested_ckpt": a.ckpt, "model_dir": model_dir, "pred_dir": pred_dir,
+    info = {"ckpt": ck, "model_dir": model_dir, "pred_dir": pred_dir,
             "pred_path_in_repo": pred_repo, "attn_path_in_repo": pred_repo.replace("predictions", "attention", 1)}
     print(f"\n✅ Checkpoint dùng để predict: {ck}\n   model : {model_dir}\n   kết quả: {pred_dir}")
     if a.info_out:

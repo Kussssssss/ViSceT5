@@ -10,13 +10,14 @@ trong luồng hiện hành. Feature ảnh/OCR vào concat trực tiếp, không 
 
 ## Luồng dữ liệu
 
-Kịch bản YAML/notebook hiện tại: `ablation_use_ocr_aug=true`, `use_twc=true`,
-`ablation_use_consformer=true`, `ablation_use_ocr=true` và có image.
-OCR Origin/Related qua ConsFormer riêng với GroupAttention đã sửa, rồi concat đầy đủ,
-fusion character/bbox/det/rec và ghép question/image vào ViT5 encoder. TWC lấy output
-ViT5 encoder. Augmentation p=0.35; loss tổng = VQA + 1.0*TWC, temperature học được khởi tạo 0.2, min=0.06.
+Kịch bản YAML/notebook hiện tại: `ablation_use_ocr_aug=false`, `use_twc=false`,
+`ablation_use_consformer=false`, nhưng `ablation_use_ocr=true` và có image.
+OCR Origin lấy trực tiếp embedding từ ViT5, giữ norm/fusion character/bbox/det/rec,
+rồi concat với question/image vào ViT5 encoder. Không có Related hay loss TWC.
+ConsFormer không được đăng ký trong model, không forward/optimizer; khởi tạo tạm
+rồi bỏ dưới seed cũ để trọng số các module OCR còn lại giống baseline theo cùng seed.
 Cờ ConsFormer được lưu trong checkpoint; checkpoint cũ mặc định vẫn bật nó.
-Output YAML: `output/finetune_aug_twc_consformer_fixed_tau02_trainable_templr1e5_wd01_min006`; notebook có hậu tố `groupfix`.
+Output YAML: `output/finetune_no_aug_no_twc_no_consformer`; notebook có tên run riêng.
 
 `configs/data/*.yaml` → `scripts/prepare_dataset.py` → `DatasetHubLoader`
 → CSV train/validation/test → `ViT5VQADataset` → `ViT5VQADataCollator`.
@@ -88,7 +89,7 @@ dùng chung box/det/rec với entry gốc):
 
 TWC (`OpenViVQAModel._twc`): cắt đầy đủ Origin và Related từ cùng output ViT5 encoder
 mà decoder VQA sử dụng, rồi pool về entry theo mapping hai bản và chuẩn hóa L2.
-Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ với τ khởi tạo 0.2; logit_scale nhận gradient, LR riêng 1e-5 và weight decay 0.1, tau bị giới hạn [0.06,100] trong logits và sau optimizer step; gate CLIP vẫn LR 1e-3, không decay;
+Logits = cos/τ trên mọi cặp trong batch; exp(logit_scale)=1/τ với τ=0.07 cố định, không gradient/optimizer;
 nhãn block-diagonal theo mẫu, cặp khác mẫu cùng (ảnh, chữ) kế thừa nhãn, hàng/cột PAD bỏ;
 loss = sigmoid-BCE hai chiều trên ô hợp lệ (như code TWA). Tổng loss = VQA + λ·TWC.
 YAML bật `use_twc=true`, `twc_feature=fused`, `twc_view=shared`. TWC truyền gradient

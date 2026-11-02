@@ -991,27 +991,25 @@ def test_clip_late_adapter_trains_without_question(make_model, tokenizer, sample
 
 
 @pytest.mark.parametrize("full_method", [False, True])
-def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, corrector, full_method):
+def test_yaml_consformer_ablation_and_full_method(make_model, tokenizer, samples, corrector, full_method):
     import yaml
     cfg = yaml.safe_load(open(PROJECT_ROOT / "configs" / "finetune.yaml", encoding="utf-8"))
     keys = ("twc_loss", "twc_feature", "twc_queue_size", "twc_mask_same_text", "twc_objective",
-            "twc_related_train", "ocr_feature_norm", "twc_temperature_trainable")
+            "twc_related_train", "ocr_feature_norm")
     assert {k: cfg[k] for k in keys} == {
-        "twc_loss": "paper_bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
+        "twc_loss": "bce", "twc_feature": "fused", "twc_queue_size": 0, "twc_mask_same_text": False,
         "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
-        "twc_temperature_trainable": False,
     }
     assert cfg["qavit_mode"] == "off"
     assert (cfg["per_device_train_batch_size"], cfg["per_device_eval_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (32, 32, 1, 0.1)
     assert cfg["learning_rate"] == 1e-4
     assert cfg["ocr_aug_mode"] == "separate"
-    assert cfg["ablation_use_ocr_aug"] and cfg["use_twc"] and cfg["ablation_use_consformer"]
+    assert not cfg["ablation_use_ocr_aug"] and not cfg["use_twc"] and not cfg["ablation_use_consformer"]
     assert cfg["ablation_use_ocr"] and cfg["ablation_use_image"]
     assert cfg["twc_adv_probability"] == 0.35 and cfg["twc_view"] == "shared"
-    assert cfg["twc_temperature_init"] == 0.07 and cfg["twc_temperature_min"] == 0.06
-    assert cfg["twc_temperature_learning_rate"] == 1e-5 and cfg["weight_decay"] == 0.1
+    assert cfg["twc_temperature_init"] == 0.07
     model = make_model(use_twc=full_method, ablation_use_ocr_aug=full_method,
-                       ablation_use_consformer=cfg["ablation_use_consformer"], ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
+                       ablation_use_consformer=full_method, ocr_aug_mode="separate", ocr_related=cfg["ocr_related"],
                        twc_adv_probability=cfg["twc_adv_probability"], **{k: cfg[k] for k in keys})
     collator = build_collator(model, tokenizer, corrector if full_method else None, training=True)
     outputs = model(**collator(samples))
@@ -1020,7 +1018,7 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
         assert collator.related_mode == "twa" and collator.separate and collator.twc_lexical
         assert torch.isfinite(outputs["twc_loss"])
     else:
-        assert collator.related_mode == "none" and hasattr(model, "ocr_encoder")
+        assert collator.related_mode == "none" and not hasattr(model, "ocr_encoder")
         assert "twc_loss" not in outputs
     assert not hasattr(model, "twc_answer_query")
 
@@ -1028,14 +1026,13 @@ def test_yaml_ocr_origin_and_full_method(make_model, tokenizer, samples, correct
 def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, corrector, tmp_path):
     import math
     model = make_model(use_twc=True, twc_objective="lexical", twc_loss="bce", twc_feature="fused",
-                       twc_queue_size=0, twc_related_train="twa", twc_temperature_init=0.2,
+                       twc_queue_size=0, twc_related_train="twa", twc_temperature_init=0.07,
                        twc_adv_probability=0.6, clip_late_adapter=True, ablation_use_qaclip=False)
-    assert math.isclose(float(model.twc_logit_scale.exp()), 1 / 0.2, rel_tol=1e-5)
-    assert model.twc_logit_scale.requires_grad
-    initial_scale = model.twc_logit_scale.detach().clone()
+    assert math.isclose(float(model.twc_logit_scale.exp()), 1 / 0.07, rel_tol=1e-5)
+    assert not model.twc_logit_scale.requires_grad
+    fixed_scale = model.twc_logit_scale.detach().clone()
     args = CustomTrainingArguments(output_dir=str(tmp_path), learning_rate=3e-5, weight_decay=0.1,
                                    new_module_learning_rate=1e-4, scalar_learning_rate=1e-3,
-                                   twc_temperature_learning_rate=1e-5,
                                    max_steps=1, per_device_train_batch_size=2, logging_steps=1,
                                    remove_unused_columns=False, report_to="none", save_strategy="no",
                                    use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
@@ -1045,11 +1042,9 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     optimizer = trainer.create_optimizer()
     by_id = {id(p): g for g in optimizer.param_groups for p in g["params"]}
     named = dict(model.named_parameters())
-    assert by_id[id(named["twc_logit_scale"])]["lr"] == 1e-5
-    assert by_id[id(named["twc_logit_scale"])]["weight_decay"] == 0.1
+    assert id(named["twc_logit_scale"]) not in by_id
     gate = next(n for n in named if n.endswith("instruction_proj_gate"))
     assert by_id[id(named[gate])]["lr"] == 1e-3
-    assert by_id[id(named[gate])]["weight_decay"] == 0.0
     consformer = next(n for n in named if n.startswith("ocr_encoder.") and n.endswith("weight"))
     assert by_id[id(named[consformer])]["lr"] == 1e-4
     t5 = "vit5.shared.weight"
@@ -1057,8 +1052,9 @@ def test_temperature_init_and_lr_groups(make_model, tokenizer, samples, correcto
     assert sum(len(g["params"]) for g in optimizer.param_groups) == sum(p.requires_grad for p in model.parameters())
     trainer.train()
     taus = [e["twc_tau"] for e in trainer.state.log_history if "twc_tau" in e]
-    assert taus and all(0.01 <= tau <= 100 for tau in taus)
-    assert not torch.equal(model.twc_logit_scale.detach(), initial_scale)
+    assert taus and all(math.isclose(tau, 0.07, abs_tol=1e-6) for tau in taus)
+    torch.testing.assert_close(model.twc_logit_scale, fixed_scale, rtol=0, atol=0)
+    assert model.twc_logit_scale.grad is None
     batch = build_collator(model, tokenizer, corrector, training=True)
     assert batch.cfg.twc_adv_probability == 0.6
 
@@ -1082,8 +1078,7 @@ def test_twc_separate_view(make_model, tokenizer, samples, feature):
     outputs = model(**batch)
     assert torch.isfinite(outputs["loss"]) and torch.isfinite(outputs["twc_loss"])
     (outputs["loss"] + outputs["twc_loss"]).backward()
-    assert model.twc_logit_scale.requires_grad and model.twc_logit_scale.grad is not None
-    assert torch.isfinite(model.twc_logit_scale.grad)
+    assert model.twc_logit_scale.grad is None and not model.twc_logit_scale.requires_grad
     model.eval()
     with torch.no_grad():
         model.generate(**{k: v for k, v in batch.items() if k != "labels"}, num_beams=1, max_new_tokens=2)
@@ -1305,68 +1300,39 @@ def test_separate_ocr_rejects_a_different_twc_view():
 
 
 @pytest.mark.parametrize("objective", ["lexical", "answer", "both"])
-def test_learnable_temperature_survives_checkpoint_and_optimizer_step(
+def test_fixed_temperature_survives_loading_a_previously_learned_scale(
     make_model, tokenizer, samples, corrector, tmp_path, objective
 ):
     import math
     model = make_model(
         use_twc=True, twc_objective=objective, twc_feature="fused", twc_queue_size=0,
-        twc_temperature_init=0.2, twc_adv_probability=0.6,
+        twc_temperature_init=0.07, twc_adv_probability=0.6,
     )
     names = [name for name in ("twc_logit_scale", "twc_answer_logit_scale") if hasattr(model, name)]
     assert names
-    for name in names:
-        scale = getattr(model, name)
-        assert scale.requires_grad and math.isclose(float(scale.detach().exp()), 5.0, rel_tol=1e-6)
-    # Simulate trained values distinct from the initialization; loading must preserve them.
+    # Legacy checkpoint: trained scales no longer match the configured fixed temperature.
     with torch.no_grad():
-        for index, name in enumerate(names):
-            getattr(model, name).fill_(math.log(1 / (0.3 + 0.1 * index)))
-    trained_scales = {name: getattr(model, name).detach().clone() for name in names}
+        for name in names:
+            getattr(model, name).fill_(math.log(1 / 0.2))
     model.save_pretrained(tmp_path)
     tokenizer.save_pretrained(tmp_path)
     restored, _ = load_model_and_tokenizer(str(tmp_path))
-    assert restored.config.twc_temperature_init == 0.2
     for name in names:
         scale = getattr(restored, name)
-        assert scale.requires_grad and scale.grad is None
-        torch.testing.assert_close(scale, trained_scales[name], rtol=0, atol=0)
-    args = CustomTrainingArguments(output_dir=str(tmp_path / "train"), use_cpu=True, report_to="none",
-                                   scalar_learning_rate=1e-3, twc_temperature_learning_rate=1e-5, weight_decay=0.1)
+        assert not scale.requires_grad and scale.grad is None
+        assert math.isclose(float(scale.exp()), 1 / 0.07, rel_tol=1e-6)
+    args = CustomTrainingArguments(output_dir=str(tmp_path / "train"), use_cpu=True, report_to="none")
     trainer = VQATrainer(model=restored, args=args)
-    optimizer = trainer.create_optimizer()
-    groups = {id(p): group for group in optimizer.param_groups for p in group["params"]}
-    for name in names:
-        group = groups[id(getattr(restored, name))]
-        assert group["lr"] == 1e-5 and group["weight_decay"] == 0.1
-    # With zero gradients and empty moments, AdamW must still decay the log scales.
-    for name in names:
-        getattr(restored, name).grad = torch.zeros_like(getattr(restored, name))
-    optimizer.step()
-    for name in names:
-        torch.testing.assert_close(
-            getattr(restored, name), trained_scales[name] * (1 - 1e-5 * 0.1), rtol=0, atol=0
-        )
-    optimizer.zero_grad(set_to_none=True)
+    optimizer_ids = {id(p) for group in trainer.create_optimizer().param_groups for p in group["params"]}
+    assert all(id(getattr(restored, name)) not in optimizer_ids for name in names)
     batch = build_collator(restored, tokenizer, corrector, training=True)(samples)
     output = restored(**batch)
     terms = [value for key, value in output.items() if key in ("twc_loss", "twc_answer_loss")]
     assert terms and all(torch.isfinite(value) for value in terms)
     sum(terms).backward()
     for name in names:
-        grad = getattr(restored, name).grad
-        assert grad is not None and torch.isfinite(grad) and grad.abs() > 0
+        assert getattr(restored, name).grad is None
     assert restored.vit5.encoder.block[0].layer[0].SelfAttention.q.weight.grad.abs().sum() > 0
-    optimizer.step()
-    for name in names:
-        assert not torch.equal(getattr(restored, name).detach(), trained_scales[name])
-    updated = tmp_path / "updated"
-    restored.save_pretrained(updated)
-    tokenizer.save_pretrained(updated)
-    reloaded, _ = load_model_and_tokenizer(str(updated))
-    for name in names:
-        assert getattr(reloaded, name).requires_grad
-        torch.testing.assert_close(getattr(reloaded, name), getattr(restored, name), rtol=0, atol=0)
 
 
 
@@ -1419,171 +1385,3 @@ def test_disabling_consformer_preserves_initialization_of_shared_modules(make_mo
         torch.testing.assert_close(value, full_state[name], rtol=0, atol=0)
     assert set(full_state) - set(ablated.state_dict())
     assert all(name.startswith("ocr_encoder.") for name in set(full_state) - set(ablated.state_dict()))
-
-
-
-def test_temperature_floor_applies_after_optimizer_and_still_allows_learning(
-    make_model, tokenizer, samples, corrector, tmp_path
-):
-    import math
-    model = make_model(use_twc=True, twc_objective="both", twc_feature="fused", twc_queue_size=0,
-                       twc_temperature_min=0.06)
-    model.eval()
-    names = ("twc_logit_scale", "twc_answer_logit_scale")
-    args = CustomTrainingArguments(output_dir=str(tmp_path), use_cpu=True, report_to="none",
-                                   twc_temperature_learning_rate=0.5, weight_decay=0.0)
-    trainer = VQATrainer(model=model, args=args)
-    optimizer = trainer.create_optimizer()
-    with torch.no_grad():
-        for name in names:
-            getattr(model, name).fill_(math.log(1 / 0.061))
-    # An aggressive test step tries to lower tau below the floor.
-    for name in names:
-        getattr(model, name).grad = -torch.ones_like(getattr(model, name))
-    optimizer.step()
-    for name in names:
-        raw_tau = getattr(model, name).detach().neg().exp()
-        torch.testing.assert_close(raw_tau, torch.tensor(0.06), rtol=0, atol=1e-7)
-        assert getattr(model, name).requires_grad
-    # The same parameter must be able to leave the boundary in the opposite direction.
-    for name in names:
-        getattr(model, name).grad = torch.ones_like(getattr(model, name))
-    optimizer.step()
-    for name in names:
-        assert float(getattr(model, name).detach().neg().exp()) > 0.06001
-    optimizer.zero_grad(set_to_none=True)
-    with torch.no_grad():
-        for name in names:
-            getattr(model, name).fill_(math.log(1 / 0.06))
-    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
-    output = model(**batch)
-    contrastive = output["twc_loss"] + output["twc_answer_loss"]
-    assert torch.isfinite(contrastive)
-    contrastive.backward()
-    grad = model.vit5.encoder.block[0].layer[0].SelfAttention.q.weight.grad
-    assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0
-    logs = {"loss": float(contrastive.detach())}
-    trainer._twc_count = 1
-    trainer.log(logs)
-    assert logs["twc_tau"] >= 0.06 and logs["twc_answer_tau"] >= 0.06
-
-
-def test_temperature_floor_bounds_logits_and_projects_loaded_checkpoint(
-    make_model, tokenizer, samples, corrector, tmp_path
-):
-    import math
-    model = make_model(use_twc=True, twc_objective="both", twc_feature="fused", twc_queue_size=0,
-                       twc_temperature_min=0.06)
-    names = ("twc_logit_scale", "twc_answer_logit_scale")
-    with torch.no_grad():
-        for name in names:
-            getattr(model, name).fill_(math.log(1 / 0.01))
-    # Effective logits are bounded even if an external state_dict loaded an invalid raw parameter.
-    for name in names:
-        torch.testing.assert_close(model._twc_scale(getattr(model, name)), torch.tensor(1 / 0.06))
-    model.eval()
-    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
-    with torch.no_grad():
-        bounded = model(**batch)
-    model.save_pretrained(tmp_path)
-    tokenizer.save_pretrained(tmp_path)
-    restored, _ = load_model_and_tokenizer(str(tmp_path))
-    restored.eval()
-    assert restored.config.twc_temperature_min == 0.06
-    for name in names:
-        raw_tau = getattr(restored, name).detach().neg().exp()
-        torch.testing.assert_close(raw_tau, torch.tensor(0.06), rtol=0, atol=1e-7)
-        assert getattr(restored, name).requires_grad
-    with torch.no_grad():
-        projected = restored(**batch)
-    for loss in ("twc_loss", "twc_answer_loss"):
-        torch.testing.assert_close(bounded[loss], projected[loss])
-
-
-@pytest.mark.parametrize("minimum,initial", [(0.0, 0.2), (0.3, 0.2), (0.06, 101)])
-def test_temperature_bounds_validate_initialization(minimum, initial):
-    with pytest.raises(ValueError, match="twc_temperature_min"):
-        OpenViVQAConfig(twc_temperature_min=minimum, twc_temperature_init=initial)
-
-
-def test_paper_bce_matches_literal_softmax_bce_and_gradients():
-    scores = torch.tensor([[1., 2., -2.], [4., -1., 3.]], requires_grad=True)
-    labels = torch.tensor([[1., .9, 0.], [0., 1., .9]])
-    expected = torch.nn.functional.binary_cross_entropy(torch.softmax(scores, dim=1), labels)
-    actual = OpenViVQAModel._paper_bce(scores, labels)
-    torch.testing.assert_close(actual, expected)
-    torch.testing.assert_close(torch.autograd.grad(actual, scores, retain_graph=True)[0],
-                               torch.autograd.grad(expected, scores)[0])
-
-
-@pytest.mark.parametrize("labels", [
-    [[-1., .9, -1.]], [[-1., 1., 0., -1.]], [[-1., -1., -1.]], [[1.]],
-])
-def test_paper_bce_masks_and_extreme_scores_remain_finite(labels):
-    labels = torch.tensor(labels)
-    scores = torch.linspace(-100, 100, labels.numel()).reshape_as(labels).requires_grad_()
-    loss = OpenViVQAModel._paper_bce(scores, labels)
-    loss.backward()
-    assert torch.isfinite(loss) and torch.isfinite(scores.grad).all()
-    assert torch.count_nonzero(scores.grad[labels == -1]) == 0
-
-
-def test_twc_paper_loss_matches_bidirectional_reference_with_padding(make_model):
-    model = make_model(use_twc=True, twc_loss="paper_bce", twc_objective="lexical",
-                       twc_feature="fused", twc_queue_size=0, twc_mask_same_text=False)
-    tokens = torch.randn(2, 6, 32, requires_grad=True)
-    mapping = torch.arange(6).expand(2, -1)
-    mask = torch.tensor([[1, 1, 0, 1, 1, 0], [1, 0, 0, 1, 0, 0]])
-    labels = torch.tensor([[[1., 0., -1.], [0., .9, -1.], [-1., -1., -1.]],
-                           [[.9, -1., -1.], [-1., -1., -1.], [-1., -1., -1.]]])
-    groups = torch.tensor([[11, 12, -1], [21, -1, -1]])
-    actual, _ = model._twc(tokens, mapping, mask, labels, labels, groups)
-    original = torch.nn.functional.normalize(torch.stack([tokens[0, 0], tokens[0, 1], tokens[1, 0]]), dim=-1)
-    related = torch.nn.functional.normalize(torch.stack([tokens[0, 3], tokens[0, 4], tokens[1, 3]]), dim=-1)
-    logits = model._twc_scale(model.twc_logit_scale) * original @ related.t()
-    targets = torch.diag(torch.tensor([1., .9, .9]))
-    expected = .5 * (
-        torch.nn.functional.binary_cross_entropy(logits.softmax(dim=1), targets)
-        + torch.nn.functional.binary_cross_entropy(logits.t().softmax(dim=1), targets)
-    )
-    torch.testing.assert_close(actual, expected)
-    actual_grads = torch.autograd.grad(actual, (tokens, model.twc_logit_scale), retain_graph=True)
-    expected_grads = torch.autograd.grad(expected, (tokens, model.twc_logit_scale))
-    for actual_grad, expected_grad in zip(actual_grads, expected_grads):
-        torch.testing.assert_close(actual_grad, expected_grad)
-
-
-@pytest.mark.parametrize("objective", ["lexical", "answer", "both"])
-def test_fixed_temperature_has_no_optimizer_update_and_survives_loading(
-    make_model, tokenizer, samples, corrector, tmp_path, objective
-):
-    model = make_model(use_twc=True, twc_objective=objective, twc_loss="paper_bce",
-                       twc_feature="fused", twc_queue_size=0, ocr_aug_mode="separate",
-                       ocr_related="augment", twc_temperature_init=.07,
-                       twc_temperature_trainable=False)
-    names = [name for name in ("twc_logit_scale", "twc_answer_logit_scale") if hasattr(model, name)]
-    initial = {name: getattr(model, name).clone() for name in names}
-    assert all(name in dict(model.named_buffers()) for name in names)
-    assert all(name not in dict(model.named_parameters()) for name in names)
-    args = CustomTrainingArguments(output_dir=str(tmp_path / "train"), use_cpu=True,
-                                   report_to="none", learning_rate=1e-4, weight_decay=.1)
-    trainer = VQATrainer(model=model, args=args)
-    optimizer = trainer.create_optimizer()
-    optimizer_ids = {id(parameter) for group in optimizer.param_groups for parameter in group["params"]}
-    assert all(id(getattr(model, name)) not in optimizer_ids for name in names)
-    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
-    representation = model.vit5.shared.weight.detach().clone()
-    trainer.compute_loss(model, batch).backward()
-    optimizer.step()
-    assert not torch.equal(representation, model.vit5.shared.weight)
-    for name in names:
-        scale = getattr(model, name)
-        assert scale.grad is None
-        torch.testing.assert_close(scale, initial[name], rtol=0, atol=0)
-        torch.testing.assert_close(model._twc_scale(scale).reciprocal(), torch.tensor(.07))
-    model.save_pretrained(tmp_path / "fixed")
-    restored = OpenViVQAModel.from_pretrained(tmp_path / "fixed")
-    assert not restored.config.twc_temperature_trainable
-    for name in names:
-        assert name in dict(restored.named_buffers()) and name not in dict(restored.named_parameters())
-        torch.testing.assert_close(getattr(restored, name), initial[name], rtol=0, atol=0)

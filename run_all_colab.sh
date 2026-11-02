@@ -15,7 +15,7 @@ done
 export MOCK_TEST STAGE
 # stdout goes through tee (a pipe): without this Python buffers prints in 8KB blocks.
 export PYTHONUNBUFFERED=1
-GIT_BRANCH="${GIT_BRANCH:-tmp2}"
+GIT_BRANCH="${GIT_BRANCH:-exp/twc-ocr-centric}"
 cd /content
 if [ -d /content/ViSceT5 ]; then
     cd /content/ViSceT5

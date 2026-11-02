@@ -17,7 +17,6 @@ except ImportError:
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "twc_answer_query",
                "ocr_type_embedding")
-TEMPERATURES = ("twc_logit_scale", "twc_answer_logit_scale")
 SCALARS = ("instruction_proj_gate",)
 
 
@@ -60,11 +59,11 @@ class VQATrainer(Seq2SeqTrainer):
             return super()._load_rng_state(checkpoint)
 
     def create_optimizer(self):
-        """Parameter groups keep their own LR under the shared warmup/cosine schedule:
+        """Three parameter groups (each keeps its own LR under the shared warmup/cosine schedule):
         pretrained (ViT5, CLIP adapter projections) = learning_rate; randomly initialised
-        modules = new_module_learning_rate; adapter gates = scalar_learning_rate without decay;
-        TWC temperatures = twc_temperature_learning_rate with the configured weight_decay.
-        Other unset rates fall back to the stock Trainer's rules."""
+        modules = new_module_learning_rate; trainable scalars (adapter gates) =
+        scalar_learning_rate without weight decay (as CLIP's logit scale). Unset rates fall back
+        to learning_rate (and scalars to the usual weight-decay rule), i.e. the stock optimizer."""
         if self.optimizer is not None:
             return self.optimizer
         args = self.args
@@ -72,7 +71,6 @@ class VQATrainer(Seq2SeqTrainer):
             "pretrained": args.learning_rate,
             "new": getattr(args, "new_module_learning_rate", None) or args.learning_rate,
             "scalar": getattr(args, "scalar_learning_rate", None) or args.learning_rate,
-            "temperature": getattr(args, "twc_temperature_learning_rate", 1e-5),
         }
         decay = set(self.get_decay_parameter_names(self.model))
         groups = {}
@@ -81,9 +79,7 @@ class VQATrainer(Seq2SeqTrainer):
                 continue
             # scalar_learning_rate unset: scalars are ordinary parameters (base LR, HF weight-decay
             # rule), so with both rates unset the groups equal the stock Trainer's (old code).
-            if name.split(".")[-1] in TEMPERATURES:
-                kind, weight_decay = "temperature", args.weight_decay
-            elif name.split(".")[-1] in SCALARS and getattr(args, "scalar_learning_rate", None) is not None:
+            if name.split(".")[-1] in SCALARS and getattr(args, "scalar_learning_rate", None) is not None:
                 kind, weight_decay = "scalar", 0.0
             else:
                 kind = "new" if name.split(".")[0] in NEW_MODULES else "pretrained"
@@ -94,19 +90,11 @@ class VQATrainer(Seq2SeqTrainer):
         optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(args, self.model)
         optimizer_kwargs.pop("lr", None)
         self.optimizer = optimizer_cls(list(groups.values()), **optimizer_kwargs)
-        base = getattr(self.model, "module", self.model)
-        if any(getattr(base, name, None) is not None and getattr(base, name).requires_grad
-               for name in TEMPERATURES):
-            base.clamp_twc_temperatures_()
-            self.optimizer.register_step_post_hook(self._project_twc_after_step)
         if self.is_world_process_zero():
             summary = {f"{k}{'' if wd else ' (no decay)'}": f"{len(g['params'])} tensors @ lr {g['lr']:g}"
                        for (k, wd), g in groups.items()}
             print("[optimizer] parameter groups:", summary)
         return self.optimizer
-
-    def _project_twc_after_step(self, _optimizer, _args, _kwargs):
-        getattr(self.model, "module", self.model).clamp_twc_temperatures_()
 
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(**inputs)
@@ -161,8 +149,6 @@ class VQATrainer(Seq2SeqTrainer):
         return loss, tokens.detach(), labels.detach() if labels is not None else None
 
     def training_step(self, model, inputs):
-        # Trainer resume can load state_dict directly, bypassing from_pretrained.
-        getattr(model, "module", model).clamp_twc_temperatures_()
         loss = super().training_step(model, inputs)
         # Preserve the existing protection before gradient clipping/optimizer updates.
         bad = []
@@ -183,9 +169,9 @@ class VQATrainer(Seq2SeqTrainer):
             logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
             base = getattr(self.model, "module", self.model)
             for name, key in (("twc_logit_scale", "twc_tau"), ("twc_answer_logit_scale", "twc_answer_tau")):
-                if hasattr(base, name):  # learned temperature tau = 1 / exp(clamped logit scale)
-                    tau = base._twc_scale(getattr(base, name)).detach().reciprocal()
-                    logs[key] = round(float(tau), 4)
+                if hasattr(base, name):  # fixed temperature tau = 1 / exp(clamped logit scale)
+                    theta = float(getattr(base, name).detach().clamp(-4.6052, 4.6052))
+                    logs[key] = round(float(torch.exp(torch.tensor(-theta))), 4)
             self._twc_sum = {}
             self._twc_count = 0
         super().log(logs)

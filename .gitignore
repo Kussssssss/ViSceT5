@@ -163,7 +163,6 @@ checkpoints/
 *.ipynb
 # ...except the curated, token-free Colab runner
 !notebooks/finetune_colab.ipynb
-!notebooks/twc_colab2.ipynb
 
 # Đáp án test công khai dùng cho training/benchmark_eval.py
 !eval_gt/*.json
