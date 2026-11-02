@@ -215,8 +215,9 @@ class OCRCorrector:
         r2o = [[0.0] * n for _ in range(n)]
         for i in range(n):
             for j in range(n):
-                if i == j or words[i] == words[j]:  # same text → inherit the partner's label
-                    o2r[i][j], r2o[i][j] = diag_o2r[j], diag_r2o[j]
+                if i == j or words[i] == words[j]:
+                    # O_i -> R_j uses R_j's augmentation; R_i -> O_j uses R_i's.
+                    o2r[i][j], r2o[i][j] = diag_o2r[j], diag_r2o[i]
         return o2r, r2o
 
     def pair_labels(self, words, related):

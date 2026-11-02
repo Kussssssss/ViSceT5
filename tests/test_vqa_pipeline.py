@@ -746,7 +746,7 @@ def test_pipeline_arguments_do_not_modify_process_argv(monkeypatch):
 
 
 def _reference_twc(logits, o2r_blocks, r2o_blocks, groups, words):
-    """Previous pretrain implementation (model TWC branch + create_batch_labels + loss)."""
+    """Directional pair-label reference, independently assigned per query/candidate."""
 
     def create_batch_labels(result):
         result = result.clone()
@@ -759,10 +759,11 @@ def _reference_twc(logits, o2r_blocks, r2o_blocks, groups, words):
     r2o = torch.block_diag(*r2o_blocks)
     g = groups.reshape(-1)
     m = o2r.size(0)
-    samp = torch.arange(m) // words
-    inherit = (g.unsqueeze(1) == g.unsqueeze(0)) & (g.unsqueeze(1) >= 0) & (samp.unsqueeze(1) != samp.unsqueeze(0))
-    o2r = torch.where(inherit, torch.diagonal(o2r).clone().unsqueeze(0).expand(m, m), o2r)
-    r2o = torch.where(inherit, torch.diagonal(r2o).clone().unsqueeze(0).expand(m, m), r2o)
+    for i in range(m):
+        for j in range(m):
+            if i // words != j // words and g[i] >= 0 and g[i] == g[j]:
+                o2r[i, j] = o2r_blocks[j // words, j % words, j % words]
+                r2o[i, j] = r2o_blocks[i // words, i % words, i % words]
     o2r_l, r2o_l = create_batch_labels(o2r), create_batch_labels(r2o)
     mask = o2r_l != -1
     loss_i = torch.nn.functional.binary_cross_entropy_with_logits(logits[mask], o2r_l[mask])
@@ -770,8 +771,8 @@ def _reference_twc(logits, o2r_blocks, r2o_blocks, groups, words):
     return (loss_i + loss_t) / 2
 
 
-def test_twc_loss_matches_previous_pretrain_implementation(make_model, tokenizer, samples, corrector):
-    # BCE, no memory, no text masking = the previous TWA-code implementation.
+def test_twc_loss_matches_directional_pair_reference(make_model, tokenizer, samples, corrector):
+    # Same-entry pairs inherit the augmentation quality of their related view.
     model = make_model(use_twc=True, twc_loss="bce", twc_queue_size=0, twc_mask_same_text=False,
                        twc_objective="lexical", twc_related_train="twa")
     # Same image asked twice: same (image, text) groups, different per-sample augmentation.
@@ -837,6 +838,79 @@ def test_corrector_labels_follow_twa():
     assert related[0] != "cà" and o2r[0][0] == 0.9  # in-lexicon word gets a char edit
     assert o2r[0][2] == o2r[2][2] and o2r[2][0] == o2r[0][0]  # same text inherits
     assert corrector.correct(["cà", "phẽ"]) == ["cà", "phê"]  # tone change → lexicon word
+
+
+@pytest.mark.parametrize("view", ["augment", "correction"])
+def test_repeated_word_labels_follow_the_related_view_in_each_direction(view, monkeypatch):
+    from types import SimpleNamespace
+
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"answer": ["sữa trà"]}))
+    words = ["sữa", "sữa", "trà"]
+    if view == "augment":
+        monkeypatch.setattr(corrector, "_char_noise", lambda word, rng: "sửa")
+        draws = iter([.1, .9, .9])
+        related, o2r, r2o = corrector.augment(words, .5, SimpleNamespace(random=lambda: next(draws)))
+        assert related == ["sửa", "sữa", "trà"]
+    else:
+        o2r, r2o = corrector.pair_labels(words, ["sửa", "sữa", "trà"])
+    torch.testing.assert_close(torch.tensor(o2r), torch.tensor([
+        [.9, 1., 0.], [.9, 1., 0.], [0., 0., 1.],
+    ]))
+    torch.testing.assert_close(torch.tensor(r2o), torch.tensor([
+        [.9, .9, 0.], [1., 1., 0.], [0., 0., 1.],
+    ]))
+
+
+@pytest.mark.parametrize("loss_kind", ["bce", "infonce"])
+def test_cross_qa_reverse_targets_use_augmented_query_quality(make_model, loss_kind):
+    model = make_model(use_twc=True, twc_objective="lexical", twc_loss=loss_kind,
+                       twc_queue_size=0, twc_mask_same_text=False)
+    # QA A/B share image and entries. QA C has a different image. Each has one PAD.
+    groups = torch.tensor([[101, 102, -1], [101, 102, -1], [201, 202, -1]])
+    o2r = torch.full((3, 3, 3), -1.)
+    r2o = torch.full_like(o2r, -1.)
+    for index, (forward, reverse) in enumerate(zip([[.9, 1.], [1., .9], [1., 1.]],
+                                                [[.8, 1.], [1., .8], [1., 1.]])):
+        o2r[index, :2, :2] = torch.diag(torch.tensor(forward))
+        r2o[index, :2, :2] = torch.diag(torch.tensor(reverse))
+    expected_o = torch.tensor([
+        [.9, 0., 1., 0., 0., 0.], [0., 1., 0., .9, 0., 0.],
+        [.9, 0., 1., 0., 0., 0.], [0., 1., 0., .9, 0., 0.],
+        [0., 0., 0., 0., 1., 0.], [0., 0., 0., 0., 0., 1.],
+    ])
+    expected_r = torch.tensor([
+        [.8, 0., .8, 0., 0., 0.], [0., 1., 0., 1., 0., 0.],
+        [1., 0., 1., 0., 0., 0.], [0., .8, 0., .8, 0., 0.],
+        [0., 0., 0., 0., 1., 0.], [0., 0., 0., 0., 0., 1.],
+    ])
+    captured = []
+    if loss_kind == "bce":
+        original = torch.nn.functional.binary_cross_entropy_with_logits
+
+        def capture(scores, labels, *args, **kwargs):
+            captured.append(labels.detach().reshape(6, 6))
+            return original(scores, labels, *args, **kwargs)
+
+        context = patch("torch.nn.functional.binary_cross_entropy_with_logits", side_effect=capture)
+    else:
+        original = model._soft_infonce
+
+        def capture(scores, labels, rows):
+            real = labels[rows]
+            captured.append(real[:, (real != -1).any(dim=0)].detach())
+            return original(scores, labels, rows)
+
+        context = patch.object(model, "_soft_infonce", side_effect=capture)
+    tokens = torch.randn(3, 6, 32, requires_grad=True)
+    mask = torch.tensor([[1, 1, 0, 1, 1, 0]]).expand(3, -1)
+    with context:
+        loss, _ = model._twc(tokens, torch.arange(6).expand(3, -1), mask, o2r, r2o, groups)
+    torch.testing.assert_close(captured[0], expected_o)
+    torch.testing.assert_close(captured[1], expected_r)
+    loss.backward()
+    assert torch.isfinite(loss) and torch.isfinite(tokens.grad).all()
+    assert tokens.grad.abs().sum() > 0
+    assert torch.count_nonzero(tokens.grad[:, [2, 5]]) == 0
 
 
 
