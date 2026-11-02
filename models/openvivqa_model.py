@@ -113,7 +113,7 @@ class OpenViVQAModel(PreTrainedModel):
                 self.ocr_lite_text_proj.weight.copy_(torch.eye(self.d_model))
                 self.ocr_lite_text_proj.bias.zero_()
 
-        if config.use_twc:
+        if config.use_twc and config.twc_contrastive:
             # Nhiệt độ học được τ của TWC (CLIP/TWA): exp(logit_scale) = 1/τ lúc đầu.
             self.twc_logit_scale = nn.Parameter(torch.tensor(math.log(1 / config.twc_temperature_init)))
 
@@ -403,7 +403,7 @@ class OpenViVQAModel(PreTrainedModel):
                                     decoder_input_ids=decoder_input_ids,
                                     decoder_attention_mask=decoder_attention_mask, use_cache=False, return_dict=True)
                 result.update(view_loss=decoded.loss, view_logits=decoded.logits)
-        if self.config.use_twc and twc_o2r is not None:
+        if self.config.use_twc and self.config.twc_contrastive and twc_o2r is not None:
             # TWA: split the encoder output of the OCR block into the original and related copies.
             words = ocr_char_ids.shape[1]
             length = ocr_input_ids.shape[1] + ocr_rel_input_ids.shape[1]
