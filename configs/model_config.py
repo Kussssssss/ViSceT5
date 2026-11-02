@@ -49,6 +49,7 @@ class OpenViVQAConfig(PretrainedConfig):
         consformer_constituent: Optional[str] = None,
         consformer_residual: Optional[bool] = None,
         twc_two_views: Optional[bool] = None,
+        twc_contrastive: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -166,6 +167,9 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_two_views = bool(twc_two_views) if twc_two_views is not None else False
         if self.twc_two_views:
             self.twc_eval_related = "none"
+        # False: the related OCR copy and its encoder pass stay, without anything of TWC (no temperature,
+        # no labels, no loss). None (older configs) = True, as those runs trained.
+        self.twc_contrastive = bool(twc_contrastive) if twc_contrastive is not None else True
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text

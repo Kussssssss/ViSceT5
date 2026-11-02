@@ -1254,3 +1254,46 @@ def test_two_views_train_on_both_copies_and_evaluate_on_the_original(make_model,
         model.generate(**batch)
     assert OpenViVQAConfig().twc_two_views is False  # older checkpoints predict as trained
     assert ModelArguments().twc_two_views is True
+
+
+def test_two_views_without_twc_has_nothing_of_twc(make_model, tokenizer, samples, corrector, tmp_path, monkeypatch):
+    from run_pipeline import training_arguments
+    full = make_model(use_twc=True, twc_two_views=True)
+    model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False)
+    # Only the temperature differs, and the other weights start the same as in the Full run.
+    assert not hasattr(model, "twc_logit_scale")
+    assert set(full.state_dict()) - set(model.state_dict()) == {"twc_logit_scale"}
+    assert all(torch.equal(value, full.state_dict()[key]) for key, value in model.state_dict().items())
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    assert collator.related and collator.fresh_noise and not collator.twc_labels
+    batch = collator(samples)
+    assert "ocr_rel_input_ids" in batch and "twc_o2r" not in batch and "twc_r2o" not in batch
+    args = CustomTrainingArguments(output_dir=str(tmp_path), max_steps=1, per_device_train_batch_size=2,
+                                   logging_steps=1, remove_unused_columns=False, report_to="none",
+                                   save_strategy="no", use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer, train_dataset=ViT5VQADataset(pd.DataFrame(samples)),
+                         data_collator=collator)
+    assert not any("twc" in name for name, _ in model.named_parameters())
+    model.eval()
+    with torch.no_grad():
+        outputs = model(**batch)
+        assert "twc_loss" not in outputs and "twc_acc" not in outputs and "view_logits" in outputs
+        expected = 0.5 * (outputs["loss"] + outputs["view_loss"])  # the loss is the answer loss of the two passes
+        torch.testing.assert_close(trainer.compute_loss(model, batch), expected)
+    model.train()
+    trainer.compute_loss(model, batch).backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in model.ocr_encoder.parameters())
+    assert set(trainer._twc_sum) == {"view_loss"}  # the second pass is still logged
+    model.eval()
+    test = build_collator(model, tokenizer, corrector, training=False)
+    assert not test.related
+    model.save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
+    restored, _ = load_model_and_tokenizer(str(tmp_path))
+    assert restored.config.twc_contrastive is False and not hasattr(restored, "twc_logit_scale")
+    with torch.no_grad():
+        model.generate(**{k: v for k, v in test(samples).items() if k != "labels"})
+    assert OpenViVQAConfig().twc_contrastive is True and ModelArguments().twc_contrastive is True
+    monkeypatch.setenv("TWC_CONTRASTIVE", "false")
+    arguments = training_arguments()
+    assert arguments[arguments.index("--twc_contrastive") + 1] == "false"

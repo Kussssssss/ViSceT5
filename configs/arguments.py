@@ -53,6 +53,9 @@ class ModelArguments:
     twc_two_views: bool = field(
         default=True, metadata={"help": "TWC: separate encoder passes for the original and the related OCR at train; only the original at eval."}
     )
+    twc_contrastive: bool = field(
+        default=True, metadata={"help": "False: keep the related OCR copy and its encoder pass, without anything of TWC."}
+    )
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )

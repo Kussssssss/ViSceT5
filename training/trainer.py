@@ -110,11 +110,11 @@ class VQATrainer(Seq2SeqTrainer):
             loss = 0.5 * (loss + view_loss)
         if "twc_loss" in outputs:
             loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
-            if model.training:
-                for key in ("twc_loss", "twc_acc", "view_loss"):
-                    if key in outputs:
-                        self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
-                self._twc_count += 1
+        if model.training and ("twc_loss" in outputs or "view_loss" in outputs):
+            for key in ("twc_loss", "twc_acc", "view_loss"):
+                if key in outputs:
+                    self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
+            self._twc_count += 1
         return (loss, outputs) if return_outputs else loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
