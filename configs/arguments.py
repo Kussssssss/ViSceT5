@@ -37,7 +37,7 @@ class ModelArguments:
         default=False, metadata={"help": "Add the TWA token-word contrastive loss during training."}
     )
     twc_weight: float = field(default=1.0, metadata={"help": "Weight of the TWC loss."})
-    twc_loss: str = field(default="infonce", metadata={"help": "paper_bce (softmax then binary CE, paper Eq. 4-6) | infonce (softmax CE) | bce (legacy sigmoid BCE)."})
+    twc_loss: str = field(default="infonce", metadata={"help": "infonce (softmax, TWA paper) | bce (TWA code)."})
     twc_feature: str = field(default="fused", metadata={"help": "lexical (OCR text+chars) | fused (encoder output)."})
     twc_queue_size: int = field(
         default=16384, metadata={"help": "Cross-batch memory of word features used as extra negatives; 0 = in-batch."}
@@ -53,13 +53,7 @@ class ModelArguments:
     )
     twc_answer_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-grounded TWC loss."})
     twc_temperature_init: float = field(
-        default=0.07, metadata={"help": "Initial TWC temperature tau; optimize log(1/tau), restore trained values from checkpoints."}
-    )
-    twc_temperature_trainable: bool = field(
-        default=True, metadata={"help": "False stores TWC logit scales as fixed buffers, excluded from optimizer and weight decay."}
-    )
-    twc_temperature_min: float = field(
-        default=0.06, metadata={"help": "Minimum TWC temperature; bound scale and project logit scales after optimizer steps."}
+        default=0.07, metadata={"help": "Fixed TWC temperature tau (legacy option name); not trainable."}
     )
     ocr_aug_mode: str = field(
         default="separate", metadata={"help": "OCR Augmentation: separate (two ConsFormer passes, full concatenation) | concat (one pass) | "
@@ -132,12 +126,8 @@ class CustomTrainingArguments(Seq2SeqTrainingArguments):
     )
     scalar_learning_rate: Optional[float] = field(
         default=None,
-        metadata={"help": "LR of CLIP adapter gates, without weight decay; "
+        metadata={"help": "LR of trainable scalar parameters (CLIP adapter gates), without weight decay; "
                           "None = learning_rate. Adam moves a scalar by ~lr per step, so 3e-5 barely moves it."},
-    )
-    twc_temperature_learning_rate: float = field(
-        default=1e-5,
-        metadata={"help": "LR for TWC logit scales only; apply the configured weight_decay."},
     )
     smoke_test: bool = field(
         default=False,

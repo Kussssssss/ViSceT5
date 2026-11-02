@@ -47,8 +47,6 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_feature_norm: Optional[str] = None,
         clip_late_adapter: Optional[bool] = None,
         twc_temperature_init: float = 0.07,
-        twc_temperature_trainable: bool = True,
-        twc_temperature_min: float = 0.06,
         twc_view: str = "shared",
         ocr_aug_mode: Optional[str] = None,
         ocr_related: Optional[str] = None,
@@ -119,15 +117,14 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_label_list = list(twc_label_list) if twc_label_list is not None else [0.9, 0.9]
         self.ocr_edit_distance = int(ocr_edit_distance)
         # infonce: softmax over all in-batch candidates with soft multi-positive targets
-        #          (a different objective); paper_bce: softmax then BCE (paper Eq. 4-6).
-        # bce: legacy sigmoid BCE averaged over all cells.
+        #          (TWA paper Eq. 4–6); bce: sigmoid BCE averaged over all cells (TWA code).
         self.twc_loss = str(twc_loss)
         # lexical: OCR features before fusion (ConsFormer text + characters, no box/det/rec);
         # fused: multimodal encoder output. The related copy shares box/det/rec with its
         # original, so on fused features a pair can be matched by layout alone.
         self.twc_feature = str(twc_feature)
-        if self.twc_loss not in ("infonce", "bce", "paper_bce") or self.twc_feature not in ("lexical", "fused"):
-            raise ValueError("twc_loss must be infonce|bce|paper_bce and twc_feature lexical|fused.")
+        if self.twc_loss not in ("infonce", "bce") or self.twc_feature not in ("lexical", "fused"):
+            raise ValueError("twc_loss must be infonce|bce and twc_feature lexical|fused.")
         # Cross-batch memory (XBM, Wang et al. CVPR'20): FIFO of detached word features
         # from previous steps, used as extra negatives for the softmax TWC. A batch of 8
         # gives ~300 candidates; 16384 entries cover the last ~55 steps. 0 = in-batch only.
@@ -162,13 +159,11 @@ class OpenViVQAConfig(PretrainedConfig):
         self.clip_late_adapter = bool(clip_late_adapter) if clip_late_adapter is not None else False
         if self.ocr_feature_norm not in ("layernorm", "rmsnorm"):
             raise ValueError("ocr_feature_norm must be layernorm|rmsnorm.")
-        # TWC temperature: theta=log(1/tau), optionally trainable; scale=exp(theta).
-        # Trained values are checkpoint weights; loading must not reset them.
+        # Fixed TWC temperature tau: scale = exp(theta) = 1/tau, no optimizer updates.
+        # Keep the legacy field name for checkpoint/CLI compatibility.
         self.twc_temperature_init = float(twc_temperature_init)
-        self.twc_temperature_trainable = bool(twc_temperature_trainable)
-        self.twc_temperature_min = float(twc_temperature_min)
-        if not 0.01 <= self.twc_temperature_min <= self.twc_temperature_init <= 100:
-            raise ValueError("Require 0.01 <= twc_temperature_min <= twc_temperature_init <= 100.")
+        if not 0.01 <= self.twc_temperature_init <= 100:
+            raise ValueError("twc_temperature_init must lie in [0.01, 100] (the logit-scale clamp).")
         # Which related copy lexical TWC contrasts (with twc_related_train=twa):
         # shared   = the one the decoder reads (TWA-augmented at train, corrected at test);
         # separate = the decoder always reads the deterministic correction (as at test) and

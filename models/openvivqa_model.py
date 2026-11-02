@@ -118,11 +118,10 @@ class OpenViVQAModel(PreTrainedModel):
             self.ocr_type_embedding = nn.Embedding(2, self.d_model)
             nn.init.zeros_(self.ocr_type_embedding.weight)
         if config.use_twc and config.twc_objective in ("lexical", "both"):
-            scale = torch.tensor(math.log(1 / config.twc_temperature_init))
-            if config.twc_temperature_trainable:
-                self.twc_logit_scale = nn.Parameter(scale)
-            else:
-                self.register_buffer("twc_logit_scale", scale)
+            # Fixed temperature: exp(logit_scale) = 1/tau; retain checkpoint key compatibility.
+            self.twc_logit_scale = nn.Parameter(
+                torch.tensor(math.log(1 / config.twc_temperature_init)), requires_grad=False
+            )
         if config.use_twc and config.twc_objective in ("answer", "both"):
             # Answer-grounded TWC: câu hỏi (đã qua encoder) → truy vấn; khởi tạo đồng nhất.
             with _seeded(seed + 5):
@@ -130,11 +129,9 @@ class OpenViVQAModel(PreTrainedModel):
             with torch.no_grad():
                 self.twc_answer_query.weight.copy_(torch.eye(self.d_model))
                 self.twc_answer_query.bias.zero_()
-            scale = torch.tensor(math.log(1 / config.twc_temperature_init))
-            if config.twc_temperature_trainable:
-                self.twc_answer_logit_scale = nn.Parameter(scale)
-            else:
-                self.register_buffer("twc_answer_logit_scale", scale)
+            self.twc_answer_logit_scale = nn.Parameter(
+                torch.tensor(math.log(1 / config.twc_temperature_init)), requires_grad=False
+            )
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -154,23 +151,15 @@ class OpenViVQAModel(PreTrainedModel):
         model = loaded[0] if isinstance(loaded, tuple) else loaded
         if hasattr(model, "qa_clip"):
             model.qa_clip._apply_freeze()
-        # Preserve learned temperature values from the checkpoint; *_init only
-        # initializes new parameters and must not reset them on resume/evaluation.
-        model.clamp_twc_temperatures_()
+        # Loading may recreate parameters or restore a previously learned temperature.
+        # The configured fixed tau must remain authoritative on warm-start/evaluation.
+        with torch.no_grad():
+            for name in ("twc_logit_scale", "twc_answer_logit_scale"):
+                if hasattr(model, name):
+                    scale = getattr(model, name)
+                    scale.fill_(math.log(1 / model.config.twc_temperature_init))
+                    scale.requires_grad_(False)
         return loaded
-
-    @torch.no_grad()
-    def clamp_twc_temperatures_(self):
-        """Project parameters without detaching future temperature gradients."""
-        for name in ("twc_logit_scale", "twc_answer_logit_scale"):
-            if isinstance(getattr(self, name, None), nn.Parameter):
-                getattr(self, name).clamp_(math.log(1 / 100), math.log(1 / self.config.twc_temperature_min))
-
-    def _twc_scale(self, logit_scale):
-        """Bound the effective scale even before projection (e.g. external weight loading)."""
-        return logit_scale.float().clamp(
-            math.log(1 / 100), math.log(1 / self.config.twc_temperature_min)
-        ).exp()
 
     @property
     def target_dtype(self):
@@ -410,23 +399,6 @@ class OpenViVQAModel(PreTrainedModel):
         return (weight * loss).sum() / weight.sum().clamp_min(1e-12)
 
     @staticmethod
-    def _paper_bce(scores, labels):
-        """Paper Eq. 4-6: row softmax then BCE, excluding ignored cells."""
-        valid = labels != -1
-        rows = valid.any(dim=1)
-        if not rows.any():
-            return scores.sum() * 0.0
-        scores, labels, valid = scores[rows].float(), labels[rows].float(), valid[rows]
-        log_p = torch.log_softmax(scores.masked_fill(~valid, -1e30), dim=1).clamp_min(-100)
-        # Compute log(1-p) without subtracting probabilities close to one.
-        masked = scores.masked_fill(~valid, -1e30)
-        negative = torch.full_like(masked[:, :1], -1e30)
-        left = torch.cat([negative, torch.logcumsumexp(masked[:, :-1], dim=1)], dim=1)
-        right = torch.cat([torch.logcumsumexp(masked[:, 1:].flip(1), dim=1).flip(1), negative], dim=1)
-        log_not_p = (torch.logaddexp(left, right) - torch.logsumexp(masked, dim=1, keepdim=True)).clamp_min(-100)
-        return (-(labels[valid] * log_p[valid] + (1 - labels[valid]) * log_not_p[valid])).mean()
-
-    @staticmethod
     def _text_collision(query_text, key_text):
         """[N, M] True where the (original, related) texts of a query and a candidate share
         a string. query_text: [N, 2], key_text: [M, 2] hashed texts, -1 = unknown."""
@@ -494,7 +466,7 @@ class OpenViVQAModel(PreTrainedModel):
         question = (hidden.float() * mask).sum(1) / mask.sum(1).clamp_min(1)
         query = F.normalize(self.twc_answer_query(question.to(self.twc_answer_query.weight.dtype)).float(),
                             dim=-1, eps=1e-6)
-        scale = self._twc_scale(self.twc_answer_logit_scale)
+        scale = self.twc_answer_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
         scores = scale * query @ words.t()  # [B, B·S]
 
         flat = labels.reshape(-1).float()
@@ -518,15 +490,15 @@ class OpenViVQAModel(PreTrainedModel):
 
     def _twc(self, tokens, word_map, token_mask, o2r, r2o, groups, text_ids=None):
         """TWC (TWA §3.4–3.6): word features of the original and related OCR copies,
-        cosine similarity with learnable temperature; paper softmax+BCE,
-        softmax cross-entropy, or legacy sigmoid+BCE. tokens: [B, L_ocr, D].
+        cosine similarity with fixed temperature; softmax InfoNCE (paper) or
+        sigmoid BCE (TWA code) on the soft labels. tokens: [B, L_ocr, D].
         text_ids: [B, 2W] hashed word texts (original half, related half), -1 = PAD.
         With twc_queue_size > 0 the softmax also sees the features of earlier batches."""
         batch, words = o2r.shape[:2]
         features = self._pool_words(tokens, word_map, token_mask, 2 * words)
         original = features[:, :words].reshape(batch * words, -1)
         related = features[:, words:].reshape(batch * words, -1)
-        scale = self._twc_scale(self.twc_logit_scale)
+        scale = self.twc_logit_scale.clamp(math.log(1 / 100), math.log(100)).exp()
         logits = scale * original @ related.t()  # [B·W, B·W], mọi cặp trong batch
 
         # Nhãn: block-diagonal theo mẫu (khác ảnh = âm); cặp khác mẫu nhưng cùng
@@ -581,8 +553,6 @@ class OpenViVQAModel(PreTrainedModel):
             )
             if use_memory:
                 self._twc_enqueue(memory, original[real].detach(), related[real].detach(), pair_text[real])
-        elif self.config.twc_loss == "paper_bce":
-            loss = 0.5 * (self._paper_bce(logits, o2r) + self._paper_bce(logits.t(), r2o))
         else:
             keep = o2r != -1
             loss = 0.5 * (
