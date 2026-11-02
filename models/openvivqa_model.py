@@ -502,7 +502,7 @@ class OpenViVQAModel(PreTrainedModel):
         logits = scale * original @ related.t()  # [B·W, B·W], mọi cặp trong batch
 
         # Nhãn: block-diagonal theo mẫu (khác ảnh = âm); cặp khác mẫu nhưng cùng
-        # (ảnh, chữ) kế thừa nhãn đường chéo của đối tác; hàng/cột PAD = -1.
+        # (ảnh, chữ) kế thừa nhãn của bản related tham gia cặp; hàng/cột PAD = -1.
         o2r, r2o = torch.block_diag(*o2r.float()), torch.block_diag(*r2o.float())
         group = groups.reshape(-1)
         sample = torch.arange(group.numel(), device=group.device) // words
@@ -512,7 +512,7 @@ class OpenViVQAModel(PreTrainedModel):
             & (sample.unsqueeze(1) != sample.unsqueeze(0))
         )
         o2r = torch.where(inherit, o2r.diagonal().unsqueeze(0).expand_as(o2r), o2r)
-        r2o = torch.where(inherit, r2o.diagonal().unsqueeze(0).expand_as(r2o), r2o)
+        r2o = torch.where(inherit, r2o.diagonal().unsqueeze(1).expand_as(r2o), r2o)
         pair_text = None
         if text_ids is not None:
             pair_text = torch.stack(
