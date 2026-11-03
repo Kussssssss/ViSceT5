@@ -1,13 +1,13 @@
 dataset_name: "ViTextVQA"
 data_dir: "./datasets"
-# OCR Origin/Related qua ConsFormer, huấn luyện VQA kết hợp TWC.
+# OCR Origin/Related dùng embedding ViT5 trực tiếp, huấn luyện VQA kết hợp TWC.
 ablation_use_image: true
 ablation_use_qaclip: false   # dùng qavit_mode ở dưới
 ablation_use_ocr: true
-ablation_use_consformer: true
+ablation_use_consformer: false
 ablation_use_ocr_aug: true
 ocr_related: "augment"         # bản related (dùng chung OCR-Aug, ConsFormer, TWC; train = test): augment = keep/correct/noise theo twc_adv_probability; correct = chỉ sửa
-ocr_aug_mode: "separate"      # hai lượt ConsFormer riêng; concat toàn bộ Origin + Related rồi cộng feature OCR
+ocr_aug_mode: "separate"      # xử lý Origin/Related riêng; concat toàn bộ rồi cộng feature OCR
 qavit_mode: "off"   # off | no_question | question — CLIP thường (các run TWC t1–t11)
 ocr_feature_norm: "layernorm"   # Consformer như code trước refactor (run Vast); rmsnorm = bản refactor
 use_twc: true
@@ -24,8 +24,8 @@ twc_objective: "lexical"     # cặp đối chiếu Origin ↔ Related; twc_feat
 twc_answer_weight: 0.1       # trọng số loss answer-grounded
 twc_related_train: "correct" # chỉ dùng cho mode concat cũ; mode separate dùng ocr_related ở cả train/test
 
-output_dir: "./output/finetune_consformer_ocraug_p35_twc_r2ofix"
-logging_dir: "./output/finetune_consformer_ocraug_p35_twc_r2ofix/logs"
+output_dir: "./output/finetune_noconsformer_ocraug_p35_twc_r2ofix"
+logging_dir: "./output/finetune_noconsformer_ocraug_p35_twc_r2ofix/logs"
 model_name_or_path: null # Optional OpenViVQA checkpoint; null initializes the backbones.
 resume_from_checkpoint: null
 resume_checkpoint_id: ""
