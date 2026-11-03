@@ -1075,7 +1075,7 @@ def test_yaml_consformer_ablation_and_full_method(make_model, tokenizer, samples
         "twc_objective": "lexical", "twc_related_train": "correct", "ocr_feature_norm": "layernorm",
     }
     assert cfg["qavit_mode"] == "off"
-    assert (cfg["per_device_train_batch_size"], cfg["per_device_eval_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (32, 32, 1, 0.1)
+    assert (cfg["per_device_train_batch_size"], cfg["per_device_eval_batch_size"], cfg["gradient_accumulation_steps"], cfg["label_smoothing_factor"]) == (8, 8, 1, 0.1)
     assert cfg["learning_rate"] == 1e-4
     assert cfg["ocr_aug_mode"] == "separate"
     assert cfg["ablation_use_ocr_aug"] and cfg["use_twc"] and cfg["ablation_use_consformer"]
