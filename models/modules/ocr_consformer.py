@@ -14,6 +14,18 @@ the pretrained embedding is never lost and ConsFormer adds the constituent conte
 extra projection: the gain of the final LayerNorm already scales the added part per dimension, and a
 zero-initialised projection would block the gradient into ConsFormer until it opens.
 residual=False: the ConsFormer output replaces the pretrained embeddings (ViConsFormer).
+
+gate=True (with residual): output = embedding + g * LayerNorm(ConsFormer), g a per-dimension vector
+initialised to 0 (ReZero / LayerScale). At the first step the OCR text is exactly the ViT5 token
+embedding, i.e. the run without Consformer; dL/dg = <LayerNorm(ConsFormer), dL/dx> is not 0, so g
+leaves 0 at the first update and ConsFormer then receives gradient. ConsFormer is added only as far
+as it lowers the loss, instead of starting as random context of the size of the embedding.
+
+tree_transformer=True: the group attention of Tree Transformer (Wang et al., EMNLP'19) instead of
+ViConsFormer's: one constituent tree per layer shared by all heads (Linear(d_model, d_model), scores
+/ d_model), and sinusoidal positions added to the ConsFormer input, so the order of the tokens inside
+a constituent is known. ViConsFormer splits the group attention into heads (a tree per d_k slice,
+one Linear(d_k, d_k) shared by every head) and defines but never adds the positions.
 """
 
 import math
@@ -88,12 +100,25 @@ def constituent_prior(neighbor: torch.Tensor) -> torch.Tensor:
     return c + c.transpose(-2, -1) + neighbor.masked_fill(~eye, 1e-4)
 
 
+def sinusoid_positions(length, d_model, device, dtype):
+    """Sinusoidal positional encoding [length, d_model] (Vaswani et al.; Tree Transformer's input)."""
+    position = torch.arange(length, device=device, dtype=torch.float32).unsqueeze(1)
+    rate = torch.exp(torch.arange(0, d_model, 2, device=device, dtype=torch.float32) * (-math.log(10000.0) / d_model))
+    table = torch.zeros(length, d_model, device=device, dtype=torch.float32)
+    table[:, 0::2] = torch.sin(position * rate)
+    table[:, 1::2] = torch.cos(position * rate)
+    return table.to(dtype)
+
+
 class GroupAttention(nn.Module):
-    def __init__(self, head, d_model, constituent: str = "tree"):
+    def __init__(self, head, d_model, constituent: str = "tree", single: bool = False):
         super().__init__()
         self.constituent = constituent
-        self.h = head
-        self.d_k = d_model // head
+        # single: one tree shared by the heads, scores / d_model (Tree Transformer);
+        # otherwise a tree per head, scores / sqrt(d_k).
+        self.h = 1 if single else head
+        self.d_k = d_model // self.h
+        self.scale = float(d_model) if single else math.sqrt(self.d_k)
         self.linear_key   = nn.Linear(self.d_k, self.d_k)
         self.linear_query = nn.Linear(self.d_k, self.d_k)
         self.norm = nn.LayerNorm(d_model)
@@ -105,7 +130,7 @@ class GroupAttention(nn.Module):
         ctx = self.norm(context).view(B, L, self.h, self.d_k).transpose(1, 2)
         q = self.linear_query(ctx).to(torch.float32)
         k = self.linear_key  (ctx).to(torch.float32)
-        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_k)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
         scores = scores.masked_fill(~nb_mask[:, None, :, :], -1e4)
         neibor_attn = F.softmax(scores, dim=-1)
         neibor_attn = torch.sqrt(neibor_attn * neibor_attn.transpose(-2, -1) + 1e-4)
@@ -145,9 +170,10 @@ class SublayerConnection(nn.Module):
 
 
 class OCREncoderLayer(nn.Module):
-    def __init__(self, head, d_model, d_kv, d_ff, dropout=0.1, constituent: str = "tree"):
+    def __init__(self, head, d_model, d_kv, d_ff, dropout=0.1, constituent: str = "tree",
+                 single_tree: bool = False):
         super().__init__()
-        self.group_attn   = GroupAttention(head, d_model, constituent)
+        self.group_attn   = GroupAttention(head, d_model, constituent, single=single_tree)
         self.self_attn    = ScaledDotProductAttention_Encoder(head, d_model, d_kv,
                                                               output_projection=constituent == "tree")
         self.feed_forward = PositionwiseFeedForward(d_model, d_ff)
@@ -161,25 +187,37 @@ class OCREncoderLayer(nn.Module):
 
 class OCREncoder(nn.Module):
     def __init__(self, head, d_model, d_kv, d_ff, word_embed=None, num_layers: int = 3,
-                 constituent: str = "tree", residual: bool = False):
+                 constituent: str = "tree", residual: bool = False, gate: bool = False,
+                 tree_transformer: bool = False):
         super().__init__()
         if constituent not in ("tree", "legacy"):
             raise ValueError("constituent must be tree|legacy.")
+        if gate and not residual:
+            raise ValueError("The ConsFormer gate needs the residual output.")
+        if tree_transformer and constituent != "tree":
+            raise ValueError("tree_transformer needs constituent='tree'.")
         self.head = head
         self.d_model = d_model
         self.d_kv = d_kv
         self.d_ff = d_ff
         self._word_embed_proxy = None
         self._legacy_embed = word_embed if isinstance(word_embed, nn.Module) else None
-        self.layers = clones(OCREncoderLayer(head, d_model, d_kv, d_ff, constituent=constituent), num_layers)
+        self.layers = clones(OCREncoderLayer(head, d_model, d_kv, d_ff, constituent=constituent,
+                                             single_tree=tree_transformer), num_layers)
         self.norm = nn.LayerNorm(d_model)
         self.residual = bool(residual)
+        self.positions = bool(tree_transformer)
+        if gate:
+            self.consformer_gate = nn.Parameter(torch.zeros(d_model))
 
     def set_word_embed_proxy(self, proxy_callable):
         self._word_embed_proxy = proxy_callable
 
-    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor):
-        if self._word_embed_proxy is not None:
+    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor, embeddings=None):
+        """embeddings: the token embeddings of inputs, computed by the caller (e.g. detached)."""
+        if embeddings is not None:
+            x = embeddings
+        elif self._word_embed_proxy is not None:
             x = self._word_embed_proxy(inputs)
         elif self._legacy_embed is not None:
             x = self._legacy_embed(inputs)
@@ -187,6 +225,8 @@ class OCREncoder(nn.Module):
             raise RuntimeError("OCREncoder: No word embedding proxy set.")
         dtype_in = x.dtype
         embeddings = x
+        if self.positions:
+            x = x + sinusoid_positions(x.shape[1], self.d_model, x.device, x.dtype)
         nb_mask_2d = build_neighbor_mask(mask_1d)
         break_probs = []
         group_prob = 0.0
@@ -194,7 +234,9 @@ class OCREncoder(nn.Module):
             x, group_prob, break_prob = layer(x, mask_1d, nb_mask_2d, group_prob)
             break_probs.append(break_prob)
         x = self.norm(x)
-        if self.residual:
+        if hasattr(self, "consformer_gate"):
+            x = embeddings + self.consformer_gate.to(x.dtype) * x
+        elif self.residual:
             x = embeddings + x
         x = x.to(dtype_in)
         break_probs = torch.stack(break_probs, dim=1)

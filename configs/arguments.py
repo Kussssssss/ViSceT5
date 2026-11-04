@@ -59,6 +59,21 @@ class ModelArguments:
     ocr_full_features: bool = field(
         default=True, metadata={"help": "OCR token + char + box + det + rec in every run (Consformer on or off)."}
     )
+    consformer_gate: bool = field(
+        default=False, metadata={"help": "OCR text = ViT5 embedding + g * ConsFormer, g = 0 at the start (ReZero/LayerScale)."}
+    )
+    consformer_tree_transformer: bool = field(
+        default=False, metadata={"help": "Tree Transformer group attention: one tree per layer, scores / d_model, sinusoidal positions."}
+    )
+    twc_siglip: bool = field(
+        default=False, metadata={"help": "TWC as SigLIP: logits = t·cos + b (b0 = -t0), BCE summed over a row, mean over rows."}
+    )
+    twc_text_only: bool = field(
+        default=False, metadata={"help": "TWC on the OCR text features without box/det/rec; changed words are the anchors."}
+    )
+    twc_text_labels: bool = field(
+        default=False, metadata={"help": "TWC pairs of equal texts are ignored instead of negatives."}
+    )
 
 
 @dataclass

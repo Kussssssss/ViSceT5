@@ -80,16 +80,12 @@ class OpenViVQAModel(PreTrainedModel):
         if config.ablation_use_ocr or config.ocr_full_features:
             # Đặc trưng OCR: chữ (ConsFormer, hoặc embedding token ViT5 khi tắt Consformer)
             # + ký tự + box/det/rec. Cùng thứ tự dựng như trước → bật Consformer khởi tạo y hệt.
+            # With the ConsFormer gate, ConsFormer gets its own seed after the other OCR modules, so
+            # these start exactly as in the run without Consformer (gate 0 = that run).
+            gated = config.ablation_use_ocr and config.consformer_gate
             with _seeded(seed + 2):
-                if config.ablation_use_ocr:
-                    self.ocr_encoder = OCREncoder(
-                        self.vit5.config.num_heads,
-                        self.d_model,
-                        self.vit5.config.d_kv,
-                        self.vit5.config.d_ff,
-                        constituent=config.consformer_constituent,
-                        residual=config.consformer_residual,
-                    )
+                if config.ablation_use_ocr and not gated:
+                    self.ocr_encoder = self._build_consformer(config)
                 self.semantic_ocr_embedding = SemanticOCREmbedding(
                     SimpleNamespace(
                         d_model=self.d_model,
@@ -102,6 +98,9 @@ class OpenViVQAModel(PreTrainedModel):
                 self.char_embedding = nn.Embedding(config.char_num, self.d_model)
                 self.char_position_embedding = nn.Embedding(config.char_max_num, self.d_model)
                 self.ocr_char_layernorm = T5LayerNorm(self.d_model, eps=norm_eps)
+            if gated:
+                with _seeded(seed + 5):
+                    self.ocr_encoder = self._build_consformer(config)
             if config.ablation_use_ocr:
                 self.ocr_encoder.set_word_embed_proxy(lambda ids: self.get_input_embeddings()(ids))
         else:
@@ -116,6 +115,15 @@ class OpenViVQAModel(PreTrainedModel):
         if config.use_twc and config.twc_contrastive:
             # Nhiệt độ học được τ của TWC (CLIP/TWA): exp(logit_scale) = 1/τ lúc đầu.
             self.twc_logit_scale = nn.Parameter(torch.tensor(math.log(1 / config.twc_temperature_init)))
+            if config.twc_siglip:
+                # SigLIP (Zhai et al., ICCV'23): logits = t·cos + b with a learnable bias, b0 = -t0, so a
+                # pair at cos = 1 starts at logit 0 (t0 = 10, b0 = -10 is SigLIP's initialisation).
+                self.twc_bias = nn.Parameter(torch.tensor(-1.0 / config.twc_temperature_init))
+        if config.twc_text_only and config.use_twc and not hasattr(self, "semantic_ocr_embedding"):
+            raise ValueError("twc_text_only needs the OCR text features (Consformer or ocr_full_features).")
+        if config.twc_text_only and not config.twc_text_labels:
+            # Equal strings have equal text features: as negatives they could never be separated.
+            raise ValueError("twc_text_only needs twc_text_labels.")
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -224,6 +232,35 @@ class OpenViVQAModel(PreTrainedModel):
             results.append(features.squeeze(0))
         return torch.stack(results)
 
+    def _build_consformer(self, config):
+        return OCREncoder(
+            self.vit5.config.num_heads,
+            self.d_model,
+            self.vit5.config.d_kv,
+            self.vit5.config.d_ff,
+            constituent=config.consformer_constituent,
+            residual=config.consformer_residual,
+            gate=config.consformer_gate,
+            tree_transformer=config.consformer_tree_transformer,
+        )
+
+    def _ocr_text(self, ids, token_mask, word_map, char_ids, char_mask):
+        """Text part of the OCR features [B, L, D]: LN(token or ConsFormer) + LN(characters), as in
+        SemanticOCREmbedding but without box/det/rec (the TWC features of twc_text_only). The token
+        embeddings enter as a constant, so TWC never moves the embedding table that the decoder shares
+        as its output layer; it trains ConsFormer, the character stream and the two norms."""
+        embeddings = self.get_input_embeddings()(ids).detach()
+        if self.config.ablation_use_ocr:
+            text, _ = self.ocr_encoder(ids, token_mask, embeddings=embeddings)
+        else:
+            text = embeddings
+        chars = self._char_features(char_ids, char_mask)
+        index = word_map.clamp(0, char_ids.shape[1] - 1).unsqueeze(-1).expand(-1, -1, chars.shape[-1])
+        valid = ((word_map >= 0) & token_mask.bool()).unsqueeze(-1).to(chars.dtype)
+        chars = torch.gather(chars, 1, index) * valid
+        embedding = self.semantic_ocr_embedding
+        return embedding.layer_norm_tok(text.to(self.target_dtype)) + embedding.layer_norm_char(chars.to(self.target_dtype))
+
     def encode(
         self,
         input_ids,
@@ -298,35 +335,75 @@ class OpenViVQAModel(PreTrainedModel):
         features = torch.nan_to_num(sums / counts.clamp_min(1), nan=0.0, posinf=0.0, neginf=0.0)
         return F.normalize(features, dim=-1, eps=1e-6)
 
-    def _twc(self, tokens, word_map, token_mask, o2r, r2o):
+    @staticmethod
+    def _twc_row_loss(logits, labels, keep):
+        """SigLIP normalisation: BCE summed over the candidates of each anchor row, mean over the rows."""
+        cells = F.binary_cross_entropy_with_logits(logits.float(), labels.clamp_min(0), reduction="none")
+        rows = keep.any(dim=1)
+        return (cells * keep).sum(dim=1)[rows].mean()
+
+    def _twc(self, tokens, word_map, token_mask, o2r, r2o, orig_text=None, rel_text=None):
         """TWC as TWA (_forward_pretrain_cons_output + loss_accuracy): encoder output of every
         original word vs every related word of the batch, logits = exp(logit_scale) · cos,
         labels = create_batch_labels (block-diagonal, cross-sample 0, PAD rows/columns -1),
         symmetric sigmoid BCE over the cells != -1.
         tokens: [B, L, D] encoder output of [original OCR | related OCR]; word_map: [B, L] word
-        slot of each token (original 0..W-1, related W..2W-1); o2r, r2o: [B, W, W]."""
+        slot of each token (original 0..W-1, related W..2W-1); o2r, r2o: [B, W, W] (r2o: rows =
+        related words, columns = original words).
+
+        twc_siglip: logits = t·cos + b and the loss is summed over the candidates of a row, averaged
+        over the rows. Positives are ~1/(B·W) of the cells, so the mean over all cells without a bias
+        is lowered mostly by pushing every pair down, and a lower temperature amplifies that.
+        orig_text, rel_text: [B, W] batch-wide id of each word's text (-1 = PAD), with
+        twc_text_labels — a pair with equal texts labelled 0 (the same string in another image, or an
+          original word equal to another word's corrected copy) is a false negative: ignored;
+        twc_text_only — only changed words (related text != original text) are anchors (rows): an
+          unchanged word is the same input twice, so its positive is trivial. It stays a candidate.
+        Returns (loss, top-1 accuracy of the anchors, mean positive / negative logit)."""
         batch, words = o2r.shape[:2]
         features = self._pool_words(tokens, word_map, token_mask, 2 * words)
         original = features[:, :words].reshape(batch * words, -1)
         related = features[:, words:].reshape(batch * words, -1)
         logits = self.twc_logit_scale.exp() * original @ related.t()  # [B·W, B·W]
+        if self.config.twc_siglip:
+            logits = logits + self.twc_bias
         o2r, r2o = torch.block_diag(*o2r.float()), torch.block_diag(*r2o.float())
         for labels in (o2r, r2o):
             ignored = labels.diagonal() == -1
             labels[ignored, :] = -1.0
             labels[:, ignored] = -1.0
-        keep = o2r != -1
-        if not keep.any():
-            return logits.sum() * 0.0, logits.new_zeros(())
-        loss = 0.5 * (
-            F.binary_cross_entropy_with_logits(logits[keep], o2r[keep])
-            + F.binary_cross_entropy_with_logits(logits.t()[keep], r2o[keep])
-        )
+        if orig_text is not None:
+            orig_text, rel_text = orig_text.reshape(-1), rel_text.reshape(-1)
+            if self.config.twc_text_labels:
+                same = (orig_text[:, None] == rel_text[None, :]) & (orig_text[:, None] >= 0)
+                o2r[same & (o2r == 0)] = -1.0
+                r2o[same.t() & (r2o == 0)] = -1.0
+            if self.config.twc_text_only:
+                unchanged = orig_text == rel_text  # PAD (-1 == -1) is already ignored
+                o2r[unchanged, :] = -1.0
+                r2o[unchanged, :] = -1.0
+        keep, keep_t = o2r != -1, r2o != -1
+        if not (keep.any() and keep_t.any()):
+            return logits.sum() * 0.0, logits.new_zeros(()), {}
+        if self.config.twc_siglip:
+            loss = 0.5 * (self._twc_row_loss(logits, o2r, keep) + self._twc_row_loss(logits.t(), r2o, keep_t))
+        else:
+            loss = 0.5 * (
+                F.binary_cross_entropy_with_logits(logits[keep], o2r[keep])
+                + F.binary_cross_entropy_with_logits(logits.t()[keep_t], r2o[keep_t])
+            )
         with torch.no_grad():  # retrieval top-1 trong batch: từ gốc tìm đúng bản related của nó
+            detached = logits.detach()
             rows = (o2r.diagonal() != -1).nonzero(as_tuple=True)[0]
-            best = logits.detach().masked_fill(~keep, -1e9)[rows].argmax(dim=1)
-            accuracy = (o2r[rows, best] > 0.5).float().mean()
-        return loss, accuracy
+            best = detached.masked_fill(~keep, -1e9)[rows].argmax(dim=1)
+            accuracy = (o2r[rows, best] > 0.5).float().mean() if rows.numel() else logits.new_zeros(())
+            statistics = {}
+            positive, negative = keep & (o2r > 0.5), keep & (o2r == 0)
+            if positive.any():
+                statistics["twc_pos_logit"] = detached[positive].mean()
+            if negative.any():
+                statistics["twc_neg_logit"] = detached[negative].mean()
+        return loss, accuracy, statistics
 
     def forward(
         self,
@@ -351,6 +428,8 @@ class OpenViVQAModel(PreTrainedModel):
         twc_o2r=None,
         twc_r2o=None,
         ocr_words=None,
+        twc_orig_text=None,
+        twc_rel_text=None,
     ):
         if ocr_attention_mask is None:
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
@@ -409,20 +488,32 @@ class OpenViVQAModel(PreTrainedModel):
             length = ocr_input_ids.shape[1] + ocr_rel_input_ids.shape[1]
             word_map = torch.cat([ocr_to_word_map, torch.where(
                 ocr_rel_to_word_map >= 0, ocr_rel_to_word_map + words, ocr_rel_to_word_map)], dim=1)
-            if two_views:
+            if self.config.twc_text_only:
+                # Text features of each copy (token or ConsFormer + characters) before box/det/rec: the
+                # related copy shares those with its original word, so on the encoder output the pair
+                # is found by position and appearance alone, without reading the text.
+                tokens = torch.cat([
+                    self._ocr_text(ocr_input_ids, ocr_attention_mask, ocr_to_word_map, ocr_char_ids, ocr_char_mask),
+                    self._ocr_text(ocr_rel_input_ids, ocr_rel_attention_mask, ocr_rel_to_word_map,
+                                   ocr_rel_char_ids, ocr_rel_char_mask),
+                ], dim=1)
+            elif two_views:
                 tokens = torch.cat([
                     encoded.last_hidden_state[:, ocr_offset : ocr_offset + ocr_input_ids.shape[1]],
                     view.last_hidden_state[:, ocr_offset : ocr_offset + ocr_rel_input_ids.shape[1]],
                 ], dim=1)
             else:
                 tokens = encoded.last_hidden_state[:, ocr_offset : ocr_offset + length]
-            result["twc_loss"], result["twc_acc"] = self._twc(
+            texts = {} if twc_orig_text is None else {"orig_text": twc_orig_text, "rel_text": twc_rel_text}
+            loss, accuracy, statistics = self._twc(
                 tokens,
                 word_map,
                 torch.cat([ocr_attention_mask, ocr_rel_attention_mask], dim=1),
                 twc_o2r,
                 twc_r2o,
+                **texts,
             )
+            result.update(twc_loss=loss, twc_acc=accuracy, **statistics)
         return result
 
     @torch.no_grad()
@@ -442,7 +533,7 @@ class OpenViVQAModel(PreTrainedModel):
         generation_config=None,
         **generation_kwargs,
     ):
-        for name in ("twc_o2r", "twc_r2o", "ocr_words", "labels"):
+        for name in ("twc_o2r", "twc_r2o", "twc_orig_text", "twc_rel_text", "ocr_words", "labels"):
             generation_kwargs.pop(name, None)
         related = {name: generation_kwargs.pop(name) for name in RELATED_FIELDS if name in generation_kwargs}
         if encoder_outputs is None:

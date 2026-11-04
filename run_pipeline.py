@@ -4,7 +4,8 @@ STAGE=finetune (default) | predict
 Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             RESUME_FROM_CHECKPOINT, PER_DEVICE_TRAIN_BATCH_SIZE, GRADIENT_ACCUMULATION_STEPS,
             module switches ABLATION_USE_QACLIP (QA-ViT), ABLATION_USE_OCR (Consformer), USE_TWC,
-            TWC_ADV_PROBABILITY, TWC_TEMPERATURE, TWC_WEIGHT, TWC_CONTRASTIVE, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
+            TWC_ADV_PROBABILITY, TWC_TEMPERATURE, TWC_WEIGHT, TWC_CONTRASTIVE, TWC_TWO_VIEWS, CONSFORMER_GATE,
+            CONSFORMER_TREE_TRANSFORMER, TWC_SIGLIP, TWC_TEXT_ONLY, TWC_TEXT_LABELS, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE, PREDICT_RELATED.
 """
@@ -37,6 +38,12 @@ def training_arguments():
         "TWC_TEMPERATURE": "twc_temperature_init",
         "TWC_ADV_PROBABILITY": "twc_adv_probability",
         "TWC_CONTRASTIVE": "twc_contrastive",
+        "TWC_TWO_VIEWS": "twc_two_views",
+        "CONSFORMER_GATE": "consformer_gate",
+        "CONSFORMER_TREE_TRANSFORMER": "consformer_tree_transformer",
+        "TWC_SIGLIP": "twc_siglip",
+        "TWC_TEXT_ONLY": "twc_text_only",
+        "TWC_TEXT_LABELS": "twc_text_labels",
         "LEARNING_RATE": "learning_rate",
         "NEW_MODULE_LR": "new_module_learning_rate",
         "SCALAR_LR": "scalar_learning_rate",
