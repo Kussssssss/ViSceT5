@@ -16,7 +16,7 @@ except ImportError:
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj")
-SCALARS = ("twc_logit_scale", "instruction_proj_gate")
+SCALARS = ("twc_logit_scale", "instruction_proj_gate", "twc_bias", "consformer_gate")
 
 
 class VQATrainer(Seq2SeqTrainer):
@@ -30,6 +30,7 @@ class VQATrainer(Seq2SeqTrainer):
         super().__init__(*args, **kwargs)
         self.eval_data_collator = eval_data_collator
         self._twc_sum = {}
+        self._twc_n = {}  # steps that returned each key (the logit means are absent without such pairs)
         self._twc_count = 0
 
     def _with_eval_collator(self, build, dataset):
@@ -111,9 +112,10 @@ class VQATrainer(Seq2SeqTrainer):
         if "twc_loss" in outputs:
             loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
         if model.training and ("twc_loss" in outputs or "view_loss" in outputs):
-            for key in ("twc_loss", "twc_acc", "view_loss"):
+            for key in ("twc_loss", "twc_acc", "view_loss", "twc_pos_logit", "twc_neg_logit"):
                 if key in outputs:
                     self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
+                    self._twc_n[key] = self._twc_n.get(key, 0) + 1
             self._twc_count += 1
         return (loss, outputs) if return_outputs else loss
 
@@ -164,12 +166,20 @@ class VQATrainer(Seq2SeqTrainer):
 
     def log(self, logs):
         if self._twc_count and "loss" in logs:  # training log: mean TWC since last log
-            logs.update({k: round(v / self._twc_count, 4) for k, v in self._twc_sum.items()})
+            logs.update({k: round(v / self._twc_n.get(k, self._twc_count), 4) for k, v in self._twc_sum.items()})
             base = getattr(self.model, "module", self.model)
             if hasattr(base, "twc_logit_scale"):  # learned temperature τ = 1 / exp(logit scale)
                 logs["twc_tau"] = round(float(torch.exp(-base.twc_logit_scale.detach())), 4)
             self._twc_sum = {}
+            self._twc_n = {}
             self._twc_count = 0
+        if "loss" in logs:  # training log: the TWC bias and the ConsFormer gate
+            base = getattr(self.model, "module", self.model)
+            if hasattr(base, "twc_bias"):
+                logs["twc_bias"] = round(float(base.twc_bias.detach()), 4)
+            gate = getattr(getattr(base, "ocr_encoder", None), "consformer_gate", None)
+            if gate is not None:
+                logs["consformer_gate"] = round(float(gate.detach().abs().mean()), 6)
         super().log(logs)
         if self.is_world_process_zero():
             output_dir = Path(self.args.output_dir)

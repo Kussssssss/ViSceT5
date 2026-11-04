@@ -1297,3 +1297,122 @@ def test_two_views_without_twc_has_nothing_of_twc(make_model, tokenizer, samples
     monkeypatch.setenv("TWC_CONTRASTIVE", "false")
     arguments = training_arguments()
     assert arguments[arguments.index("--twc_contrastive") + 1] == "false"
+
+
+def test_consformer_gate_starts_as_the_run_without_consformer(make_model, tokenizer, samples):
+    from training.trainer import SCALARS
+    base = make_model(ablation_use_ocr=False, ocr_full_features=True).eval()
+    gated = make_model(ablation_use_ocr=True, ocr_full_features=True, consformer_constituent="tree",
+                       consformer_residual=True, consformer_gate=True).eval()
+    ungated = make_model(ablation_use_ocr=True, ocr_full_features=True, consformer_constituent="tree",
+                         consformer_residual=True)
+    # Same architecture as the residual ConsFormer, plus the gate; every other weight starts as without Consformer.
+    assert set(gated.state_dict()) - set(ungated.state_dict()) == {"ocr_encoder.consformer_gate"}
+    assert {k for k in set(gated.state_dict()) - set(base.state_dict())} == {
+        k for k in gated.state_dict() if k.startswith("ocr_encoder.")}
+    assert all(torch.equal(v, gated.state_dict()[k]) for k, v in base.state_dict().items())
+    assert torch.count_nonzero(gated.ocr_encoder.consformer_gate) == 0
+    assert "consformer_gate" in SCALARS  # scalar LR group, no weight decay pulling it back to 0
+    batch = build_collator(gated, tokenizer)(samples)
+    with torch.no_grad():
+        torch.testing.assert_close(gated(**batch)["logits"], base(**batch)["logits"])
+    gated.train()
+    gated(**batch)["loss"].backward()
+    assert gated.ocr_encoder.consformer_gate.grad.abs().sum() > 0  # the gate opens at the first update
+    assert all(p.grad is None or p.grad.abs().sum() == 0
+               for n, p in gated.ocr_encoder.named_parameters() if n != "consformer_gate")
+    with pytest.raises(ValueError):
+        make_model(ablation_use_ocr=True, consformer_constituent="tree", consformer_residual=False,
+                   consformer_gate=True)
+
+
+def test_consformer_tree_transformer_one_tree_per_layer_with_positions(make_model, tokenizer, samples):
+    from models.modules.ocr_consformer import OCREncoder, sinusoid_positions
+    table = sinusoid_positions(3, 8, torch.device("cpu"), torch.float32)
+    torch.testing.assert_close(table[0], torch.tensor([0.0, 1.0] * 4))
+    encoder = OCREncoder(4, 32, 8, 64, word_embed=torch.nn.Embedding(20, 32), constituent="tree",
+                         tree_transformer=True).eval()
+    attention = encoder.layers[0].group_attn
+    assert attention.h == 1 and attention.linear_key.in_features == 32 and attention.scale == 32.0
+    ids, mask = torch.tensor([[3, 4, 5, 6]]), torch.ones(1, 4, dtype=torch.long)
+    with torch.no_grad():
+        out, breaks = encoder(ids, mask)
+        assert breaks.shape == (1, 3, 1, 4, 4)  # [batch, layer, one tree, L, L]
+        # The positions enter the ConsFormer input only: equal to running without them on embedding + table.
+        encoder.positions = False
+        manual, _ = encoder(ids, mask, embeddings=encoder._legacy_embed(ids) + sinusoid_positions(4, 32, ids.device, out.dtype))
+        torch.testing.assert_close(out, manual)
+    model = make_model(ablation_use_ocr=True, consformer_constituent="tree", consformer_tree_transformer=True)
+    outputs = model(**build_collator(model, tokenizer)(samples))
+    assert torch.isfinite(outputs["loss"])
+
+
+def test_twc_siglip_text_labels_and_text_only(make_model, tokenizer, samples, monkeypatch):
+    import math
+    from run_pipeline import training_arguments
+    corrector = OCRCorrector(train_frame=pd.DataFrame({"question": ["sữa cà phê"], "answer": ["sữa"]}))
+    flags = dict(use_twc=True, twc_two_views=True, ocr_full_features=True, ablation_use_ocr=False,
+                 twc_adv_probability=1.0, twc_temperature_init=0.1, twc_siglip=True, twc_text_labels=True,
+                 twc_text_only=True)
+    model = make_model(**flags)
+    assert math.isclose(float(model.twc_bias), -10.0) and math.isclose(float(model.twc_logit_scale.exp()), 10.0, rel_tol=1e-5)
+    batch = build_collator(model, tokenizer, corrector, training=True)(samples)
+    orig, rel = batch["twc_orig_text"], batch["twc_rel_text"]
+    assert orig.shape == batch["twc_o2r"].shape[:2] and ((orig >= 0) == (batch["ocr_word_mask"] > 0)).all()
+    assert torch.equal(orig[0], orig[1])  # the same strings get the same id across the batch
+    assert ((orig != rel) & (orig >= 0)).any()  # "sữa" is in the lexicon → character noise
+    captured = {}
+    original_twc = model._twc
+
+    def spy(tokens, word_map, token_mask, o2r, r2o, **texts):
+        captured.update(tokens=tokens, word_map=word_map, token_mask=token_mask, o2r=o2r, r2o=r2o, **texts)
+        return original_twc(tokens, word_map, token_mask, o2r, r2o, **texts)
+
+    model._twc = spy
+    outputs = model(**batch)
+    words = batch["twc_o2r"].shape[1]
+    features = model._pool_words(captured["tokens"], captured["word_map"], captured["token_mask"], 2 * words)
+    o, r = features[:, :words].reshape(-1, 32), features[:, words:].reshape(-1, 32)
+    logits = model.twc_logit_scale.exp() * o @ r.t() + model.twc_bias
+    labels = []
+    for blocks in (batch["twc_o2r"], batch["twc_r2o"]):
+        full = torch.block_diag(*blocks.float())
+        pad = full.diagonal() == -1
+        full[pad, :], full[:, pad] = -1.0, -1.0
+        labels.append(full)
+    o2r, r2o = labels
+    ot, rt = orig.reshape(-1), rel.reshape(-1)
+    for i in range(len(ot)):
+        for j in range(len(ot)):
+            if ot[i] >= 0 and ot[i] == rt[j] and o2r[i, j] == 0:
+                o2r[i, j] = -1.0
+            if rt[i] >= 0 and rt[i] == ot[j] and r2o[i, j] == 0:
+                r2o[i, j] = -1.0
+    for k in range(len(ot)):
+        if ot[k] == rt[k]:
+            o2r[k, :], r2o[k, :] = -1.0, -1.0
+
+    def rows(scores, targets):
+        total = [torch.nn.functional.binary_cross_entropy_with_logits(scores[i][targets[i] != -1],
+                                                                      targets[i][targets[i] != -1], reduction="sum")
+                 for i in range(len(targets)) if (targets[i] != -1).any()]
+        return torch.stack(total).mean()
+
+    reference = 0.5 * (rows(logits, o2r) + rows(logits.t(), r2o))
+    torch.testing.assert_close(outputs["twc_loss"], reference, rtol=1e-5, atol=1e-6)
+    assert 0 <= float(outputs["twc_acc"]) <= 1 and "twc_pos_logit" in outputs
+    # Text only: box/det/rec are not in the TWC features, and the embedding table (= decoder output layer)
+    # gets no TWC gradient.
+    outputs["twc_loss"].backward()
+    assert model.get_input_embeddings().weight.grad is None
+    assert model.char_embedding.weight.grad.abs().sum() > 0
+    assert model.semantic_ocr_embedding.linear_boxes.weight.grad is None
+    with pytest.raises(ValueError):
+        make_model(**{**flags, "twc_text_labels": False})
+    for name in ("TWC_SIGLIP", "TWC_TEXT_ONLY", "TWC_TEXT_LABELS", "CONSFORMER_GATE",
+                 "CONSFORMER_TREE_TRANSFORMER", "TWC_TWO_VIEWS"):
+        monkeypatch.setenv(name, "true")
+    arguments = training_arguments()
+    for flag in ("--twc_siglip", "--twc_text_only", "--twc_text_labels", "--consformer_gate",
+                 "--consformer_tree_transformer", "--twc_two_views"):
+        assert arguments[arguments.index(flag) + 1] == "true"

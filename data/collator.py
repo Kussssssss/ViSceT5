@@ -27,7 +27,9 @@ class ViT5VQADataCollator:
     sharing box/det/rec with the original word), by related_mode:
       augment — TWA keep / noise / correct with probability twc_adv_probability (training);
       correct — every correctable word corrected, no noise (evaluation / test).
-    twc_labels: emit the TWC labels twc_o2r / twc_r2o (training, augment only).
+    twc_labels: emit the TWC labels twc_o2r / twc_r2o (training, augment only); with
+      twc_text_labels / twc_text_only also twc_orig_text / twc_rel_text [B, W], a batch-wide id
+      of each word's text (-1 = PAD / placeholder), equal ids = equal strings.
     fresh_noise: new random draws at every call instead of TWA's Random(13) for every sample, which
     repeats the same copy each epoch; needed when the related copy is a training augmentation.
     """
@@ -184,7 +186,7 @@ class ViT5VQADataCollator:
         )
         token_ids, word_maps, char_ids, char_masks, word_masks = [], [], [], [], []
         rel_token_ids, rel_word_maps, rel_char_ids, rel_char_masks = [], [], [], []
-        o2r_all, r2o_all, words = [], [], []
+        o2r_all, r2o_all, words, text_pairs = [], [], [], []
         for item in info:
             count = len(item["texts"])
             ids, mapping, chars, mask = self._encode_ocr_text(item["texts"], word_count)
@@ -209,6 +211,7 @@ class ViT5VQADataCollator:
                         full_r2o[:count, :count] = torch.tensor(r2o)
                     o2r_all.append(full_o2r)
                     r2o_all.append(full_r2o)
+                    text_pairs.append(None if o2r is None else (list(item["texts"]), list(related)))
             token_ids.append(torch.tensor(ids, dtype=torch.long))
             word_maps.append(torch.tensor(mapping, dtype=torch.long))
             char_ids.append(chars)
@@ -243,6 +246,17 @@ class ViT5VQADataCollator:
             )
         if self.twc_labels:
             result.update(twc_o2r=torch.stack(o2r_all), twc_r2o=torch.stack(r2o_all))
+        if self.twc_labels and (getattr(self.cfg, "twc_text_labels", False) or getattr(self.cfg, "twc_text_only", False)):
+            text_ids = {}
+            orig_text = torch.full((len(batch), word_count), -1, dtype=torch.long)
+            rel_text = torch.full_like(orig_text, -1)
+            for row, pair in enumerate(text_pairs):
+                if pair is None:
+                    continue
+                for column, (orig, rel) in enumerate(zip(*pair)):
+                    orig_text[row, column] = text_ids.setdefault(orig, len(text_ids))
+                    rel_text[row, column] = text_ids.setdefault(rel, len(text_ids))
+            result.update(twc_orig_text=orig_text, twc_rel_text=rel_text)
         if self.return_ocr_words:
             result["ocr_words"] = words
         # Unlabelled inference batches do not create an all-ignored decoder loss.

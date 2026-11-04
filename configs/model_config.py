@@ -50,6 +50,11 @@ class OpenViVQAConfig(PretrainedConfig):
         consformer_residual: Optional[bool] = None,
         twc_two_views: Optional[bool] = None,
         twc_contrastive: Optional[bool] = None,
+        consformer_gate: Optional[bool] = None,
+        consformer_tree_transformer: Optional[bool] = None,
+        twc_siglip: Optional[bool] = None,
+        twc_text_only: Optional[bool] = None,
+        twc_text_labels: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -170,6 +175,17 @@ class OpenViVQAConfig(PretrainedConfig):
         # False: the related OCR copy and its encoder pass stay, without anything of TWC (no temperature,
         # no labels, no loss). None (older configs) = True, as those runs trained.
         self.twc_contrastive = bool(twc_contrastive) if twc_contrastive is not None else True
+        # Corrections; None (older configs) = False, so those checkpoints load and predict as trained.
+        # consformer_gate: OCR text = embedding + g * ConsFormer with g = 0 at the start (= no Consformer).
+        self.consformer_gate = bool(consformer_gate) if consformer_gate is not None else False
+        # consformer_tree_transformer: one constituent tree per layer + positions, as Tree Transformer.
+        self.consformer_tree_transformer = bool(consformer_tree_transformer) if consformer_tree_transformer is not None else False
+        # twc_siglip: TWC logits = t·cos + b, loss summed over a row's candidates, mean over rows (SigLIP).
+        self.twc_siglip = bool(twc_siglip) if twc_siglip is not None else False
+        # twc_text_only: TWC on the text features (token/ConsFormer + characters), changed words as anchors.
+        self.twc_text_only = bool(twc_text_only) if twc_text_only is not None else False
+        # twc_text_labels: pairs of equal texts are never negatives (ignored instead of 0).
+        self.twc_text_labels = bool(twc_text_labels) if twc_text_labels is not None else False
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
