@@ -55,6 +55,14 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_siglip: Optional[bool] = None,
         twc_text_only: Optional[bool] = None,
         twc_text_labels: Optional[bool] = None,
+        qavit_gated_joint: Optional[bool] = None,
+        qavit_ground: Optional[bool] = None,
+        qavit_ground_weight: Optional[float] = None,
+        consformer_span: Optional[bool] = None,
+        consformer_span_weight: Optional[float] = None,
+        consformer_geometry: Optional[bool] = None,
+        consformer_word_link: Optional[bool] = None,
+        ocr_visual_pool: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -186,6 +194,22 @@ class OpenViVQAConfig(PretrainedConfig):
         self.twc_text_only = bool(twc_text_only) if twc_text_only is not None else False
         # twc_text_labels: pairs of equal texts are never negatives (ignored instead of 0).
         self.twc_text_labels = bool(twc_text_labels) if twc_text_labels is not None else False
+        # qavit_gated_joint: QA-ViT layer = CLIP attention + tanh(beta) * (joint-softmax context - CLIP
+        #   context); beta = 0 is plain CLIP, tanh(beta) = 1 the joint attention of the paper.
+        self.qavit_gated_joint = bool(qavit_gated_joint) if qavit_gated_joint is not None else False
+        # qavit_ground: training loss putting the question share of the patch attention on the
+        #   answer's OCR boxes (weight qavit_ground_weight).
+        self.qavit_ground = bool(qavit_ground) if qavit_ground is not None else False
+        self.qavit_ground_weight = float(qavit_ground_weight) if qavit_ground_weight is not None else 0.1
+        # consformer_span: training loss making each answer span one constituent (weight consformer_span_weight).
+        self.consformer_span = bool(consformer_span) if consformer_span is not None else False
+        self.consformer_span_weight = float(consformer_span_weight) if consformer_span_weight is not None else 0.1
+        # consformer_geometry: the ConsFormer links see the box layout (zero-initialised bias).
+        self.consformer_geometry = bool(consformer_geometry) if consformer_geometry is not None else False
+        # consformer_word_link: pieces of one OCR word are always linked (a[k, k+1] = 1).
+        self.consformer_word_link = bool(consformer_word_link) if consformer_word_link is not None else False
+        # ocr_visual_pool: OCR token += W LN(CLIP patch features under its box), W = 0 at the start.
+        self.ocr_visual_pool = bool(ocr_visual_pool) if ocr_visual_pool is not None else False
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text

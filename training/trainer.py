@@ -15,7 +15,10 @@ except ImportError:
 
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
-               "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj")
+               "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "ocr_visual_norm",
+               "ocr_visual_proj")
+AUXILIARY = ("twc_loss", "twc_acc", "view_loss", "twc_pos_logit", "twc_neg_logit", "ground_loss",
+             "ground_mass", "ground_area", "span_loss", "span_acc")
 SCALARS = ("twc_logit_scale", "instruction_proj_gate", "twc_bias", "consformer_gate")
 
 
@@ -109,10 +112,15 @@ class VQATrainer(Seq2SeqTrainer):
             view_loss = (self.label_smoother({"logits": outputs["view_logits"]}, labels)
                          if self.label_smoother else outputs["view_loss"])
             loss = 0.5 * (loss + view_loss)
+        config = getattr(model, "module", model).config
         if "twc_loss" in outputs:
-            loss = loss + getattr(model, "module", model).config.twc_weight * outputs["twc_loss"]
-        if model.training and ("twc_loss" in outputs or "view_loss" in outputs):
-            for key in ("twc_loss", "twc_acc", "view_loss", "twc_pos_logit", "twc_neg_logit"):
+            loss = loss + config.twc_weight * outputs["twc_loss"]
+        if "ground_loss" in outputs:
+            loss = loss + config.qavit_ground_weight * outputs["ground_loss"]
+        if "span_loss" in outputs:
+            loss = loss + config.consformer_span_weight * outputs["span_loss"]
+        if model.training and any(key in outputs for key in ("twc_loss", "view_loss", "ground_loss", "span_loss")):
+            for key in AUXILIARY:
                 if key in outputs:
                     self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())
                     self._twc_n[key] = self._twc_n.get(key, 0) + 1
@@ -180,6 +188,12 @@ class VQATrainer(Seq2SeqTrainer):
             gate = getattr(getattr(base, "ocr_encoder", None), "consformer_gate", None)
             if gate is not None:
                 logs["consformer_gate"] = round(float(gate.detach().abs().mean()), 6)
+            gates = [module.instruction_proj_gate.detach().tanh().abs() for module in base.modules()
+                     if hasattr(module, "instruction_proj_gate")]
+            if gates:  # mean |tanh(beta)| of the QA-ViT layers (0 = plain CLIP)
+                logs["qavit_gate"] = round(float(torch.cat(gates).mean()), 6)
+            if hasattr(base, "ocr_visual_proj"):
+                logs["ocr_visual_norm"] = round(float(base.ocr_visual_proj.weight.detach().norm()), 6)
         super().log(logs)
         if self.is_world_process_zero():
             output_dir = Path(self.args.output_dir)

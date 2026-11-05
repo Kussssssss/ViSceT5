@@ -7,6 +7,25 @@ Upstream is licensed under Apache-2.0; see docs/QA_VIT_LICENSE.txt.
 Keep upstream parameter names for checkpoint compatibility. ViSceT5 additionally
 masks question padding, supports visual-query attention inspection, and
 accumulates attention in FP32 for mixed precision training.
+
+gated_joint=True (config.gated_joint): the gate covers every question path. Upstream runs one
+softmax over [visual, question] keys and passes it through the frozen, ungated out_proj, so at
+beta = 0 the visual tokens already mix question values (measured: CLIP features change by 7%).
+With s_v, s_q the scores of a visual query on the visual / question keys, A_v, A_q their softmaxes
+and C_v = A_v V_v, C_q = A_q V_q, the joint softmax splits exactly as
+    joint = (1 - lam) C_v + lam C_q = C_v + lam (C_q - C_v),
+    lam = Z_q / (Z_v + Z_q) = sigmoid(logsumexp s_q - logsumexp s_v),
+i.e. plain CLIP attention plus a question term weighted by lam, the share of the query's attention
+that the question takes. The layer is
+    out = out_proj(C_v) + tanh(beta) W' (lam (C_q - C_v)),
+with W' = instruction_out_proj.weight (no bias; initialised as out_proj.weight):
+  beta = 0      -> exactly the frozen CLIP layer (bit-identical), so QA-ViT starts as plain CLIP;
+  tanh(beta)=1, W' = W_o -> exactly the joint attention of QA-ViT (paper Eq. 3) through out_proj;
+  dL/dbeta = <W' lam (C_q - C_v), dL/dout> != 0 at beta = 0, so the gate can open;
+  lam keeps QA-ViT's per-patch selectivity: a patch that does not match the question gets little
+  question signal (a separate cross-attention softmax would give every patch a unit mixture).
+The relevance logit logit(lam) = logsumexp s_q - logsumexp s_v does not pass through the gate; it
+is what the answer-region grounding loss supervises (output_relevance).
 """
 
 from functools import partial
@@ -62,6 +81,40 @@ class MMCLIPAttention(CLIPAttention):
         super().__init__(config)
         self.instruction_out_proj = nn.Linear(self.embed_dim, self.embed_dim)
         self.instruction_proj_gate = nn.Parameter(torch.zeros(1))
+        self.gated_joint = bool(getattr(config, "gated_joint", False))
+
+    def _gated_joint(self, hidden_states, kv_states, kv_masks, output_attentions, output_relevance):
+        """out = CLIPAttention(x) + tanh(beta) W' (lam (C_q - C_v)); see the module docstring."""
+        batch_size, length, embed_dim = hidden_states.shape
+        # The frozen CLIP layer itself, so beta = 0 is bit-identical to plain CLIP.
+        base = CLIPAttention.forward(self, hidden_states=hidden_states, output_attentions=False)[0]
+        if kv_states.shape[1] == 0:
+            return (base, None, None) if output_relevance else (base, None)
+        question = _valid_tokens(kv_masks, batch_size, kv_states.shape[1], hidden_states.device, "kv_masks")
+        query = self._shape(self.q_proj(hidden_states) * self.scale, length, batch_size)
+        key_v = self._shape(self.k_proj(hidden_states), -1, batch_size)
+        value_v = self._shape(self.v_proj(hidden_states), -1, batch_size)
+        key_q = self._shape(self.k_proj(kv_states), -1, batch_size)
+        value_q = self._shape(self.v_proj(kv_states), -1, batch_size)
+        with torch.autocast(device_type=hidden_states.device.type, enabled=False):
+            query = query.float()
+            scores_v = torch.matmul(query, key_v.float().transpose(-1, -2))
+            # -1e4, not finfo.min: a finite fill keeps logsumexp, the head mean and the softmax finite.
+            scores_q = torch.matmul(query, key_q.float().transpose(-1, -2)).masked_fill(
+                ~question[:, None, None, :], -1e4)
+            relevance = torch.logsumexp(scores_q, dim=-1) - torch.logsumexp(scores_v, dim=-1)  # logit(lam)
+            share = torch.sigmoid(relevance).unsqueeze(-1)
+            weights_v = F.softmax(scores_v, dim=-1)
+            weights_q = F.softmax(scores_q, dim=-1)
+            context_v = torch.matmul(F.dropout(weights_v, p=self.dropout, training=self.training), value_v.float())
+            context_q = torch.matmul(F.dropout(weights_q, p=self.dropout, training=self.training), value_q.float())
+            delta = share * (context_q - context_v)  # joint-softmax context minus plain CLIP context
+        delta = delta.transpose(1, 2).reshape(batch_size, length, embed_dim).to(base.dtype)
+        output = base + self.instruction_proj_gate.tanh() * F.linear(delta, self.instruction_out_proj.weight)
+        weights = None
+        if output_attentions:  # the joint attention this layer interpolates to: [(1-lam) A_v, lam A_q]
+            weights = torch.cat(((1 - share) * weights_v, share * weights_q), dim=-1)
+        return (output, weights, relevance) if output_relevance else (output, weights)
 
     def forward(
         self,
@@ -71,7 +124,17 @@ class MMCLIPAttention(CLIPAttention):
         output_attentions=False,
         kv_states=None,
         kv_masks=None,
+        output_relevance=False,
     ):
+        """Returns (output, attention weights or None) [+ relevance logits [B, H, N] if output_relevance]."""
+        if self.gated_joint:
+            if kv_states is None:
+                raise ValueError("Projected instruction states are required.")
+            if attention_mask is not None or causal_attention_mask is not None:
+                raise ValueError("The gated joint attention takes no visual attention mask.")
+            return self._gated_joint(hidden_states, kv_states, kv_masks, output_attentions, output_relevance)
+        if output_relevance:
+            raise ValueError("output_relevance needs gated_joint.")
         if kv_states is None:
             raise ValueError(
                 "Projected instruction states are required; use an empty sequence to disable them."
@@ -142,18 +205,22 @@ class MMCLIPEncoderLayer(nn.Module):
         output_attentions=False,
         instruct_states=None,
         instruct_masks=None,
+        output_relevance=False,
     ):
-        attended, weights = self.self_attn(
+        result = self.self_attn(
             hidden_states=self.layer_norm1(hidden_states),
             attention_mask=attention_mask,
             causal_attention_mask=causal_attention_mask,
             output_attentions=output_attentions,
             kv_states=self.instruct_dim_reduce(instruct_states),
             kv_masks=instruct_masks,
+            output_relevance=output_relevance,
         )
+        attended, weights = result[0], result[1]
         hidden_states = hidden_states + attended
         hidden_states = hidden_states + self.mlp(self.layer_norm2(hidden_states))
-        return (hidden_states, weights) if output_attentions else (hidden_states,)
+        outputs = (hidden_states, weights) if output_attentions else (hidden_states,)
+        return outputs + (result[2],) if output_relevance else outputs
 
 
 def _instruction_layers(integration_point, num_layers):
@@ -201,7 +268,10 @@ class InstructCLIPEncoder(nn.Module):
         return_dict=None,
         instruct_states=None,
         instruct_masks=None,
+        output_relevance=False,
     ):
+        """output_relevance: also return the relevance logits [B, H, N] of every question layer
+        (gated_joint), as a tuple after the usual outputs."""
         output_attentions = (
             self.config.output_attentions
             if output_attentions is None
@@ -217,6 +287,7 @@ class InstructCLIPEncoder(nn.Module):
         )
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
+        relevances = ()
         hidden_states = inputs_embeds
 
         for layer in self.layers:
@@ -230,8 +301,9 @@ class InstructCLIPEncoder(nn.Module):
                 causal_attention_mask,
                 output_attentions,
             )
-            if isinstance(layer, MMCLIPEncoderLayer):
-                arguments += (instruct_states, instruct_masks)
+            question_layer = isinstance(layer, MMCLIPEncoderLayer)
+            if question_layer:
+                arguments += (instruct_states, instruct_masks, output_relevance)
             if self.gradient_checkpointing and self.training:
                 outputs = self._gradient_checkpointing_func(layer.__call__, *arguments)
             else:
@@ -239,20 +311,24 @@ class InstructCLIPEncoder(nn.Module):
             hidden_states = outputs[0]
             if output_attentions:
                 all_attentions += (outputs[1],)
+            if output_relevance and question_layer:
+                relevances += (outputs[-1],)
 
         if output_hidden_states:
             encoder_states += (hidden_states,)
         if not return_dict:
-            return tuple(
+            outputs = tuple(
                 value
                 for value in (hidden_states, encoder_states, all_attentions)
                 if value is not None
             )
-        return BaseModelOutput(
-            last_hidden_state=hidden_states,
-            hidden_states=encoder_states,
-            attentions=all_attentions,
-        )
+        else:
+            outputs = BaseModelOutput(
+                last_hidden_state=hidden_states,
+                hidden_states=encoder_states,
+                attentions=all_attentions,
+            )
+        return (outputs, relevances) if output_relevance else outputs
 
 
 class CLIPVisionTransformer(nn.Module):
@@ -274,6 +350,7 @@ class CLIPVisionTransformer(nn.Module):
         return_dict=None,
         instruct_states=None,
         instruct_masks=None,
+        output_relevance=False,
     ):
         if pixel_values is None:
             raise ValueError("pixel_values are required")
@@ -311,17 +388,22 @@ class CLIPVisionTransformer(nn.Module):
             return_dict=return_dict,
             instruct_states=instruct_states,
             instruct_masks=instruct_masks,
+            output_relevance=output_relevance,
         )
+        if output_relevance:
+            outputs, relevances = outputs
         last_hidden_state = outputs[0]
         pooled_output = self.post_layernorm(last_hidden_state[:, 0])
         if not return_dict:
-            return (last_hidden_state, pooled_output) + outputs[1:]
-        return BaseModelOutputWithPooling(
-            last_hidden_state=last_hidden_state,
-            pooler_output=pooled_output,
-            hidden_states=outputs.hidden_states,
-            attentions=outputs.attentions,
-        )
+            result = (last_hidden_state, pooled_output) + outputs[1:]
+        else:
+            result = BaseModelOutputWithPooling(
+                last_hidden_state=last_hidden_state,
+                pooler_output=pooled_output,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+        return (result, relevances) if output_relevance else result
 
 
 class QACLIPEncoder(CLIPPreTrainedModel):
@@ -334,8 +416,12 @@ class QACLIPEncoder(CLIPPreTrainedModel):
         instruction_dim: Optional[int] = None,
         freeze_clip: Optional[bool] = None,
         integration_point: Optional[str] = None,
+        gated_joint: Optional[bool] = None,
     ):
         super().__init__(config)
+        config.gated_joint = bool(
+            getattr(config, "gated_joint", False) if gated_joint is None else gated_joint
+        )
         # Resolve overrides before constructing modules, including non-768 inputs.
         config.instruction_dim = int(
             getattr(config, "instruction_dim", 768)
@@ -416,6 +502,8 @@ class QACLIPEncoder(CLIPPreTrainedModel):
                     layer.instruct_dim_reduce.requires_grad_(True)
                     layer.self_attn.instruction_out_proj.requires_grad_(True)
                     layer.self_attn.instruction_proj_gate.requires_grad_(True)
+                    if layer.self_attn.gated_joint:  # W' acts on a difference of contexts: no bias
+                        layer.self_attn.instruction_out_proj.bias.requires_grad_(False)
 
     def init_qavit_comps(self):
         """Explicitly reset adapter projections from CLIP; never call on a trained checkpoint."""
@@ -444,7 +532,9 @@ class QACLIPEncoder(CLIPPreTrainedModel):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        output_relevance=False,
     ):
+        """output_relevance (gated_joint): return (outputs, relevance logits of each question layer)."""
         return self.vision_model(
             pixel_values=pixel_values,
             output_attentions=output_attentions,
@@ -452,4 +542,5 @@ class QACLIPEncoder(CLIPPreTrainedModel):
             return_dict=return_dict,
             instruct_states=text_emb,
             instruct_masks=text_mask,
+            output_relevance=output_relevance,
         )

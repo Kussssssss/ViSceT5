@@ -19,6 +19,46 @@ from data.vocab import (
 # TWA builds the related copy of every sample with random.Random(13) (findRelatedOCR*).
 TWA_SEED = 13
 
+_EDGE_PUNCTUATION = re.compile(r"^\W+|\W+$")
+
+
+def _words(text):
+    """Lower-cased words of a text without leading / trailing punctuation."""
+    words = (_EDGE_PUNCTUATION.sub("", word) for word in str(text).lower().split())
+    return [word for word in words if word]
+
+
+def answer_spans(texts, answer):
+    """Span id of each OCR word (-1 = none): maximal runs of consecutive OCR words (reading order)
+    whose words form a contiguous part of the answer, found left to right. A run is kept if it has
+    at least two answer words, is the whole answer, or contains a digit; a single common syllable of
+    a longer answer ("của", "và") is too often a chance match to mark the answer's place."""
+    target = _words(answer)
+    spans = [-1] * len(texts)
+    if not target:
+        return spans
+
+    def inside(words):
+        size = len(words)
+        return any(target[start:start + size] == words for start in range(len(target) - size + 1))
+
+    words = [_words(text) for text in texts]
+    start, count = 0, 0
+    while start < len(texts):
+        if not words[start] or not inside(words[start]):
+            start += 1
+            continue
+        end, run = start, list(words[start])
+        while end + 1 < len(texts) and words[end + 1] and inside(run + words[end + 1]):
+            end += 1
+            run += words[end]
+        if len(run) >= 2 or len(run) == len(target) or any(char.isdigit() for word in run for char in word):
+            for index in range(start, end + 1):
+                spans[index] = count
+            count += 1
+        start = end + 1
+    return spans
+
 
 class ViT5VQADataCollator:
     """OCR features stay aligned with their original image and text entries.
@@ -32,11 +72,13 @@ class ViT5VQADataCollator:
       of each word's text (-1 = PAD / placeholder), equal ids = equal strings.
     fresh_noise: new random draws at every call instead of TWA's Random(13) for every sample, which
     repeats the same copy each epoch; needed when the related copy is a training augmentation.
+    answer_spans: emit answer_span [B, W], the span id of the OCR words that spell part of the answer
+    (answer_spans()), -1 elsewhere (training of the grounding / answer-span losses).
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
                  corrector=None, related=False, twc_labels=False, related_mode="augment",
-                 fresh_noise=False):
+                 fresh_noise=False, answer_spans=False):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -49,6 +91,7 @@ class ViT5VQADataCollator:
         self.related = bool(related)
         self.twc_labels = bool(twc_labels)
         self.fresh_noise = bool(fresh_noise)
+        self.answer_spans = bool(answer_spans)
         self.related_mode = str(related_mode)
         if self.related_mode not in ("augment", "correct"):
             raise ValueError("related_mode must be augment|correct.")
@@ -262,6 +305,12 @@ class ViT5VQADataCollator:
         # Unlabelled inference batches do not create an all-ignored decoder loss.
         answers = [sample.get("answer") for sample in batch]
         if all(answer is not None and str(answer).strip() for answer in answers):
+            if self.answer_spans:
+                spans = torch.full((len(batch), word_count), -1, dtype=torch.long)
+                for row, (item, answer) in enumerate(zip(info, answers)):
+                    if not item["placeholder"]:
+                        spans[row, : len(item["texts"])] = torch.tensor(answer_spans(item["texts"], answer))
+                result["answer_span"] = spans
             labels = self.tokenizer(
                 answers,
                 padding="max_length",

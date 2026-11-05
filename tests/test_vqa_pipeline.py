@@ -146,7 +146,8 @@ def offline_backbones(monkeypatch):
         QACLIPEncoder,
         "from_pretrained",
         lambda *a, **k: QACLIPEncoder(
-            copy.deepcopy(vision_config), integration_point=k.get("integration_point")
+            copy.deepcopy(vision_config), integration_point=k.get("integration_point"),
+            gated_joint=k.get("gated_joint"),
         ),
     )
 
@@ -1416,3 +1417,125 @@ def test_twc_siglip_text_labels_and_text_only(make_model, tokenizer, samples, mo
     for flag in ("--twc_siglip", "--twc_text_only", "--twc_text_labels", "--consformer_gate",
                  "--consformer_tree_transformer", "--twc_two_views"):
         assert arguments[arguments.index(flag) + 1] == "true"
+
+
+def test_answer_spans_mark_runs_of_the_answer():
+    from data.collator import answer_spans
+    texts = ["phở", "hà", "nội", "giá", "của", "50.000đ"]
+    assert answer_spans(texts, "Phở Hà Nội") == [0, 0, 0, -1, -1, -1]
+    assert answer_spans(texts, "của") == [-1, -1, -1, -1, 0, -1]  # the whole answer
+    assert answer_spans(texts, "nhà của bạn") == [-1] * 6  # a lone common syllable of a longer answer
+    # "giá" alone is one word of a two-word answer ("của" breaks the run); the number stands alone.
+    assert answer_spans(texts, "giá 50.000đ") == [-1, -1, -1, -1, -1, 0]
+    assert answer_spans(["cà phê sữa", "đá"], "cà phê sữa đá") == [0, 0]  # multi-word OCR texts
+    assert answer_spans(["2024", "x"], "năm 2024") == [0, -1]  # a number on its own
+    assert answer_spans([], "a b") == [] and answer_spans(["a"], "") == [-1]
+
+
+def test_qavit_grounding_trains_the_adapter_through_the_relevance(make_model, tokenizer, samples):
+    with pytest.raises(ValueError, match="qavit_ground"):
+        make_model(ablation_use_qaclip=True, qavit_ground=True)
+    model = make_model(ablation_use_qaclip=True, qavit_gated_joint=True, qavit_ground=True)
+    assert all(m.self_attn.gated_joint for m in model.qa_clip.vision_model.encoder.layers[1:])
+    batch = build_collator(model, tokenizer, training=True)(samples)
+    assert "answer_span" not in build_collator(model, tokenizer)(samples)  # evaluation: no answer spans
+    words = [item["texts"] for item in batch["ocr_info"]]
+    assert words[0] == ["cà phê", "123", "sữa"]
+    assert batch["answer_span"][:, :3].tolist() == [[0, -1, -1], [0, -1, -1]]
+    model.train()
+    outputs = model(**batch)
+    # "cà phê" = [0, 0, 16, 8] in a 40 x 32 image: the top-left patch of the 2 x 2 grid.
+    assert float(outputs["ground_area"]) == 0.25 and 0 < float(outputs["ground_mass"]) < 1
+    assert torch.isfinite(outputs["ground_loss"])
+    outputs["ground_loss"].backward()
+    layer = model.qa_clip.vision_model.encoder.layers[-1]
+    assert layer.instruct_dim_reduce[1].weight.grad.abs().sum() > 0
+    gate = layer.self_attn.instruction_proj_gate.grad
+    assert gate is None or gate.abs().sum() == 0  # a layer's relevance does not depend on its own gate
+    model.eval()
+    with torch.no_grad():
+        model.generate(**{k: v for k, v in batch.items() if k != "labels"})
+
+
+def test_trainer_adds_the_auxiliary_losses(make_model, tokenizer, samples, tmp_path):
+    model = make_model(ablation_use_qaclip=True, qavit_gated_joint=True, qavit_ground=True,
+                       qavit_ground_weight=0.5, ablation_use_ocr=True, consformer_constituent="tree",
+                       consformer_residual=True, consformer_gate=True, consformer_span=True,
+                       consformer_span_weight=0.25)
+    trainer = VQATrainer(model=model, args=Seq2SeqTrainingArguments(output_dir=str(tmp_path), report_to=[]),
+                         tokenizer=tokenizer)
+    batch = build_collator(model, tokenizer, training=True)(samples)
+    model.train()
+    loss, outputs = trainer.compute_loss(model, batch, return_outputs=True)
+    expected = outputs["loss"] + 0.5 * outputs["ground_loss"] + 0.25 * outputs["span_loss"]
+    torch.testing.assert_close(loss, expected)
+    assert {"ground_loss", "span_loss", "span_acc"} <= set(trainer._twc_sum)
+
+
+def test_consformer_span_geometry_and_word_links(make_model, tokenizer, samples):
+    common = dict(ablation_use_ocr=True, consformer_constituent="tree", consformer_residual=True,
+                  consformer_gate=True)
+    gated = make_model(**common)
+    model = make_model(**common, consformer_span=True, consformer_geometry=True, consformer_word_link=True)
+    extra = set(model.state_dict()) - set(gated.state_dict())
+    assert extra and all(k.startswith("ocr_encoder.link_geometry.") for k in extra)
+    assert all(torch.equal(v, model.state_dict()[k]) for k, v in gated.state_dict().items())
+    batch = build_collator(model, tokenizer, training=True)(samples)
+    ids, mask, word_map = batch["ocr_input_ids"], batch["ocr_attention_mask"], batch["ocr_to_word_map"]
+    assert word_map[0, :4].tolist() == [0, 0, 1, 2]  # cà phê | 123 | sữa
+    inputs = model._link_inputs(batch["ocr_info"], word_map, mask)
+    assert inputs["same_word"][0, :3].tolist() == [True, False, False]
+    assert inputs["link_features"].shape == (2, ids.shape[1] - 1, 4)
+    with torch.no_grad():
+        geometry, breaks = model.ocr_encoder(ids, mask, **inputs)
+        plain, plain_breaks = model.ocr_encoder(ids, mask, same_word=inputs["same_word"],
+                                                link_features=torch.zeros_like(inputs["link_features"]))
+    torch.testing.assert_close(geometry, plain)  # the geometry bias starts at 0
+    links = breaks.diagonal(offset=1, dim1=-2, dim2=-1)  # [B, layers, h, L-1]
+    assert torch.all(links[0, :, :, 0] == 1)  # the two pieces of "cà phê" are always linked
+    model.train()
+    outputs = model(**batch)
+    assert torch.isfinite(outputs["span_loss"]) and 0 <= float(outputs["span_acc"]) <= 1
+    outputs["span_loss"].backward()
+    assert model.ocr_encoder.layers[-1].group_attn.linear_key.weight.grad.abs().sum() > 0
+    assert model.ocr_encoder.link_geometry[-1].weight.grad.abs().sum() > 0
+    # Edge "phê" | "123": the answer span ends there, so that link is pushed towards 0.
+    with pytest.raises(ValueError):
+        make_model(ablation_use_ocr=False, consformer_span=True)
+
+
+def test_ocr_visual_pool_starts_as_the_run_without_it(make_model, tokenizer, samples):
+    base = make_model()
+    model = make_model(ocr_visual_pool=True)
+    extra = set(model.state_dict()) - set(base.state_dict())
+    assert extra == {"ocr_visual_norm.weight", "ocr_visual_norm.bias", "ocr_visual_proj.weight", "ocr_visual_proj.bias"}
+    assert all(torch.equal(v, model.state_dict()[k]) for k, v in base.state_dict().items())
+    batch = build_collator(model, tokenizer)(samples)
+    base.eval(), model.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(model(**batch)["logits"], base(**batch)["logits"])
+    boxes = torch.tensor([[[0.0, 0.0, 0.5, 0.5], [0.25, 0.0, 0.75, 0.5], [0.0, 0.0, 0.0, 0.0]]])
+    overlap = model._patch_overlap(boxes, 2)
+    torch.testing.assert_close(overlap[0], torch.tensor([[1.0, 0, 0, 0], [0.5, 0.5, 0, 0], [0, 0, 0, 0]]))
+    model.train()
+    model(**batch)["loss"].backward()
+    assert model.ocr_visual_proj.weight.grad.abs().sum() > 0
+    with pytest.raises(ValueError):
+        make_model(ablation_use_image=False, ocr_visual_pool=True)
+
+
+def test_new_switches_reach_the_config(monkeypatch):
+    from run_pipeline import training_arguments
+    env = {"QAVIT_GATED_JOINT": "true", "QAVIT_GROUND": "true", "QAVIT_GROUND_WEIGHT": "0.2",
+           "CONSFORMER_SPAN": "true", "CONSFORMER_SPAN_WEIGHT": "0.3", "CONSFORMER_GEOMETRY": "true",
+           "CONSFORMER_WORD_LINK": "true", "OCR_VISUAL_POOL": "true"}
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
+    model_args, _, _ = parse_args_with_yaml_and_cli(parser, training_arguments())
+    assert model_args.qavit_gated_joint and model_args.qavit_ground and model_args.consformer_span
+    assert model_args.consformer_geometry and model_args.consformer_word_link and model_args.ocr_visual_pool
+    assert (model_args.qavit_ground_weight, model_args.consformer_span_weight) == (0.2, 0.3)
+    config = OpenViVQAConfig()
+    assert not (config.qavit_gated_joint or config.qavit_ground or config.consformer_span
+                or config.consformer_geometry or config.consformer_word_link or config.ocr_visual_pool)
