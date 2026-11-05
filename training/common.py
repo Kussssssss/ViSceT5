@@ -134,4 +134,5 @@ def build_collator(model, tokenizer, corrector=None, training=False):
         twc_labels=training and config.use_twc and config.twc_contrastive,
         fresh_noise=config.twc_two_views,
         related_mode="augment" if training or eval_related == "none" else eval_related,
+        answer_spans=training and (config.qavit_ground or config.consformer_span),
     )

@@ -26,6 +26,15 @@ ViConsFormer's: one constituent tree per layer shared by all heads (Linear(d_mod
 / d_model), and sinusoidal positions added to the ConsFormer input, so the order of the tokens inside
 a constituent is known. ViConsFormer splits the group attention into heads (a tree per d_k slice,
 one Linear(d_k, d_k) shared by every head) and defines but never adds the positions.
+
+Scene text is not a sentence: two OCR words are adjacent in the sequence because of the reading
+order, not because they belong together. Two inputs make the links see the layout:
+same_word [B, L-1]: tokens k, k+1 are pieces of one OCR word -> a[k, k+1] = 1 in every layer (the OCR
+  engine already gives the word as one unit; the subword split of the tokenizer is not a boundary).
+link_features [B, L-1, 4] with geometry=True: (horizontal gap, vertical offset, log height ratio,
+  same word) of the two boxes; a small MLP turns them into a bias of the neighbour score of k -> k+1
+  and k+1 -> k per layer and tree, added before the softmax over the two neighbours (as a relative
+  position bias). Its last layer starts at 0, so the links start as without geometry.
 """
 
 import math
@@ -123,7 +132,9 @@ class GroupAttention(nn.Module):
         self.linear_query = nn.Linear(self.d_k, self.d_k)
         self.norm = nn.LayerNorm(d_model)
 
-    def forward(self, context, nb_mask, prior):
+    def forward(self, context, nb_mask, prior, link_bias=None, same_word=None):
+        """link_bias [B, h, L-1]: added to the scores of k -> k+1 and k+1 -> k; same_word [B, L-1]:
+        those links are 1."""
         B, L = context.size()[:2]
         device = context.device
         dtype_in = context.dtype
@@ -131,6 +142,9 @@ class GroupAttention(nn.Module):
         q = self.linear_query(ctx).to(torch.float32)
         k = self.linear_key  (ctx).to(torch.float32)
         scores = torch.matmul(q, k.transpose(-2, -1)) / self.scale
+        if link_bias is not None:
+            link_bias = link_bias.float()
+            scores = scores + torch.diag_embed(link_bias, offset=1) + torch.diag_embed(link_bias, offset=-1)
         scores = scores.masked_fill(~nb_mask[:, None, :, :], -1e4)
         neibor_attn = F.softmax(scores, dim=-1)
         neibor_attn = torch.sqrt(neibor_attn * neibor_attn.transpose(-2, -1) + 1e-4)
@@ -139,6 +153,10 @@ class GroupAttention(nn.Module):
         else:
             prior_f = torch.tensor(float(prior), device=device, dtype=torch.float32)
         neibor_attn = prior_f + (1.0 - prior_f) * neibor_attn
+        if same_word is not None:
+            linked = same_word.float()
+            linked = (torch.diag_embed(linked, offset=1) + torch.diag_embed(linked, offset=-1)) > 0
+            neibor_attn = neibor_attn.masked_fill(linked[:, None], 1.0)
         if self.constituent == "tree":
             return constituent_prior(neibor_attn).to(dtype_in), neibor_attn.to(dtype_in)
         tri = torch.triu(torch.ones(L, L, device=device, dtype=torch.bool), diagonal=0).unsqueeze(0).unsqueeze(0)
@@ -179,8 +197,8 @@ class OCREncoderLayer(nn.Module):
         self.feed_forward = PositionwiseFeedForward(d_model, d_ff)
         self.sublayer     = clones(SublayerConnection(d_model, dropout), 2)
 
-    def forward(self, x, mask_1d, nb_mask_2d, group_prob):
-        group_prob, break_prob = self.group_attn(x, nb_mask_2d, group_prob)
+    def forward(self, x, mask_1d, nb_mask_2d, group_prob, link_bias=None, same_word=None):
+        group_prob, break_prob = self.group_attn(x, nb_mask_2d, group_prob, link_bias, same_word)
         x = self.sublayer[0](x, lambda t: self.self_attn(t, t, t, group_prob, mask_1d))
         return self.sublayer[1](x, self.feed_forward), group_prob, break_prob
 
@@ -188,7 +206,7 @@ class OCREncoderLayer(nn.Module):
 class OCREncoder(nn.Module):
     def __init__(self, head, d_model, d_kv, d_ff, word_embed=None, num_layers: int = 3,
                  constituent: str = "tree", residual: bool = False, gate: bool = False,
-                 tree_transformer: bool = False):
+                 tree_transformer: bool = False, geometry: bool = False):
         super().__init__()
         if constituent not in ("tree", "legacy"):
             raise ValueError("constituent must be tree|legacy.")
@@ -209,12 +227,22 @@ class OCREncoder(nn.Module):
         self.positions = bool(tree_transformer)
         if gate:
             self.consformer_gate = nn.Parameter(torch.zeros(d_model))
+        if geometry:
+            # Built after the layers and on a forked RNG, so every other module starts exactly as
+            # without geometry.
+            self.trees = 1 if tree_transformer else head
+            with torch.random.fork_rng(devices=[]):
+                self.link_geometry = nn.Sequential(nn.Linear(4, 32), nn.GELU(), nn.Linear(32, num_layers * self.trees))
+            nn.init.zeros_(self.link_geometry[-1].weight)
+            nn.init.zeros_(self.link_geometry[-1].bias)
 
     def set_word_embed_proxy(self, proxy_callable):
         self._word_embed_proxy = proxy_callable
 
-    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor, embeddings=None):
-        """embeddings: the token embeddings of inputs, computed by the caller (e.g. detached)."""
+    def forward(self, inputs: torch.LongTensor, mask_1d: torch.LongTensor, embeddings=None,
+                link_features=None, same_word=None):
+        """embeddings: the token embeddings of inputs, computed by the caller (e.g. detached).
+        link_features [B, L-1, 4] (used with geometry), same_word [B, L-1]: see the module docstring."""
         if embeddings is not None:
             x = embeddings
         elif self._word_embed_proxy is not None:
@@ -228,10 +256,17 @@ class OCREncoder(nn.Module):
         if self.positions:
             x = x + sinusoid_positions(x.shape[1], self.d_model, x.device, x.dtype)
         nb_mask_2d = build_neighbor_mask(mask_1d)
+        biases = [None] * len(self.layers)
+        if hasattr(self, "link_geometry"):
+            if link_features is None:
+                raise ValueError("ConsFormer geometry needs link_features.")
+            bias = self.link_geometry(link_features.float())  # [B, L-1, layers * trees]
+            bias = bias.view(*bias.shape[:2], len(self.layers), self.trees).permute(2, 0, 3, 1)
+            biases = list(bias)  # each [B, trees, L-1]
         break_probs = []
         group_prob = 0.0
-        for layer in self.layers:
-            x, group_prob, break_prob = layer(x, mask_1d, nb_mask_2d, group_prob)
+        for layer, bias in zip(self.layers, biases):
+            x, group_prob, break_prob = layer(x, mask_1d, nb_mask_2d, group_prob, bias, same_word)
             break_probs.append(break_prob)
         x = self.norm(x)
         if hasattr(self, "consformer_gate"):

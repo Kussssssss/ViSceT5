@@ -28,7 +28,9 @@ ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use
                       "twc_weight", "twc_adv_probability", "twc_temperature_init", "ocr_feature_norm",
                       "ocr_full_features", "twc_eval_related", "consformer_constituent",
                       "consformer_residual", "twc_two_views", "twc_contrastive", "consformer_gate",
-                      "consformer_tree_transformer", "twc_siglip", "twc_text_only", "twc_text_labels")
+                      "consformer_tree_transformer", "twc_siglip", "twc_text_only", "twc_text_labels",
+                      "qavit_gated_joint", "qavit_ground", "qavit_ground_weight", "consformer_span",
+                      "consformer_span_weight", "consformer_geometry", "consformer_word_link", "ocr_visual_pool")
 
 
 def main(args_list=None):

@@ -297,3 +297,57 @@ def test_without_instruction_matches_clip(vision_config, tmp_path):
     )
     assert outputs.attentions[-1].shape == (2, 4, 5, 5)
     assert isinstance(model(pixel_values=pixels, return_dict=False), tuple)
+
+
+def test_gated_joint_is_clip_at_zero_and_the_paper_attention_at_one(vision_config, inputs, tmp_path):
+    import math
+    from transformers.models.clip.modeling_clip import CLIPAttention
+
+    backbone = CLIPVisionModel(vision_config).eval()
+    backbone.save_pretrained(tmp_path)
+    model = QACLIPEncoder.from_pretrained(
+        tmp_path, instruction_dim=24, gated_joint=True, freeze_clip=True, local_files_only=True,
+        attn_implementation="eager",
+    ).eval()
+    pixels = inputs["pixel_values"]
+    question = {"text_emb": inputs["text_emb"], "text_mask": inputs["text_mask"]}
+    # beta = 0: bit-identical to the frozen CLIP, whatever the question.
+    torch.testing.assert_close(model(pixel_values=pixels, **question).last_hidden_state,
+                               backbone(pixel_values=pixels).last_hidden_state, rtol=0, atol=0)
+    layer = model.vision_model.encoder.layers[-1]
+    attention = layer.self_attn
+    assert not attention.instruction_out_proj.bias.requires_grad  # W' acts on a context difference
+    visual = torch.randn(2, 5, 32)
+    states = torch.randn(2, 3, 32)
+    mask = inputs["text_mask"]
+    with torch.no_grad():
+        base = CLIPAttention.forward(attention, hidden_states=visual)[0]
+        torch.testing.assert_close(attention(visual, kv_states=states, kv_masks=mask)[0], base, rtol=0, atol=0)
+        attention.gated_joint = False  # upstream QA-ViT at beta = 0 = out_proj(joint softmax over [visual, question])
+        paper, joint = attention(visual, kv_states=states, kv_masks=mask, output_attentions=True)
+        attention.gated_joint = True
+        attention.instruction_proj_gate.fill_(math.atanh(0.5))
+        mixed, _, relevance = attention(visual, kv_states=states, kv_masks=mask, output_relevance=True)
+    # out = CLIP + tanh(beta) (paper - CLIP): tanh(beta) = 1 is exactly the paper's attention.
+    torch.testing.assert_close(mixed, base + 0.5 * (paper - base), rtol=1e-5, atol=1e-6)
+    # The relevance logit is logit of the question share of the joint softmax.
+    torch.testing.assert_close(torch.sigmoid(relevance), joint[..., 5:].sum(dim=-1), rtol=1e-5, atol=1e-6)
+    # Padded question tokens change nothing.
+    noisy = states.clone()
+    noisy[mask == 0] = torch.randn_like(noisy[mask == 0]) * 100
+    with torch.no_grad():
+        torch.testing.assert_close(attention(visual, kv_states=noisy, kv_masks=mask)[0], mixed, rtol=0, atol=0)
+        attention.instruction_proj_gate.zero_()
+    # At beta = 0 the answer loss reaches the gate only; the relevance reaches the adapter directly.
+    model.train()
+    outputs, relevances = model(pixel_values=pixels, **question, output_relevance=True)
+    assert len(relevances) == 2 and relevances[0].shape == (2, 4, 5)
+    (outputs.last_hidden_state * torch.randn_like(outputs.last_hidden_state)).sum().backward(retain_graph=True)
+    assert attention.instruction_proj_gate.grad.abs().sum() > 0
+    assert layer.instruct_dim_reduce[1].weight.grad is None or layer.instruct_dim_reduce[1].weight.grad.abs().sum() == 0
+    model.zero_grad()
+    relevances[-1].sum().backward()
+    assert layer.instruct_dim_reduce[1].weight.grad.abs().sum() > 0
+    assert attention.instruction_proj_gate.grad is None or attention.instruction_proj_gate.grad.abs().sum() == 0
+    with pytest.raises(ValueError, match="needs gated_joint"):
+        QACLIPEncoder(vision_config, instruction_dim=24)(pixel_values=pixels, **question, output_relevance=True)

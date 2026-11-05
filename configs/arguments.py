@@ -74,6 +74,26 @@ class ModelArguments:
     twc_text_labels: bool = field(
         default=False, metadata={"help": "TWC pairs of equal texts are ignored instead of negatives."}
     )
+    qavit_gated_joint: bool = field(
+        default=False, metadata={"help": "QA-ViT = CLIP attention + tanh(beta)(joint-softmax context - CLIP context): beta 0 = plain CLIP."}
+    )
+    qavit_ground: bool = field(
+        default=False, metadata={"help": "Training loss: the question share of the patch attention on the answer's OCR boxes."}
+    )
+    qavit_ground_weight: float = field(default=0.1, metadata={"help": "Weight of the QA-ViT grounding loss."})
+    consformer_span: bool = field(
+        default=False, metadata={"help": "Training loss: each answer span of the OCR is one ConsFormer constituent."}
+    )
+    consformer_span_weight: float = field(default=0.1, metadata={"help": "Weight of the answer-span loss."})
+    consformer_geometry: bool = field(
+        default=False, metadata={"help": "ConsFormer links get a zero-initialised bias from the box layout of the two words."}
+    )
+    consformer_word_link: bool = field(
+        default=False, metadata={"help": "Pieces of one OCR word are always linked in ConsFormer (a = 1)."}
+    )
+    ocr_visual_pool: bool = field(
+        default=False, metadata={"help": "OCR token += W LN(mean CLIP patch feature under its box), W = 0 at the start."}
+    )
 
 
 @dataclass

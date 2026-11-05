@@ -21,6 +21,14 @@ consformer_tree_transformer: false   # group attention như Tree Transformer: 1 
 twc_siglip: false               # TWC như SigLIP: logit = t·cos + b, BCE cộng theo hàng, trung bình theo hàng
 twc_text_only: false            # TWC trên đặc trưng chữ (không box/det/rec), anchor = từ bị đổi
 twc_text_labels: false          # cặp có cùng chuỗi chữ không làm cặp âm (bỏ qua)
+qavit_gated_joint: false        # QA-ViT = CLIP + tanh(β)·(context joint-softmax − context CLIP); β = 0 = CLIP thường
+qavit_ground: false             # loss: phần attention câu hỏi của patch rơi vào box OCR của đáp án
+qavit_ground_weight: 0.1
+consformer_span: false          # loss: mỗi span đáp án trong OCR là một constituent của ConsFormer
+consformer_span_weight: 0.1
+consformer_geometry: false      # link ConsFormer thấy bố cục box (bias khởi tạo 0)
+consformer_word_link: false     # các mảnh subword của một từ OCR luôn nối (a = 1)
+ocr_visual_pool: false          # token OCR += W·LN(đặc trưng patch CLIP dưới box), W = 0 lúc đầu
 twc_two_views: true          # train: hai lượt encoder [gốc] và [related], loss trả lời trên cả hai, TWC giữa hai lượt; eval chỉ có [gốc]
 
 output_dir: "./output/finetune"
