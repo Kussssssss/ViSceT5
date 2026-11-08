@@ -31,6 +31,9 @@ consformer_word_link: false     # các mảnh subword của một từ OCR luôn
 dove_contrastive: false         # loss NT-Xent giữa khối OCR của hai lượt DOVE (gốc / related), τ cố định
 dove_contrastive_weight: 0.1
 dove_temperature: 0.1
+dove_adv: none                  # lượt DOVE thứ ba có nhiễu adversarial: none | fgsm (Surgical-VQLA++) | pgd (ATS)
+dove_adv_eps: 0.05              # độ lớn nhiễu so với chuẩn của token bị nhiễu (hai paper không công bố)
+dove_adv_steps: 2               # số điểm PGD K (pgd)
 ocr_visual_pool: false          # token OCR += W·LN(đặc trưng patch CLIP dưới box), W = 0 lúc đầu
 twc_two_views: true          # train: hai lượt encoder [gốc] và [related], loss trả lời trên cả hai, TWC giữa hai lượt; eval chỉ có [gốc]
 

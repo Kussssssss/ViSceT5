@@ -1,6 +1,7 @@
 """Weight check of the training losses: gradient of each weighted term per parameter group.
 
-The total loss is 0.5 (L_orig + L_rel) + w_g L_ground + w_s L_span + w_c L_ctr (trainer.compute_loss).
+The total loss is 0.5 (L_orig + L_rel) + w_g L_ground + w_s L_span + w_c L_ctr (+ w_a L_adv-reg, with the
+answer loss then the mean over three views) as in trainer.compute_loss.
 What a weight decides is not the loss value but the gradient on the parameters that the answer
 loss also trains: AdamW rescales every parameter on its own, so on a parameter that only an
 auxiliary loss reaches (dove_projection, the QA-ViT adapter behind a closed gate) the weight has
@@ -53,7 +54,7 @@ def main():
     model_args, data_args, training_args = parse_args_with_yaml_and_cli(parser, training_arguments())
     set_seed(training_args.seed)
     checkpoint = os.environ.get("CKPT") or None
-    flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS}
+    flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS if getattr(model_args, name) is not None}
     model, tokenizer = load_model_and_tokenizer(checkpoint, overrides=flags)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device).train()
@@ -67,7 +68,8 @@ def main():
     smoother = LabelSmoother(epsilon=training_args.label_smoothing_factor) \
         if training_args.label_smoothing_factor > 0 else None
     weights = {"ground_loss": config.qavit_ground_weight, "span_loss": config.consformer_span_weight,
-               "dove_loss": config.dove_contrastive_weight, "twc_loss": config.twc_weight}
+               "dove_loss": config.dove_contrastive_weight, "twc_loss": config.twc_weight,
+               "adv_reg": config.dove_adv_weight}
     params = [(name, p) for name, p in model.named_parameters() if p.requires_grad]
     groups = sorted({group_of(name) for name, _ in params})
     print("checkpoint:", checkpoint or "initial model", "| batch", training_args.per_device_train_batch_size,
@@ -84,7 +86,13 @@ def main():
         answer = smoother(outputs, labels) if smoother else outputs["loss"]
         if "view_logits" in outputs:
             view = smoother({"logits": outputs["view_logits"]}, labels) if smoother else outputs["view_loss"]
-            answer = 0.5 * (answer + view)
+            if "adv_logits" in outputs:  # as trainer.compute_loss: mean over the three views
+                adv = torch.stack([smoother({"logits": x}, labels) if smoother else torch.nn.functional.cross_entropy(
+                    x.reshape(-1, x.shape[-1]).float(), labels.reshape(-1), ignore_index=-100)
+                    for x in outputs["adv_logits"]]).mean()
+                answer = (answer + view + adv) / 3
+            else:
+                answer = 0.5 * (answer + view)
         terms = {"answer": answer}
         terms.update({key: weights[key] * outputs[key] for key in weights if key in outputs})
         answer_grads, summed = None, None

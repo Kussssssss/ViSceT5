@@ -31,7 +31,8 @@ ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use
                       "consformer_tree_transformer", "twc_siglip", "twc_text_only", "twc_text_labels",
                       "qavit_gated_joint", "qavit_ground", "qavit_ground_weight", "consformer_span",
                       "consformer_span_weight", "consformer_geometry", "consformer_word_link", "ocr_visual_pool",
-                      "dove_contrastive", "dove_contrastive_weight", "dove_temperature")
+                      "dove_contrastive", "dove_contrastive_weight", "dove_temperature",
+                      "dove_adv", "dove_adv_eps", "dove_adv_steps", "dove_adv_weight")
 
 
 def main(args_list=None):
@@ -89,7 +90,8 @@ def main(args_list=None):
         except Exception as error:
             print(f"[HF] resume skipped ({type(error).__name__}: {error})")
 
-    flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS}
+    # None = the config default (e.g. dove_adv_weight per recipe); never overwrite a resumed config with None.
+    flags = {name: getattr(model_args, name) for name in ARCHITECTURE_FLAGS if getattr(model_args, name) is not None}
     checkpoint = model_args.model_name_or_path or training_args.resume_from_checkpoint
     model, tokenizer = load_model_and_tokenizer(checkpoint, overrides=flags)
     if training_args.should_log:

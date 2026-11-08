@@ -96,6 +96,10 @@ class ModelArguments:
     )
     dove_contrastive_weight: float = field(default=0.1, metadata={"help": "Weight of the DOVE contrastive loss."})
     dove_temperature: float = field(default=0.1, metadata={"help": "Fixed temperature of the DOVE contrastive loss."})
+    dove_adv: str = field(default="none", metadata={"help": "Adversarial third DOVE view: none | fgsm (Surgical-VQLA++) | pgd (ATS)."})
+    dove_adv_eps: float = field(default=0.05, metadata={"help": "Perturbation size relative to the norm of the perturbed tokens."})
+    dove_adv_steps: int = field(default=2, metadata={"help": "PGD ascent points K (pgd)."})
+    dove_adv_weight: Optional[float] = field(default=None, metadata={"help": "Regulariser weight (default: 1 fgsm, 1.5 pgd)."})
     ocr_visual_pool: bool = field(
         default=False, metadata={"help": "OCR token += W LN(mean CLIP patch feature under its box), W = 0 at the start."}
     )

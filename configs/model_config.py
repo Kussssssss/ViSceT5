@@ -66,6 +66,10 @@ class OpenViVQAConfig(PretrainedConfig):
         dove_contrastive: Optional[bool] = None,
         dove_contrastive_weight: Optional[float] = None,
         dove_temperature: Optional[float] = None,
+        dove_adv: Optional[str] = None,
+        dove_adv_eps: Optional[float] = None,
+        dove_adv_steps: Optional[int] = None,
+        dove_adv_weight: Optional[float] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -219,6 +223,18 @@ class OpenViVQAConfig(PretrainedConfig):
         self.dove_temperature = float(dove_temperature) if dove_temperature is not None else 0.1
         if self.dove_temperature <= 0:
             raise ValueError("dove_temperature must be positive.")
+        # dove_adv: third DOVE view = clean input + adversarial perturbation. fgsm = Surgical-VQLA++
+        # (sign step on question/image/OCR embeddings, NT-Xent clean/adversarial, weight 1);
+        # pgd = ATS/AOE (K steps on the OCR block, symmetric KL, weight 1.5). eps relative to the norm.
+        self.dove_adv = str(dove_adv or "none").lower()
+        if self.dove_adv not in ("none", "fgsm", "pgd"):
+            raise ValueError("dove_adv must be none, fgsm or pgd.")
+        self.dove_adv_eps = float(dove_adv_eps) if dove_adv_eps is not None else 0.05
+        self.dove_adv_steps = int(dove_adv_steps) if dove_adv_steps is not None else 2
+        self.dove_adv_weight = (float(dove_adv_weight) if dove_adv_weight is not None
+                                else {"fgsm": 1.0, "pgd": 1.5}.get(self.dove_adv, 0.0))
+        if self.dove_adv_eps < 0 or self.dove_adv_steps < 1 or self.dove_adv_weight < 0:
+            raise ValueError("dove_adv_eps >= 0, dove_adv_steps >= 1 and dove_adv_weight >= 0 are required.")
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
