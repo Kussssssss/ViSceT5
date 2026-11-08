@@ -91,6 +91,11 @@ class ModelArguments:
     consformer_word_link: bool = field(
         default=False, metadata={"help": "Pieces of one OCR word are always linked in ConsFormer (a = 1)."}
     )
+    dove_contrastive: bool = field(
+        default=False, metadata={"help": "NT-Xent between the OCR blocks of the original and related DOVE views."}
+    )
+    dove_contrastive_weight: float = field(default=0.1, metadata={"help": "Weight of the DOVE contrastive loss."})
+    dove_temperature: float = field(default=0.1, metadata={"help": "Fixed temperature of the DOVE contrastive loss."})
     ocr_visual_pool: bool = field(
         default=False, metadata={"help": "OCR token += W LN(mean CLIP patch feature under its box), W = 0 at the start."}
     )

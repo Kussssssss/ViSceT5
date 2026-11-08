@@ -28,6 +28,9 @@ consformer_span: false          # loss: mỗi span đáp án trong OCR là một
 consformer_span_weight: 0.1
 consformer_geometry: false      # link ConsFormer thấy bố cục box (bias khởi tạo 0)
 consformer_word_link: false     # các mảnh subword của một từ OCR luôn nối (a = 1)
+dove_contrastive: false         # loss NT-Xent giữa khối OCR của hai lượt DOVE (gốc / related), τ cố định
+dove_contrastive_weight: 0.1
+dove_temperature: 0.1
 ocr_visual_pool: false          # token OCR += W·LN(đặc trưng patch CLIP dưới box), W = 0 lúc đầu
 twc_two_views: true          # train: hai lượt encoder [gốc] và [related], loss trả lời trên cả hai, TWC giữa hai lượt; eval chỉ có [gốc]
 

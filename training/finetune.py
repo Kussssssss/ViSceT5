@@ -30,7 +30,8 @@ ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use
                       "consformer_residual", "twc_two_views", "twc_contrastive", "consformer_gate",
                       "consformer_tree_transformer", "twc_siglip", "twc_text_only", "twc_text_labels",
                       "qavit_gated_joint", "qavit_ground", "qavit_ground_weight", "consformer_span",
-                      "consformer_span_weight", "consformer_geometry", "consformer_word_link", "ocr_visual_pool")
+                      "consformer_span_weight", "consformer_geometry", "consformer_word_link", "ocr_visual_pool",
+                      "dove_contrastive", "dove_contrastive_weight", "dove_temperature")
 
 
 def main(args_list=None):

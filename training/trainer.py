@@ -16,9 +16,9 @@ except ImportError:
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "ocr_visual_norm",
-               "ocr_visual_proj")
+               "ocr_visual_proj", "dove_projection")
 AUXILIARY = ("twc_loss", "twc_acc", "view_loss", "twc_pos_logit", "twc_neg_logit", "ground_loss",
-             "ground_mass", "ground_area", "span_loss", "span_acc")
+             "ground_mass", "ground_area", "span_loss", "span_acc", "dove_loss", "dove_acc", "dove_pos_cos", "dove_neg_cos")
 SCALARS = ("twc_logit_scale", "instruction_proj_gate", "twc_bias", "consformer_gate")
 
 
@@ -119,7 +119,10 @@ class VQATrainer(Seq2SeqTrainer):
             loss = loss + config.qavit_ground_weight * outputs["ground_loss"]
         if "span_loss" in outputs:
             loss = loss + config.consformer_span_weight * outputs["span_loss"]
-        if model.training and any(key in outputs for key in ("twc_loss", "view_loss", "ground_loss", "span_loss")):
+        if "dove_loss" in outputs:
+            loss = loss + config.dove_contrastive_weight * outputs["dove_loss"]
+        if model.training and any(key in outputs for key in ("twc_loss", "view_loss", "ground_loss", "span_loss",
+                                                             "dove_loss")):
             for key in AUXILIARY:
                 if key in outputs:
                     self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())

@@ -135,4 +135,5 @@ def build_collator(model, tokenizer, corrector=None, training=False):
         fresh_noise=config.twc_two_views,
         related_mode="augment" if training or eval_related == "none" else eval_related,
         answer_spans=training and (config.qavit_ground or config.consformer_span),
+        image_groups=training and config.dove_contrastive,
     )

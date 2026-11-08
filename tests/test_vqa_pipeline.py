@@ -1539,3 +1539,52 @@ def test_new_switches_reach_the_config(monkeypatch):
     config = OpenViVQAConfig()
     assert not (config.qavit_gated_joint or config.qavit_ground or config.consformer_span
                 or config.consformer_geometry or config.consformer_word_link or config.ocr_visual_pool)
+
+
+def test_dove_contrastive_adds_only_the_nt_xent(make_model, tokenizer, samples, corrector, tmp_path):
+    dove = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False)
+    model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False, dove_contrastive=True)
+    extra = set(model.state_dict()) - set(dove.state_dict())
+    assert extra and all(key.startswith("dove_projection.") for key in extra)
+    assert all(torch.equal(value, model.state_dict()[key]) for key, value in dove.state_dict().items())
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    batch = collator(samples)
+    assert batch["image_group"].shape == (len(samples),)
+    assert "image_group" not in build_collator(model, tokenizer, corrector)(samples)
+    args = CustomTrainingArguments(output_dir=str(tmp_path), max_steps=1, per_device_train_batch_size=2,
+                                   logging_steps=1, remove_unused_columns=False, report_to="none",
+                                   save_strategy="no", use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer, train_dataset=ViT5VQADataset(pd.DataFrame(samples)),
+                         data_collator=collator)
+    model.eval(), dove.eval()
+    with torch.no_grad():
+        outputs = model(**batch)
+        reference = dove(**{key: value for key, value in batch.items() if key != "image_group"})
+        torch.testing.assert_close(outputs["logits"], reference["logits"])  # the answer path is untouched
+        if "dove_loss" in outputs:
+            expected = 0.5 * (outputs["loss"] + outputs["view_loss"]) + 0.1 * outputs["dove_loss"]
+            torch.testing.assert_close(trainer.compute_loss(model, batch), expected)
+    # Identical views of distinct images: each vector finds its other view; same-image pairs are no negatives.
+    tokens = torch.randn(3, 4, model.d_model)
+    mask = torch.ones(3, 4, dtype=torch.long)
+    keep = torch.tensor([True, True, True])
+    loss, stats = model._dove_contrastive(tokens, mask, tokens.clone(), mask, torch.tensor([0, 1, 2]), keep)
+    assert stats["dove_acc"] == 1.0 and abs(stats["dove_pos_cos"] - 1) < 1e-5 and torch.isfinite(loss)
+    alone, _ = model._dove_contrastive(tokens, mask, tokens.clone(), mask, torch.tensor([0, 0, 0]), keep)
+    assert alone.abs() < 1e-5  # only the positive is left in each row
+    empty, stats = model._dove_contrastive(tokens, mask, tokens, mask, torch.tensor([0, 1, 2]),
+                                           torch.tensor([True, False, False]))
+    assert empty == 0 and not stats
+    with pytest.raises(ValueError):
+        make_model(dove_contrastive=True)
+
+
+def test_dove_contrastive_switch_reaches_the_config(monkeypatch):
+    from run_pipeline import training_arguments
+    for key, value in {"DOVE_CONTRASTIVE": "true", "DOVE_CONTRASTIVE_WEIGHT": "0.2", "DOVE_TEMPERATURE": "0.07"}.items():
+        monkeypatch.setenv(key, value)
+    parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
+    model_args, _, _ = parse_args_with_yaml_and_cli(parser, training_arguments())
+    assert model_args.dove_contrastive
+    assert (model_args.dove_contrastive_weight, model_args.dove_temperature) == (0.2, 0.07)
+    assert not OpenViVQAConfig().dove_contrastive

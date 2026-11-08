@@ -144,6 +144,14 @@ class OpenViVQAModel(PreTrainedModel):
             with torch.no_grad():
                 self.ocr_visual_proj.weight.zero_()
                 self.ocr_visual_proj.bias.zero_()
+        if config.dove_contrastive:
+            if not (config.use_twc and config.twc_two_views):
+                raise ValueError("dove_contrastive contrasts the two DOVE views (use_twc with twc_two_views).")
+            # SimCLR projection head: the loss acts on g(h), so the encoder output h keeps what the
+            # answer needs and only g has to discard it (Chen et al., ICML'20). Used only by the loss.
+            with _seeded(seed + 7):
+                self.dove_projection = nn.Sequential(
+                    nn.Linear(self.d_model, self.d_model), nn.ReLU(), nn.Linear(self.d_model, 128))
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -482,6 +490,43 @@ class OpenViVQAModel(PreTrainedModel):
         return loss, {"span_acc": accuracy}
 
     @staticmethod
+    def _masked_mean(tokens, mask):
+        weights = mask.unsqueeze(-1).to(tokens.dtype)
+        return (tokens * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1)
+
+    def _dove_contrastive(self, original, original_mask, related, related_mask, image_group, keep):
+        """NT-Xent between the two DOVE views (SimCLR; the clean / adversarial contrast of
+        Surgical-VQLA++, here the original / related OCR). h = mean of the encoder output over the OCR
+        block, the only part that differs between the views; z = normalize(g(h)). Each of the 2n
+        vectors has its other view as positive and the other samples' vectors as negatives,
+        logits cos / tau with a fixed tau. Pairs from the same image (other questions about the same
+        OCR) are left out of the denominator: their OCR blocks are near-identical, so as negatives
+        they would be false. Samples without OCR (placeholder) are left out entirely.
+        original / related: [B, L, D] encoder outputs of the OCR block; image_group [B]; keep [B]."""
+        rows = keep.nonzero(as_tuple=True)[0]
+        count = rows.numel()
+        if count < 2:
+            return original.sum() * 0.0, {}
+        pooled = torch.cat([self._masked_mean(original, original_mask)[rows],
+                            self._masked_mean(related, related_mask)[rows]])
+        z = F.normalize(self.dove_projection(pooled).float(), dim=-1)
+        cosine = z @ z.t()
+        target = (torch.arange(2 * count, device=z.device) + count) % (2 * count)
+        group = image_group[rows].repeat(2)
+        positive = torch.zeros_like(cosine, dtype=torch.bool)
+        positive[torch.arange(2 * count, device=z.device), target] = True
+        excluded = (group[:, None] == group[None, :]) & ~positive  # itself and the same image
+        logits = (cosine / self.config.dove_temperature).masked_fill(excluded, float("-inf"))
+        loss = F.cross_entropy(logits, target)
+        with torch.no_grad():
+            negative = ~excluded & ~positive
+            statistics = {"dove_acc": (logits.argmax(dim=1) == target).float().mean(),
+                          "dove_pos_cos": cosine[positive].mean()}
+            if negative.any():
+                statistics["dove_neg_cos"] = cosine[negative].mean()
+        return loss, statistics
+
+    @staticmethod
     def _twc_row_loss(logits, labels, keep):
         """SigLIP normalisation: BCE summed over the candidates of each anchor row, mean over the rows."""
         cells = F.binary_cross_entropy_with_logits(logits.float(), labels.clamp_min(0), reduction="none")
@@ -577,8 +622,10 @@ class OpenViVQAModel(PreTrainedModel):
         twc_orig_text=None,
         twc_rel_text=None,
         answer_span=None,
+        image_group=None,
     ):
-        """answer_span [B, W] (training collator with qavit_ground / consformer_span): span id of the
+        """image_group [B] (training collator with dove_contrastive): equal ids = same image.
+        answer_span [B, W] (training collator with qavit_ground / consformer_span): span id of the
         answer's OCR words, -1 elsewhere; adds ground_loss / span_loss to the outputs."""
         if ocr_attention_mask is None:
             ocr_attention_mask = (ocr_input_ids != self.config.pad_token_id).long()
@@ -640,6 +687,14 @@ class OpenViVQAModel(PreTrainedModel):
                                     decoder_input_ids=decoder_input_ids,
                                     decoder_attention_mask=decoder_attention_mask, use_cache=False, return_dict=True)
                 result.update(view_loss=decoded.loss, view_logits=decoded.logits)
+            if self.config.dove_contrastive and image_group is not None:
+                length, related_length = ocr_input_ids.shape[1], ocr_rel_input_ids.shape[1]
+                keep = torch.tensor([not item["placeholder"] for item in ocr_info], device=mask.device)
+                loss, statistics = self._dove_contrastive(
+                    encoded.last_hidden_state[:, ocr_offset : ocr_offset + length], ocr_attention_mask,
+                    view.last_hidden_state[:, ocr_offset : ocr_offset + related_length], ocr_rel_attention_mask,
+                    image_group.to(mask.device), keep)
+                result.update(dove_loss=loss, **statistics)
         if self.config.use_twc and self.config.twc_contrastive and twc_o2r is not None:
             # TWA: split the encoder output of the OCR block into the original and related copies.
             words = ocr_char_ids.shape[1]
@@ -692,7 +747,8 @@ class OpenViVQAModel(PreTrainedModel):
         generation_config=None,
         **generation_kwargs,
     ):
-        for name in ("twc_o2r", "twc_r2o", "twc_orig_text", "twc_rel_text", "ocr_words", "labels", "answer_span"):
+        for name in ("twc_o2r", "twc_r2o", "twc_orig_text", "twc_rel_text", "ocr_words", "labels", "answer_span",
+                     "image_group"):
             generation_kwargs.pop(name, None)
         related = {name: generation_kwargs.pop(name) for name in RELATED_FIELDS if name in generation_kwargs}
         if encoder_outputs is None:
