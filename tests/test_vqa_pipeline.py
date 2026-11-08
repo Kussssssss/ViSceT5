@@ -1588,3 +1588,44 @@ def test_dove_contrastive_switch_reaches_the_config(monkeypatch):
     assert model_args.dove_contrastive
     assert (model_args.dove_contrastive_weight, model_args.dove_temperature) == (0.2, 0.07)
     assert not OpenViVQAConfig().dove_contrastive
+
+
+@pytest.mark.parametrize("recipe", ["fgsm", "pgd"])
+def test_dove_adversarial_view(make_model, tokenizer, samples, corrector, tmp_path, recipe):
+    dove = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False)
+    model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False, dove_adv=recipe)
+    extra = set(model.state_dict()) - set(dove.state_dict())
+    assert all(key.startswith("adv_projection.") for key in extra) and bool(extra) == (recipe == "fgsm")
+    assert all(torch.equal(value, model.state_dict()[key]) for key, value in dove.state_dict().items())
+    assert model.config.dove_adv_weight == {"fgsm": 1.0, "pgd": 1.5}[recipe]
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    batch = collator(samples)
+    model.eval()
+    with torch.no_grad():
+        assert "adv_logits" not in model(**batch)  # the adversarial view exists only in training
+    model.train()
+    outputs = model(**batch)
+    assert len(outputs["adv_logits"]) == (1 if recipe == "fgsm" else model.config.dove_adv_steps)
+    assert torch.isfinite(outputs["adv_reg"])
+    assert 0 < float(outputs["adv_norm"]) <= model.config.dove_adv_eps * 1.001  # ||r|| <= eps ||x||
+    args = CustomTrainingArguments(output_dir=str(tmp_path), max_steps=1, per_device_train_batch_size=2,
+                                   logging_steps=1, remove_unused_columns=False, report_to="none",
+                                   save_strategy="no", use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer, train_dataset=ViT5VQADataset(pd.DataFrame(samples)),
+                         data_collator=collator)
+    loss, outputs = trainer.compute_loss(model, batch, return_outputs=True)
+    assert "adv_loss" in outputs and torch.isfinite(loss)
+    loss.backward()
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+    with pytest.raises(ValueError):
+        make_model(dove_adv=recipe)  # needs DOVE
+
+
+def test_dove_adversarial_switch_reaches_the_config(monkeypatch):
+    from run_pipeline import training_arguments
+    for key, value in {"DOVE_ADV": "pgd", "DOVE_ADV_EPS": "0.1", "DOVE_ADV_STEPS": "3"}.items():
+        monkeypatch.setenv(key, value)
+    parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
+    model_args, _, _ = parse_args_with_yaml_and_cli(parser, training_arguments())
+    assert (model_args.dove_adv, model_args.dove_adv_eps, model_args.dove_adv_steps) == ("pgd", 0.1, 3)
+    assert model_args.dove_adv_weight is None and OpenViVQAConfig().dove_adv == "none"

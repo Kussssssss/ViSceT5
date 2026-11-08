@@ -16,9 +16,10 @@ except ImportError:
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "ocr_visual_norm",
-               "ocr_visual_proj", "dove_projection")
+               "ocr_visual_proj", "dove_projection", "adv_projection")
 AUXILIARY = ("twc_loss", "twc_acc", "view_loss", "twc_pos_logit", "twc_neg_logit", "ground_loss",
-             "ground_mass", "ground_area", "span_loss", "span_acc", "dove_loss", "dove_acc", "dove_pos_cos", "dove_neg_cos")
+             "ground_mass", "ground_area", "span_loss", "span_acc", "dove_loss", "dove_acc", "dove_pos_cos", "dove_neg_cos",
+             "adv_loss", "adv_reg", "adv_kl", "adv_norm", "adv_acc", "adv_pos_cos", "adv_neg_cos")
 SCALARS = ("twc_logit_scale", "instruction_proj_gate", "twc_bias", "consformer_gate")
 
 
@@ -98,6 +99,12 @@ class VQATrainer(Seq2SeqTrainer):
             print("[optimizer] parameter groups:", summary)
         return self.optimizer
 
+    def _answer_loss(self, logits, labels):
+        if self.label_smoother:
+            return self.label_smoother({"logits": logits}, labels)
+        return torch.nn.functional.cross_entropy(logits.reshape(-1, logits.shape[-1]).float(), labels.reshape(-1),
+                                                 ignore_index=-100)
+
     def compute_loss(self, model, inputs, return_outputs=False):
         outputs = model(**inputs)
         labels = inputs.get("labels")
@@ -111,7 +118,13 @@ class VQATrainer(Seq2SeqTrainer):
         if "view_logits" in outputs:
             view_loss = (self.label_smoother({"logits": outputs["view_logits"]}, labels)
                          if self.label_smoother else outputs["view_loss"])
-            loss = 0.5 * (loss + view_loss)
+            if "adv_logits" in outputs:
+                # DOVE with the adversarial view: the answer loss is the mean over the three views.
+                adv_loss = torch.stack([self._answer_loss(logits, labels) for logits in outputs["adv_logits"]]).mean()
+                outputs["adv_loss"] = adv_loss.detach()
+                loss = (loss + view_loss + adv_loss) / 3
+            else:
+                loss = 0.5 * (loss + view_loss)
         config = getattr(model, "module", model).config
         if "twc_loss" in outputs:
             loss = loss + config.twc_weight * outputs["twc_loss"]
@@ -121,8 +134,10 @@ class VQATrainer(Seq2SeqTrainer):
             loss = loss + config.consformer_span_weight * outputs["span_loss"]
         if "dove_loss" in outputs:
             loss = loss + config.dove_contrastive_weight * outputs["dove_loss"]
+        if "adv_reg" in outputs:
+            loss = loss + config.dove_adv_weight * outputs["adv_reg"]
         if model.training and any(key in outputs for key in ("twc_loss", "view_loss", "ground_loss", "span_loss",
-                                                             "dove_loss")):
+                                                             "dove_loss", "adv_reg")):
             for key in AUXILIARY:
                 if key in outputs:
                     self._twc_sum[key] = self._twc_sum.get(key, 0.0) + float(outputs[key].detach())

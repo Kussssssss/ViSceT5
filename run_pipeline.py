@@ -8,7 +8,7 @@ Training:   DATASET_NAME, OUTPUT_DIR, NUM_TRAIN_EPOCHS, MODEL_NAME_OR_PATH,
             CONSFORMER_TREE_TRANSFORMER, TWC_SIGLIP, TWC_TEXT_ONLY, TWC_TEXT_LABELS, QAVIT_GATED_JOINT,
             QAVIT_GROUND, QAVIT_GROUND_WEIGHT, CONSFORMER_SPAN, CONSFORMER_SPAN_WEIGHT, CONSFORMER_GEOMETRY,
             CONSFORMER_WORD_LINK, OCR_VISUAL_POOL, DOVE_CONTRASTIVE, DOVE_CONTRASTIVE_WEIGHT,
-            DOVE_TEMPERATURE, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
+            DOVE_TEMPERATURE, DOVE_ADV, DOVE_ADV_EPS, DOVE_ADV_STEPS, DOVE_ADV_WEIGHT, LEARNING_RATE, NEW_MODULE_LR, SCALAR_LR,
             MOCK_TEST (+ SMOKE_*), HF_TOKEN + HF_REPO (push/resume/upload).
 Prediction: PREDICT_CKPT_DIR, PREDICT_DATASET, PREDICT_SPLIT, PREDICT_BATCH_SIZE, PREDICT_RELATED.
 """
@@ -58,6 +58,10 @@ def training_arguments():
         "DOVE_CONTRASTIVE": "dove_contrastive",
         "DOVE_CONTRASTIVE_WEIGHT": "dove_contrastive_weight",
         "DOVE_TEMPERATURE": "dove_temperature",
+        "DOVE_ADV": "dove_adv",
+        "DOVE_ADV_EPS": "dove_adv_eps",
+        "DOVE_ADV_STEPS": "dove_adv_steps",
+        "DOVE_ADV_WEIGHT": "dove_adv_weight",
         "LEARNING_RATE": "learning_rate",
         "NEW_MODULE_LR": "new_module_learning_rate",
         "SCALAR_LR": "scalar_learning_rate",

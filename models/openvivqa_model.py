@@ -152,6 +152,14 @@ class OpenViVQAModel(PreTrainedModel):
             with _seeded(seed + 7):
                 self.dove_projection = nn.Sequential(
                     nn.Linear(self.d_model, self.d_model), nn.ReLU(), nn.Linear(self.d_model, 128))
+        if config.dove_adv != "none":
+            if not (config.use_twc and config.twc_two_views):
+                raise ValueError("dove_adv adds a third view to DOVE (use_twc with twc_two_views).")
+        if config.dove_adv == "fgsm":
+            # Surgical-VQLA++: backbone feature -> FFN -> P, contrasted between clean and adversarial.
+            with _seeded(seed + 8):
+                self.adv_projection = nn.Sequential(
+                    nn.Linear(self.d_model, self.d_model), nn.ReLU(), nn.Linear(self.d_model, 128))
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -382,6 +390,7 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_rel_char_ids=None,
         ocr_rel_char_mask=None,
         aux=None,
+        embeds_out=None,
     ):
         """Encode [question, image patches, original OCR, related OCR] once for loss and generation.
 
@@ -390,6 +399,8 @@ class OpenViVQAModel(PreTrainedModel):
         shared weights), never as one concatenated sequence.
         image_features: precomputed (tokens, mask) to reuse CLIP.
         aux: dict filled with the auxiliary-loss inputs of the image and of the original OCR pass.
+        embeds_out: dict filled with the ViT5 encoder input (embeds) and the (start, end) of its
+        question, image and OCR segments, for the adversarial view.
 
         Returns (encoder outputs, fused mask, start index of the OCR block).
         """
@@ -422,9 +433,12 @@ class OpenViVQAModel(PreTrainedModel):
         if any(piece.shape[-1] != self.d_model for piece in pieces):
             raise ValueError("All vision/OCR backbone output dimensions must match ViT5 d_model.")
         fused_mask = torch.cat(masks, dim=1)
-        encoded = self.vit5.encoder(
-            inputs_embeds=torch.cat(pieces, dim=1), attention_mask=fused_mask, return_dict=True
-        )
+        inputs_embeds = torch.cat(pieces, dim=1)
+        if embeds_out is not None:
+            question = pieces[0].shape[1]
+            embeds_out.update(embeds=inputs_embeds, question=(0, question), image=(question, ocr_offset),
+                              ocr=(ocr_offset, ocr_offset + ocr_attention_mask.shape[1]))
+        encoded = self.vit5.encoder(inputs_embeds=inputs_embeds, attention_mask=fused_mask, return_dict=True)
         return encoded, fused_mask, ocr_offset
 
     @staticmethod
@@ -494,7 +508,7 @@ class OpenViVQAModel(PreTrainedModel):
         weights = mask.unsqueeze(-1).to(tokens.dtype)
         return (tokens * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1)
 
-    def _dove_contrastive(self, original, original_mask, related, related_mask, image_group, keep):
+    def _dove_contrastive(self, original, original_mask, related, related_mask, image_group, keep, projection=None):
         """NT-Xent between the two DOVE views (SimCLR; the clean / adversarial contrast of
         Surgical-VQLA++, here the original / related OCR). h = mean of the encoder output over the OCR
         block, the only part that differs between the views; z = normalize(g(h)). Each of the 2n
@@ -509,7 +523,7 @@ class OpenViVQAModel(PreTrainedModel):
             return original.sum() * 0.0, {}
         pooled = torch.cat([self._masked_mean(original, original_mask)[rows],
                             self._masked_mean(related, related_mask)[rows]])
-        z = F.normalize(self.dove_projection(pooled).float(), dim=-1)
+        z = F.normalize((projection if projection is not None else self.dove_projection)(pooled).float(), dim=-1)
         cosine = z @ z.t()
         target = (torch.arange(2 * count, device=z.device) + count) % (2 * count)
         group = image_group[rows].repeat(2)
@@ -525,6 +539,94 @@ class OpenViVQAModel(PreTrainedModel):
             if negative.any():
                 statistics["dove_neg_cos"] = cosine[negative].mean()
         return loss, statistics
+
+    @staticmethod
+    def _masked_rms(tokens, mask):
+        """RMS of the valid tokens of each sample, [B, 1, 1] (detached): the scale of the perturbation."""
+        weights = mask.unsqueeze(-1).to(torch.float32)
+        power = (tokens.detach().float().pow(2) * weights).sum(dim=(1, 2))
+        return (power / (weights.sum(dim=(1, 2)) * tokens.shape[-1]).clamp_min(1)).sqrt()[:, None, None]
+
+    @staticmethod
+    def _frobenius(tokens):
+        return tokens.float().pow(2).sum(dim=(1, 2)).sqrt()[:, None, None]
+
+    @staticmethod
+    def _symmetric_kl(logits, other, labels):
+        """kl(p||q) + kl(q||p) per answer token (ATS / AOE), mean over the answer tokens."""
+        keep = labels != -100
+        if not keep.any():
+            return logits.sum() * 0.0
+        p, q = F.log_softmax(logits.float()[keep], dim=-1), F.log_softmax(other.float()[keep], dim=-1)
+        return (F.kl_div(q, p, log_target=True, reduction="batchmean")
+                + F.kl_div(p, q, log_target=True, reduction="batchmean"))
+
+    def _adversarial(self, inputs, mask, clean, labels, decoder_input_ids, decoder_attention_mask):
+        """Third DOVE view: the clean (original OCR) input of the ViT5 encoder plus an adversarial
+        perturbation, trained with the same answer. Two recipes, as their papers:
+        fgsm (Surgical-VQLA++, Bai et al., Inf. Fusion 2025): one step r = eps * scale * sign(grad of
+        the clean answer loss w.r.t. the embeddings), scale alpha = 1 on the text (question and OCR)
+        and beta = 0.5 on the image; regulariser = NT-Xent between the pooled encoder output of the
+        clean and the adversarial input (P = FFN(feature), positives = the same sample).
+        The sign is the FGSM ascent (Goodfellow et al.), the perturbation that raises the loss.
+        pgd (ATS / AOE, Shen et al., ICME 2024): delta on the OCR block only (the output of the OCR
+        encoder), delta_0 = U(-lam, lam) / sqrt(N), K ascent steps on L_pred + L_kl with the
+        Frobenius-normalised gradient, projected on ||delta||_F <= lam; regulariser = symmetric KL
+        between the adversarial and the clean answer distributions, averaged over the K points as
+        their accumulated parameter gradient (FreeLB). eps / lam are relative to the norm of the
+        perturbed tokens (the papers do not report them).
+        Returns adv_logits (one per point, the answer loss of the view), adv_reg and statistics."""
+        config = self.config
+        embeds = inputs["embeds"]
+
+        def decode(values):
+            encoded = self.vit5.encoder(inputs_embeds=values, attention_mask=mask, return_dict=True)
+            decoded = self.vit5(encoder_outputs=encoded, attention_mask=mask, labels=labels,
+                                decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
+                                use_cache=False, return_dict=True)
+            return encoded, decoded
+
+        if config.dove_adv == "fgsm":
+            grad, = torch.autograd.grad(clean["loss"], embeds, retain_graph=True)
+            perturbation = torch.zeros_like(embeds)
+            for segment, scale in (("question", 1.0), ("image", 0.5), ("ocr", 1.0)):
+                start, end = inputs[segment]
+                if end > start:
+                    rms = self._masked_rms(embeds[:, start:end], mask[:, start:end]).to(embeds.dtype)
+                    perturbation[:, start:end] = scale * config.dove_adv_eps * rms * grad[:, start:end].sign()
+            perturbation = (perturbation * mask.unsqueeze(-1).to(embeds.dtype)).detach()
+            encoded, decoded = decode(embeds + perturbation)
+            rows = embeds.shape[0]
+            reg, statistics = self._dove_contrastive(
+                clean["encoded"].last_hidden_state, mask, encoded.last_hidden_state, mask,
+                torch.arange(rows, device=embeds.device), torch.ones(rows, dtype=torch.bool, device=embeds.device),
+                projection=self.adv_projection)
+            statistics = {key.replace("dove_", "adv_"): value for key, value in statistics.items()}
+            statistics["adv_norm"] = (self._frobenius(perturbation) / self._frobenius(embeds.detach()).clamp_min(1e-12)).mean()
+            return dict(adv_logits=[decoded.logits], adv_reg=reg, **statistics)
+
+        start, end = inputs["ocr"]
+        ocr = embeds[:, start:end]
+        valid = mask[:, start:end].unsqueeze(-1).to(embeds.dtype)
+        radius = config.dove_adv_eps * self._frobenius(ocr.detach() * valid)
+        count = (valid.sum(dim=(1, 2)) * ocr.shape[-1]).clamp_min(1)[:, None, None]
+        delta = (torch.empty_like(ocr).uniform_(-1, 1) * (radius / count.sqrt()).to(ocr.dtype)) * valid
+        logits, divergences = [], []
+        for step in range(config.dove_adv_steps):
+            delta = delta.detach().requires_grad_(True)
+            _, decoded = decode(torch.cat([embeds[:, :start], ocr + delta, embeds[:, end:]], dim=1))
+            divergence = self._symmetric_kl(decoded.logits, clean["logits"], labels)
+            logits.append(decoded.logits)
+            divergences.append(divergence)
+            if step + 1 < config.dove_adv_steps:
+                grad, = torch.autograd.grad(decoded.loss + divergence, delta, retain_graph=True)
+                grad = grad * valid
+                delta = delta + (radius * grad.float() / self._frobenius(grad).clamp_min(1e-12)).to(delta.dtype)
+                delta = delta * (radius / self._frobenius(delta).clamp_min(1e-12)).clamp(max=1.0).to(delta.dtype)
+        statistics = {"adv_kl": torch.stack(divergences).detach().mean(),
+                      "adv_norm": (self._frobenius(delta.detach()) / self._frobenius(ocr.detach() * valid)
+                                   .clamp_min(1e-12)).mean()}
+        return dict(adv_logits=logits, adv_reg=torch.stack(divergences).mean(), **statistics)
 
     @staticmethod
     def _twc_row_loss(logits, labels, keep):
@@ -635,6 +737,9 @@ class OpenViVQAModel(PreTrainedModel):
             attention_mask = (input_ids != self.config.pad_token_id).long()
         two_views = self.config.use_twc and self.config.twc_two_views and ocr_rel_input_ids is not None
         aux = {} if answer_span is not None else None
+        adversarial = (self.config.dove_adv != "none" and self.training and two_views and labels is not None
+                       and torch.is_grad_enabled())
+        adv_inputs = {} if adversarial else None
         image_features = None
         if two_views and self.config.ablation_use_image:
             image_features = self._encode_image(pixel_values, input_ids, attention_mask, aux=aux)
@@ -656,6 +761,7 @@ class OpenViVQAModel(PreTrainedModel):
             ocr_rel_char_mask=ocr_rel_char_mask,
             image_features=image_features,
             aux=aux,
+            embeds_out=adv_inputs,
         )
         result = {"encoder_outputs": encoded, "attention_mask": mask}
         if aux and "relevance" in aux:
@@ -695,6 +801,9 @@ class OpenViVQAModel(PreTrainedModel):
                     view.last_hidden_state[:, ocr_offset : ocr_offset + related_length], ocr_rel_attention_mask,
                     image_group.to(mask.device), keep)
                 result.update(dove_loss=loss, **statistics)
+        if adversarial and adv_inputs["embeds"].requires_grad:
+            clean = {"loss": result["loss"], "logits": result["logits"], "encoded": encoded}
+            result.update(self._adversarial(adv_inputs, mask, clean, labels, decoder_input_ids, decoder_attention_mask))
         if self.config.use_twc and self.config.twc_contrastive and twc_o2r is not None:
             # TWA: split the encoder output of the OCR block into the original and related copies.
             words = ocr_char_ids.shape[1]
