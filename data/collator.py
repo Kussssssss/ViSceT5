@@ -72,13 +72,14 @@ class ViT5VQADataCollator:
       of each word's text (-1 = PAD / placeholder), equal ids = equal strings.
     fresh_noise: new random draws at every call instead of TWA's Random(13) for every sample, which
     repeats the same copy each epoch; needed when the related copy is a training augmentation.
+    image_groups: emit image_group [B], equal ids for samples of the same image (DOVE contrast).
     answer_spans: emit answer_span [B, W], the span id of the OCR words that spell part of the answer
     (answer_spans()), -1 elsewhere (training of the grounding / answer-span losses).
     """
 
     def __init__(self, tokenizer, image_processor, ocr_encoder, config,
                  corrector=None, related=False, twc_labels=False, related_mode="augment",
-                 fresh_noise=False, answer_spans=False):
+                 fresh_noise=False, answer_spans=False, image_groups=False):
         self.tokenizer = tokenizer
         self.image_processor = image_processor
         self.ocr_encoder = ocr_encoder
@@ -92,6 +93,7 @@ class ViT5VQADataCollator:
         self.twc_labels = bool(twc_labels)
         self.fresh_noise = bool(fresh_noise)
         self.answer_spans = bool(answer_spans)
+        self.image_groups = bool(image_groups)
         self.related_mode = str(related_mode)
         if self.related_mode not in ("augment", "correct"):
             raise ValueError("related_mode must be augment|correct.")
@@ -302,6 +304,9 @@ class ViT5VQADataCollator:
             result.update(twc_orig_text=orig_text, twc_rel_text=rel_text)
         if self.return_ocr_words:
             result["ocr_words"] = words
+        if self.image_groups:  # same id = same image (the DOVE contrast skips those pairs)
+            groups = {}
+            result["image_group"] = torch.tensor([groups.setdefault(path, len(groups)) for path in paths])
         # Unlabelled inference batches do not create an all-ignored decoder loss.
         answers = [sample.get("answer") for sample in batch]
         if all(answer is not None and str(answer).strip() for answer in answers):

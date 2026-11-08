@@ -63,6 +63,9 @@ class OpenViVQAConfig(PretrainedConfig):
         consformer_geometry: Optional[bool] = None,
         consformer_word_link: Optional[bool] = None,
         ocr_visual_pool: Optional[bool] = None,
+        dove_contrastive: Optional[bool] = None,
+        dove_contrastive_weight: Optional[float] = None,
+        dove_temperature: Optional[float] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -210,6 +213,12 @@ class OpenViVQAConfig(PretrainedConfig):
         self.consformer_word_link = bool(consformer_word_link) if consformer_word_link is not None else False
         # ocr_visual_pool: OCR token += W LN(CLIP patch features under its box), W = 0 at the start.
         self.ocr_visual_pool = bool(ocr_visual_pool) if ocr_visual_pool is not None else False
+        # dove_contrastive: NT-Xent between the OCR blocks of the two DOVE views (fixed temperature).
+        self.dove_contrastive = bool(dove_contrastive) if dove_contrastive is not None else False
+        self.dove_contrastive_weight = float(dove_contrastive_weight) if dove_contrastive_weight is not None else 0.1
+        self.dove_temperature = float(dove_temperature) if dove_temperature is not None else 0.1
+        if self.dove_temperature <= 0:
+            raise ValueError("dove_temperature must be positive.")
         self.ocr_edit_distance = int(ocr_edit_distance)
 
         self.qa_clip_d_text = qa_clip_d_text
