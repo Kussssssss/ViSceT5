@@ -115,14 +115,18 @@ class VQATrainer(Seq2SeqTrainer):
             if self.label_smoother
             else outputs["loss"]
         )
+        config = getattr(model, "module", model).config
         if "view_logits" in outputs:
             view_loss = (self.label_smoother({"logits": outputs["view_logits"]}, labels)
                          if self.label_smoother else outputs["view_loss"])
             if "adv_logits" in outputs:
-                # DOVE with the adversarial view: the answer loss is the mean over the three views.
-                adv_loss = torch.stack([self._answer_loss(logits, labels) for logits in outputs["adv_logits"]]).mean()
-                outputs["adv_loss"] = adv_loss.detach()
-                loss = (loss + view_loss + adv_loss) / 3
+                # DOVE with adversarial passes: the answer loss is the mean over the passes. pgd's K
+                # points are one view (their mean); fgsm adds one pass, ocr_both two (one per view).
+                adv = [self._answer_loss(logits, labels) for logits in outputs["adv_logits"]]
+                if config.dove_adv == "pgd":
+                    adv = [torch.stack(adv).mean()]
+                outputs["adv_loss"] = torch.stack(adv).mean().detach()
+                loss = torch.stack([loss, view_loss, *adv]).mean()
             else:
                 loss = 0.5 * (loss + view_loss)
         config = getattr(model, "module", model).config

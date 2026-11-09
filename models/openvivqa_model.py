@@ -155,7 +155,7 @@ class OpenViVQAModel(PreTrainedModel):
         if config.dove_adv != "none":
             if not (config.use_twc and config.twc_two_views):
                 raise ValueError("dove_adv adds a third view to DOVE (use_twc with twc_two_views).")
-        if config.dove_adv == "fgsm":
+        if config.dove_adv in ("fgsm", "ocr_cross", "ocr_both"):
             # Surgical-VQLA++: backbone feature -> FFN -> P, contrasted between clean and adversarial.
             with _seeded(seed + 8):
                 self.adv_projection = nn.Sequential(
@@ -391,6 +391,7 @@ class OpenViVQAModel(PreTrainedModel):
         ocr_rel_char_mask=None,
         aux=None,
         embeds_out=None,
+        ocr_direction=None,
     ):
         """Encode [question, image patches, original OCR, related OCR] once for loss and generation.
 
@@ -401,6 +402,8 @@ class OpenViVQAModel(PreTrainedModel):
         aux: dict filled with the auxiliary-loss inputs of the image and of the original OCR pass.
         embeds_out: dict filled with the ViT5 encoder input (embeds) and the (start, end) of its
         question, image and OCR segments, for the adversarial view.
+        ocr_direction: [B, L, D] (ocr_cross); the OCR block gets eps * RMS * sign(ocr_direction) before
+        the ViT5 encoder (the place of the ATS perturbation, the step of Surgical-VQLA++).
 
         Returns (encoder outputs, fused mask, start index of the OCR block).
         """
@@ -417,8 +420,11 @@ class OpenViVQAModel(PreTrainedModel):
             pieces.append(image_tokens)
             masks.append(image_mask)
         ocr_offset = sum(piece.shape[1] for piece in pieces)
-        pieces.append(self._encode_ocr(ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map,
-                                       ocr_char_ids, ocr_char_mask, image_tokens=image_tokens, aux=aux))
+        ocr_tokens = self._encode_ocr(ocr_info, ocr_input_ids, ocr_attention_mask, ocr_to_word_map,
+                                      ocr_char_ids, ocr_char_mask, image_tokens=image_tokens, aux=aux)
+        if ocr_direction is not None:
+            ocr_tokens = ocr_tokens + self._ocr_noise(ocr_direction, ocr_tokens, ocr_attention_mask)
+        pieces.append(ocr_tokens)
         masks.append(ocr_attention_mask)
         if self.config.use_twc and not self.config.twc_two_views and (
                 ocr_rel_input_ids is not None or self.training or self.config.twc_eval_related != "none"):
@@ -560,6 +566,110 @@ class OpenViVQAModel(PreTrainedModel):
         p, q = F.log_softmax(logits.float()[keep], dim=-1), F.log_softmax(other.float()[keep], dim=-1)
         return (F.kl_div(q, p, log_target=True, reduction="batchmean")
                 + F.kl_div(p, q, log_target=True, reduction="batchmean"))
+
+    def _ocr_noise(self, direction, tokens, mask):
+        """Surgical-VQLA++ step (alpha = 1) on the OCR block only: eps * RMS(tokens) * sign(direction),
+        padding untouched, detached (a constant input shift, as r in their Eq. 10)."""
+        scale = self.config.dove_adv_eps * self._masked_rms(tokens, mask).to(tokens.dtype)
+        return (scale * direction.sign() * mask.unsqueeze(-1).to(tokens.dtype)).detach()
+
+    @staticmethod
+    def _carry_to_words(grad, word_map, related_map, related_mask):
+        """ocr_cross: move the gradient of the original OCR tokens to the related tokens word by word.
+        Both copies hold the same word list (the related copy edits words in place) but not the same
+        subwords, so a word's direction = the sum of its subword gradients, given to every subword of
+        the same word in the related copy. grad [B, L, D]; maps [B, L] / [B, L'] word ids, -1 = none."""
+        depth = grad.shape[-1]
+        words = int(torch.maximum(word_map.max(), related_map.max()).clamp_min(0)) + 1
+        per_word = grad.new_zeros(grad.shape[0], words, depth)
+        valid = (word_map >= 0).unsqueeze(-1).to(grad.dtype)
+        per_word.scatter_add_(1, word_map.clamp_min(0).unsqueeze(-1).expand(-1, -1, depth), grad * valid)
+        carried = per_word.gather(1, related_map.clamp_min(0).unsqueeze(-1).expand(-1, -1, depth))
+        return carried * ((related_map >= 0) & related_mask.bool()).unsqueeze(-1).to(grad.dtype)
+
+    def _decode_embeds(self, values, mask, labels, decoder_input_ids, decoder_attention_mask):
+        encoded = self.vit5.encoder(inputs_embeds=values, attention_mask=mask, return_dict=True)
+        decoded = self.vit5(encoder_outputs=encoded, attention_mask=mask, labels=labels,
+                            decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
+                            use_cache=False, return_dict=True)
+        return encoded, decoded
+
+    def _multiview_contrastive(self, views, image_group, keep):
+        """Contrast of the views of each sample (Surgical-VQLA++ L_CTR; SupCon of Khosla et al.,
+        NeurIPS'20, when there are more than two views). views: list of (tokens [B, L, D], mask [B, L])
+        = the encoder output of the OCR block of each view (the only block the noise and the related
+        copy change). h = masked mean, z = normalize(FFN(h)). Anchor i: positives = the other views of
+        the same sample; denominator = every vector except itself and the other samples of the same
+        image (near-identical OCR: false negatives); logits cos / tau. With two views this is NT-Xent.
+        Samples without OCR are left out."""
+        rows = keep.nonzero(as_tuple=True)[0]
+        count = rows.numel()
+        if count < 2:
+            return views[0][0].sum() * 0.0, {}
+        pooled = torch.cat([self._masked_mean(tokens, mask)[rows] for tokens, mask in views])
+        z = F.normalize(self.adv_projection(pooled).float(), dim=-1)
+        sample = torch.arange(count, device=z.device).repeat(len(views))
+        group = image_group[rows].repeat(len(views))
+        itself = torch.eye(z.shape[0], dtype=torch.bool, device=z.device)
+        positive = (sample[:, None] == sample[None, :]) & ~itself
+        excluded = itself | ((group[:, None] == group[None, :]) & ~positive)
+        cosine = z @ z.t()
+        logits = (cosine / self.config.dove_temperature).masked_fill(excluded, float("-inf"))
+        log_prob = logits - logits.logsumexp(dim=1, keepdim=True)
+        loss = -(log_prob.masked_fill(~positive, 0.0).sum(dim=1) / positive.sum(dim=1)).mean()
+        with torch.no_grad():
+            negative = ~excluded & ~positive
+            best = logits.argmax(dim=1)
+            statistics = {"adv_acc": positive[torch.arange(z.shape[0], device=z.device), best].float().mean(),
+                          "adv_pos_cos": cosine[positive].mean()}
+            if negative.any():
+                statistics["adv_neg_cos"] = cosine[negative].mean()
+        return loss, statistics
+
+    def _ocr_adversarial(self, inputs, related_inputs, encoded, view, mask, view_mask, result, ocr_info,
+                         image_group, ocr_mask, related_mask, labels, decoder_input_ids, decoder_attention_mask):
+        """Noise on the OCR block only, recipe of Surgical-VQLA++ (one sign step of the clean answer-loss
+        gradient, perturbed pass through the same encoder / decoder, contrast of the encoder features
+        through an FFN, one backward of the sum).
+        ocr_cross (scenario 1): the related view was already perturbed with the original view's
+        gradient (forward); contrast = NT-Xent(original, perturbed related). The answer loss stays the
+        DOVE mean of the two views.
+        ocr_both (scenario 2): each view gets the noise of its own gradient and a perturbed pass; the
+        answer loss is the mean over the four passes (trainer); contrast over the four views, as
+        dove_adv_combine: joint = one SupCon over {orig, orig+r1, related, related+r2} (positives = the
+        three other views of the sample), mean = average of NT-Xent(orig, orig+r1) and
+        NT-Xent(related, related+r2)."""
+        start, end = inputs["ocr"]
+        related_start, related_end = related_inputs["ocr"]
+        original_ocr = encoded.last_hidden_state[:, start:end]
+        related_ocr = view.last_hidden_state[:, related_start:related_end]
+        keep = torch.tensor([not item["placeholder"] for item in ocr_info], device=mask.device)
+        group = image_group.to(mask.device)
+        if self.config.dove_adv == "ocr_cross":
+            reg, statistics = self._multiview_contrastive([(original_ocr, ocr_mask), (related_ocr, related_mask)],
+                                                          group, keep)
+            return dict(adv_reg=reg, **statistics)
+        outputs, perturbed = [], []
+        for values, (low, high), token_mask, fused_mask, loss in (
+                (inputs["embeds"], (start, end), ocr_mask, mask, result["loss"]),
+                (related_inputs["embeds"], (related_start, related_end), related_mask, view_mask, result["view_loss"])):
+            grad, = torch.autograd.grad(loss, values, retain_graph=True)
+            noise = self._ocr_noise(grad[:, low:high], values[:, low:high], token_mask)
+            shifted = torch.cat([values[:, :low], values[:, low:high] + noise, values[:, high:]], dim=1)
+            noisy, decoded = self._decode_embeds(shifted, fused_mask, labels, decoder_input_ids, decoder_attention_mask)
+            outputs.append(decoded.logits)
+            perturbed.append(noisy.last_hidden_state[:, low:high])
+        if self.config.dove_adv_combine == "joint":
+            reg, statistics = self._multiview_contrastive(
+                [(original_ocr, ocr_mask), (perturbed[0], ocr_mask), (related_ocr, related_mask),
+                 (perturbed[1], related_mask)], group, keep)
+        else:
+            first, statistics = self._multiview_contrastive([(original_ocr, ocr_mask), (perturbed[0], ocr_mask)],
+                                                            group, keep)
+            second, _ = self._multiview_contrastive([(related_ocr, related_mask), (perturbed[1], related_mask)],
+                                                    group, keep)
+            reg = 0.5 * (first + second)
+        return dict(adv_logits=outputs, adv_reg=reg, **statistics)
 
     def _adversarial(self, inputs, mask, clean, labels, decoder_input_ids, decoder_attention_mask):
         """Third DOVE view: the clean (original OCR) input of the ViT5 encoder plus an adversarial
@@ -782,11 +892,22 @@ class OpenViVQAModel(PreTrainedModel):
                 return_dict=True,
             )
             result.update(loss=decoded.loss, logits=decoded.logits)
+        ocr_noise = (adversarial and self.config.dove_adv in ("ocr_cross", "ocr_both") and image_group is not None
+                     and adv_inputs["embeds"].requires_grad)
         if two_views:
             # Second view: the related copy takes the place of the original one, same answer.
+            direction, related_inputs = None, ({} if ocr_noise else None)
+            if ocr_noise and self.config.dove_adv == "ocr_cross":
+                # Scenario 1: the gradient of the original view's answer loss w.r.t. its OCR block,
+                # carried word by word to the related copy, perturbs the related view.
+                start, end = adv_inputs["ocr"]
+                grad, = torch.autograd.grad(result["loss"], adv_inputs["embeds"], retain_graph=True)
+                direction = self._carry_to_words(grad[:, start:end], ocr_to_word_map, ocr_rel_to_word_map,
+                                                 ocr_rel_attention_mask)
             view, view_mask, _ = self.encode(
                 input_ids, pixel_values, ocr_info, ocr_rel_input_ids, ocr_rel_to_word_map, ocr_rel_char_ids,
                 ocr_rel_char_mask, None, attention_mask, ocr_rel_attention_mask, image_features=image_features,
+                embeds_out=related_inputs, ocr_direction=direction,
             )
             if labels is not None:
                 decoded = self.vit5(encoder_outputs=view, attention_mask=view_mask, labels=labels,
@@ -801,7 +922,11 @@ class OpenViVQAModel(PreTrainedModel):
                     view.last_hidden_state[:, ocr_offset : ocr_offset + related_length], ocr_rel_attention_mask,
                     image_group.to(mask.device), keep)
                 result.update(dove_loss=loss, **statistics)
-        if adversarial and adv_inputs["embeds"].requires_grad:
+            if ocr_noise and "view_loss" in result:
+                result.update(self._ocr_adversarial(
+                    adv_inputs, related_inputs, encoded, view, mask, view_mask, result, ocr_info, image_group,
+                    ocr_attention_mask, ocr_rel_attention_mask, labels, decoder_input_ids, decoder_attention_mask))
+        if adversarial and self.config.dove_adv in ("fgsm", "pgd") and adv_inputs["embeds"].requires_grad:
             clean = {"loss": result["loss"], "logits": result["logits"], "encoded": encoded}
             result.update(self._adversarial(adv_inputs, mask, clean, labels, decoder_input_ids, decoder_attention_mask))
         if self.config.use_twc and self.config.twc_contrastive and twc_o2r is not None:
