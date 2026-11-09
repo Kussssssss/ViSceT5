@@ -70,6 +70,7 @@ class OpenViVQAConfig(PretrainedConfig):
         dove_adv_eps: Optional[float] = None,
         dove_adv_steps: Optional[int] = None,
         dove_adv_weight: Optional[float] = None,
+        dove_adv_combine: Optional[str] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -227,12 +228,16 @@ class OpenViVQAConfig(PretrainedConfig):
         # (sign step on question/image/OCR embeddings, NT-Xent clean/adversarial, weight 1);
         # pgd = ATS/AOE (K steps on the OCR block, symmetric KL, weight 1.5). eps relative to the norm.
         self.dove_adv = str(dove_adv or "none").lower()
-        if self.dove_adv not in ("none", "fgsm", "pgd"):
-            raise ValueError("dove_adv must be none, fgsm or pgd.")
+        # ocr_cross / ocr_both: noise on the OCR block only, Surgical-VQLA++ recipe (scenarios 1 / 2).
+        if self.dove_adv not in ("none", "fgsm", "pgd", "ocr_cross", "ocr_both"):
+            raise ValueError("dove_adv must be none, fgsm, pgd, ocr_cross or ocr_both.")
+        self.dove_adv_combine = str(dove_adv_combine or "joint").lower()
+        if self.dove_adv_combine not in ("joint", "mean"):
+            raise ValueError("dove_adv_combine must be joint or mean.")
         self.dove_adv_eps = float(dove_adv_eps) if dove_adv_eps is not None else 0.05
         self.dove_adv_steps = int(dove_adv_steps) if dove_adv_steps is not None else 2
         self.dove_adv_weight = (float(dove_adv_weight) if dove_adv_weight is not None
-                                else {"fgsm": 1.0, "pgd": 1.5}.get(self.dove_adv, 0.0))
+                                else {"fgsm": 1.0, "pgd": 1.5, "ocr_cross": 1.0, "ocr_both": 1.0}.get(self.dove_adv, 0.0))
         if self.dove_adv_eps < 0 or self.dove_adv_steps < 1 or self.dove_adv_weight < 0:
             raise ValueError("dove_adv_eps >= 0, dove_adv_steps >= 1 and dove_adv_weight >= 0 are required.")
         self.ocr_edit_distance = int(ocr_edit_distance)

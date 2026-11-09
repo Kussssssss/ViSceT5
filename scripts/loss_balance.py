@@ -86,11 +86,12 @@ def main():
         answer = smoother(outputs, labels) if smoother else outputs["loss"]
         if "view_logits" in outputs:
             view = smoother({"logits": outputs["view_logits"]}, labels) if smoother else outputs["view_loss"]
-            if "adv_logits" in outputs:  # as trainer.compute_loss: mean over the three views
+            if "adv_logits" in outputs:  # as trainer.compute_loss: mean over the passes
                 adv = torch.stack([smoother({"logits": x}, labels) if smoother else torch.nn.functional.cross_entropy(
                     x.reshape(-1, x.shape[-1]).float(), labels.reshape(-1), ignore_index=-100)
-                    for x in outputs["adv_logits"]]).mean()
-                answer = (answer + view + adv) / 3
+                    for x in outputs["adv_logits"]])
+                adv = [adv.mean()] if config.dove_adv == "pgd" else list(adv)  # as trainer.compute_loss
+                answer = torch.stack([answer, view, *adv]).mean()
             else:
                 answer = 0.5 * (answer + view)
         terms = {"answer": answer}

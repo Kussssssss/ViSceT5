@@ -1629,3 +1629,58 @@ def test_dove_adversarial_switch_reaches_the_config(monkeypatch):
     model_args, _, _ = parse_args_with_yaml_and_cli(parser, training_arguments())
     assert (model_args.dove_adv, model_args.dove_adv_eps, model_args.dove_adv_steps) == ("pgd", 0.1, 3)
     assert model_args.dove_adv_weight is None and OpenViVQAConfig().dove_adv == "none"
+
+
+@pytest.mark.parametrize("recipe,combine", [("ocr_cross", "joint"), ("ocr_both", "joint"), ("ocr_both", "mean")])
+def test_dove_ocr_noise_scenarios(make_model, tokenizer, samples, corrector, tmp_path, recipe, combine):
+    dove = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False)
+    model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False, dove_adv=recipe,
+                       dove_adv_combine=combine)
+    extra = set(model.state_dict()) - set(dove.state_dict())
+    assert extra and all(key.startswith("adv_projection.") for key in extra)
+    assert all(torch.equal(value, model.state_dict()[key]) for key, value in dove.state_dict().items())
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    batch = collator(samples)
+    assert "image_group" in batch
+    model.eval()
+    with torch.no_grad():
+        outputs = model(**batch)
+        assert "adv_reg" not in outputs and "adv_logits" not in outputs  # training only
+    model.train()
+    outputs = model(**batch)
+    assert ("adv_logits" in outputs) == (recipe == "ocr_both")
+    if recipe == "ocr_both":
+        assert len(outputs["adv_logits"]) == 2  # one perturbed pass per view
+    args = CustomTrainingArguments(output_dir=str(tmp_path), max_steps=1, per_device_train_batch_size=2,
+                                   logging_steps=1, remove_unused_columns=False, report_to="none",
+                                   save_strategy="no", use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer, train_dataset=ViT5VQADataset(pd.DataFrame(samples)),
+                         data_collator=collator)
+    loss = trainer.compute_loss(model, batch)
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert all(torch.isfinite(p.grad).all() for p in model.parameters() if p.grad is not None)
+
+
+def test_ocr_noise_helpers(make_model):
+    model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False, dove_adv="ocr_both")
+    # Word-by-word carry: word 0 = tokens 0-1 in the original, token 0 in the related copy.
+    grad = torch.tensor([[[1.0, -1.0], [2.0, 0.5], [-3.0, 1.0]]])
+    carried = model._carry_to_words(grad, torch.tensor([[0, 0, 1]]), torch.tensor([[0, 1, 1, -1]]),
+                                    torch.tensor([[1, 1, 1, 0]]))
+    torch.testing.assert_close(carried[0], torch.tensor([[3.0, -0.5], [-3.0, 1.0], [-3.0, 1.0], [0.0, 0.0]]))
+    tokens = torch.randn(2, 3, 4)
+    mask = torch.tensor([[1, 1, 0], [1, 1, 1]])
+    noise = model._ocr_noise(torch.randn(2, 3, 4), tokens, mask)
+    assert noise[0, 2].abs().sum() == 0
+    rms = model._masked_rms(tokens, mask)
+    torch.testing.assert_close(noise.abs()[1], (model.config.dove_adv_eps * rms[1]).expand(3, 4))
+    # Two views = NT-Xent; four views of a sample are positives of each other, same image excluded.
+    views = [(torch.randn(3, 2, model.d_model), torch.ones(3, 2, dtype=torch.long)) for _ in range(4)]
+    keep = torch.ones(3, dtype=torch.bool)
+    loss, stats = model._multiview_contrastive(views, torch.tensor([0, 1, 2]), keep)
+    assert torch.isfinite(loss) and 0 <= stats["adv_acc"] <= 1
+    same = [(views[0][0], views[0][1])] * 4
+    alone, _ = model._multiview_contrastive(same, torch.tensor([0, 0, 0]), keep)
+    # Identical views, same image (no negatives): each anchor spreads over its 3 equal positives -> log 3.
+    torch.testing.assert_close(alone, torch.tensor(3.0).log(), atol=1e-4, rtol=0)
