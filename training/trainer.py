@@ -16,7 +16,8 @@ except ImportError:
 # Randomly initialised modules (everything else is pretrained ViT5 / CLIP).
 NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_position_embedding",
                "ocr_char_layernorm", "ocr_lite_text_ln", "ocr_lite_text_proj", "ocr_visual_norm",
-               "ocr_visual_proj", "dove_projection", "adv_projection")
+               "ocr_visual_proj", "dove_projection", "adv_projection",
+               "adv_projection_noisy")
 AUXILIARY = ("twc_loss", "twc_acc", "view_loss", "twc_pos_logit", "twc_neg_logit", "ground_loss",
              "ground_mass", "ground_area", "span_loss", "span_acc", "dove_loss", "dove_acc", "dove_pos_cos", "dove_neg_cos",
              "adv_loss", "adv_reg", "adv_ramp", "adv_kl", "adv_norm", "adv_acc", "adv_pos_cos", "adv_neg_cos")
@@ -113,6 +114,7 @@ class VQATrainer(Seq2SeqTrainer):
             warmup = self.args.get_warmup_steps(self.state.max_steps or 0)
             ramp = min(1.0, self.state.global_step / warmup) if warmup > 0 else 1.0
         core.adv_ramp = ramp
+        core.adv_label_smoothing = float(self.args.label_smoothing_factor or 0.0)
         return ramp
 
     def compute_loss(self, model, inputs, return_outputs=False):
