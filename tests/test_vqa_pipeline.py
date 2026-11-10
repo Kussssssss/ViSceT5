@@ -1595,7 +1595,7 @@ def test_dove_adversarial_view(make_model, tokenizer, samples, corrector, tmp_pa
     dove = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False)
     model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False, dove_adv=recipe)
     extra = set(model.state_dict()) - set(dove.state_dict())
-    assert all(key.startswith("adv_projection.") for key in extra) and bool(extra) == (recipe == "fgsm")
+    assert all(key.startswith(("adv_projection.", "adv_projection_noisy.")) for key in extra) and bool(extra) == (recipe == "fgsm")
     assert all(torch.equal(value, model.state_dict()[key]) for key, value in dove.state_dict().items())
     assert model.config.dove_adv_weight == {"fgsm": 1.0, "pgd": 1.5}[recipe]
     collator = build_collator(model, tokenizer, corrector, training=True)
@@ -1637,7 +1637,7 @@ def test_dove_ocr_noise_scenarios(make_model, tokenizer, samples, corrector, tmp
     model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False, dove_adv=recipe,
                        dove_adv_combine=combine)
     extra = set(model.state_dict()) - set(dove.state_dict())
-    assert extra and all(key.startswith("adv_projection.") for key in extra)
+    assert extra and all(key.startswith(("adv_projection.", "adv_projection_noisy.")) for key in extra)
     assert all(torch.equal(value, model.state_dict()[key]) for key, value in dove.state_dict().items())
     collator = build_collator(model, tokenizer, corrector, training=True)
     batch = collator(samples)
@@ -1676,11 +1676,16 @@ def test_ocr_noise_helpers(make_model):
     rms = model._masked_rms(tokens, mask)
     torch.testing.assert_close(noise.abs()[1], (model.config.dove_adv_eps * rms[1]).expand(3, 4))
     # Two views = NT-Xent; four views of a sample are positives of each other, same image excluded.
-    views = [(torch.randn(3, 2, model.d_model), torch.ones(3, 2, dtype=torch.long)) for _ in range(4)]
+    # Separate FFN for clean and perturbed views, same weights at the start.
+    assert model.adv_projection_noisy is not model.adv_projection
+    assert all(torch.equal(a, b) for a, b in zip(model.adv_projection.parameters(),
+                                                  model.adv_projection_noisy.parameters()))
+    views = [(torch.randn(3, 2, model.d_model), torch.ones(3, 2, dtype=torch.long), index % 2 == 1)
+             for index in range(4)]
     keep = torch.ones(3, dtype=torch.bool)
     loss, stats = model._multiview_contrastive(views, torch.tensor([0, 1, 2]), keep)
     assert torch.isfinite(loss) and 0 <= stats["adv_acc"] <= 1
-    same = [(views[0][0], views[0][1])] * 4
+    same = [(views[0][0], views[0][1], index % 2 == 1) for index in range(4)]
     alone, _ = model._multiview_contrastive(same, torch.tensor([0, 0, 0]), keep)
     # Identical views, same image (no negatives): each anchor spreads over its 3 equal positives -> log 3.
     torch.testing.assert_close(alone, torch.tensor(3.0).log(), atol=1e-4, rtol=0)

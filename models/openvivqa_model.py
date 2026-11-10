@@ -1,5 +1,6 @@
 """ViT5 answer generation over question, CLIP image tokens and OCR features (+ TWC)."""
 
+import copy
 import math
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -158,11 +159,18 @@ class OpenViVQAModel(PreTrainedModel):
         # Warm-up factor of the OCR noise (ocr_cross / ocr_both), set by the trainer each step: 0 at the
         # first step = the DOVE run, 1 after the LR warm-up. Not a parameter, not saved.
         self.adv_ramp = 1.0
+        # Label smoothing of the training answer loss (set by the trainer): the noise follows the
+        # gradient of the loss that is trained, as L in Surgical-VQLA++ Eq. 10.
+        self.adv_label_smoothing = 0.0
         if config.dove_adv in ("fgsm", "ocr_cross", "ocr_both"):
             # Surgical-VQLA++: backbone feature -> FFN -> P, contrasted between clean and adversarial.
             with _seeded(seed + 8):
                 self.adv_projection = nn.Sequential(
                     nn.Linear(self.d_model, self.d_model), nn.ReLU(), nn.Linear(self.d_model, 128))
+            # Surgical-VQLA++ Fig. 2: one FFN for the clean feature, one for the perturbed feature.
+            # Separate weights, same start: at step 0 both heads are the same map, so a clean / perturbed
+            # pair with equal features has cosine 1; they then train apart.
+            self.adv_projection_noisy = copy.deepcopy(self.adv_projection)
 
         self.generation_config = GenerationConfig(
             max_new_tokens=config.generation_max_new_tokens,
@@ -570,6 +578,12 @@ class OpenViVQAModel(PreTrainedModel):
         return (F.kl_div(q, p, log_target=True, reduction="batchmean")
                 + F.kl_div(p, q, log_target=True, reduction="batchmean"))
 
+    def _noise_loss(self, logits, labels):
+        """The answer loss the trainer optimises (cross-entropy with its label smoothing, = HF
+        LabelSmoother), used for the gradient that sets the noise direction."""
+        return F.cross_entropy(logits.reshape(-1, logits.shape[-1]).float(), labels.reshape(-1),
+                               ignore_index=-100, label_smoothing=self.adv_label_smoothing)
+
     def _ocr_noise(self, direction, tokens, mask):
         """Surgical-VQLA++ step (alpha = 1) on the OCR block only: eps * RMS(tokens) * sign(direction),
         padding untouched, detached (a constant input shift, as r in their Eq. 10)."""
@@ -599,9 +613,10 @@ class OpenViVQAModel(PreTrainedModel):
 
     def _multiview_contrastive(self, views, image_group, keep):
         """Contrast of the views of each sample (Surgical-VQLA++ L_CTR; SupCon of Khosla et al.,
-        NeurIPS'20, when there are more than two views). views: list of (tokens [B, L, D], mask [B, L])
-        = the encoder output of the OCR block of each view (the only block the noise and the related
-        copy change). h = masked mean, z = normalize(FFN(h)). Anchor i: positives = the other views of
+        NeurIPS'20, when there are more than two views). views: list of (tokens [B, L, D], mask [B, L],
+        noisy) = the encoder output of the OCR block of each view (the only block the noise and the
+        related copy change). h = masked mean, z = normalize(FFN(h)), FFN = adv_projection for a clean
+        view and adv_projection_noisy for a perturbed one (Surgical-VQLA++ Fig. 2). Anchor i: positives = the other views of
         the same sample; denominator = every vector except itself and the other samples of the same
         image (near-identical OCR: false negatives); logits cos / tau. With two views this is NT-Xent.
         Samples without OCR are left out."""
@@ -609,8 +624,10 @@ class OpenViVQAModel(PreTrainedModel):
         count = rows.numel()
         if count < 2:
             return views[0][0].sum() * 0.0, {}
-        pooled = torch.cat([self._masked_mean(tokens, mask)[rows] for tokens, mask in views])
-        z = F.normalize(self.adv_projection(pooled).float(), dim=-1)
+        pooled = torch.cat([self._masked_mean(tokens, mask)[rows] for tokens, mask, _ in views])
+        heads = [self.adv_projection_noisy if noisy else self.adv_projection for *_, noisy in views]
+        z = torch.cat([F.normalize(head(part).float(), dim=-1)
+                       for head, part in zip(heads, pooled.split(count))])
         sample = torch.arange(count, device=z.device).repeat(len(views))
         group = image_group[rows].repeat(len(views))
         itself = torch.eye(z.shape[0], dtype=torch.bool, device=z.device)
@@ -649,13 +666,14 @@ class OpenViVQAModel(PreTrainedModel):
         keep = torch.tensor([not item["placeholder"] for item in ocr_info], device=mask.device)
         group = image_group.to(mask.device)
         if self.config.dove_adv == "ocr_cross":
-            reg, statistics = self._multiview_contrastive([(original_ocr, ocr_mask), (related_ocr, related_mask)],
-                                                          group, keep)
+            reg, statistics = self._multiview_contrastive(
+                [(original_ocr, ocr_mask, False), (related_ocr, related_mask, True)], group, keep)
             return dict(adv_reg=reg, **statistics)
         outputs, perturbed = [], []
         for values, (low, high), token_mask, fused_mask, loss in (
-                (inputs["embeds"], (start, end), ocr_mask, mask, result["loss"]),
-                (related_inputs["embeds"], (related_start, related_end), related_mask, view_mask, result["view_loss"])):
+                (inputs["embeds"], (start, end), ocr_mask, mask, self._noise_loss(result["logits"], labels)),
+                (related_inputs["embeds"], (related_start, related_end), related_mask, view_mask,
+                 self._noise_loss(result["view_logits"], labels))):
             grad, = torch.autograd.grad(loss, values, retain_graph=True)
             noise = self._ocr_noise(grad[:, low:high], values[:, low:high], token_mask)
             shifted = torch.cat([values[:, :low], values[:, low:high] + noise, values[:, high:]], dim=1)
@@ -664,13 +682,13 @@ class OpenViVQAModel(PreTrainedModel):
             perturbed.append(noisy.last_hidden_state[:, low:high])
         if self.config.dove_adv_combine == "joint":
             reg, statistics = self._multiview_contrastive(
-                [(original_ocr, ocr_mask), (perturbed[0], ocr_mask), (related_ocr, related_mask),
-                 (perturbed[1], related_mask)], group, keep)
+                [(original_ocr, ocr_mask, False), (perturbed[0], ocr_mask, True), (related_ocr, related_mask, False),
+                 (perturbed[1], related_mask, True)], group, keep)
         else:
-            first, statistics = self._multiview_contrastive([(original_ocr, ocr_mask), (perturbed[0], ocr_mask)],
-                                                            group, keep)
-            second, _ = self._multiview_contrastive([(related_ocr, related_mask), (perturbed[1], related_mask)],
-                                                    group, keep)
+            first, statistics = self._multiview_contrastive(
+                [(original_ocr, ocr_mask, False), (perturbed[0], ocr_mask, True)], group, keep)
+            second, _ = self._multiview_contrastive(
+                [(related_ocr, related_mask, False), (perturbed[1], related_mask, True)], group, keep)
             reg = 0.5 * (first + second)
         return dict(adv_logits=outputs, adv_reg=reg, **statistics)
 
@@ -700,7 +718,7 @@ class OpenViVQAModel(PreTrainedModel):
             return encoded, decoded
 
         if config.dove_adv == "fgsm":
-            grad, = torch.autograd.grad(clean["loss"], embeds, retain_graph=True)
+            grad, = torch.autograd.grad(self._noise_loss(clean["logits"], labels), embeds, retain_graph=True)
             perturbation = torch.zeros_like(embeds)
             for segment, scale in (("question", 1.0), ("image", 0.5), ("ocr", 1.0)):
                 start, end = inputs[segment]
@@ -710,11 +728,9 @@ class OpenViVQAModel(PreTrainedModel):
             perturbation = (perturbation * mask.unsqueeze(-1).to(embeds.dtype)).detach()
             encoded, decoded = decode(embeds + perturbation)
             rows = embeds.shape[0]
-            reg, statistics = self._dove_contrastive(
-                clean["encoded"].last_hidden_state, mask, encoded.last_hidden_state, mask,
-                torch.arange(rows, device=embeds.device), torch.ones(rows, dtype=torch.bool, device=embeds.device),
-                projection=self.adv_projection)
-            statistics = {key.replace("dove_", "adv_"): value for key, value in statistics.items()}
+            reg, statistics = self._multiview_contrastive(
+                [(clean["encoded"].last_hidden_state, mask, False), (encoded.last_hidden_state, mask, True)],
+                torch.arange(rows, device=embeds.device), torch.ones(rows, dtype=torch.bool, device=embeds.device))
             statistics["adv_norm"] = (self._frobenius(perturbation) / self._frobenius(embeds.detach()).clamp_min(1e-12)).mean()
             return dict(adv_logits=[decoded.logits], adv_reg=reg, **statistics)
 
@@ -732,7 +748,8 @@ class OpenViVQAModel(PreTrainedModel):
             logits.append(decoded.logits)
             divergences.append(divergence)
             if step + 1 < config.dove_adv_steps:
-                grad, = torch.autograd.grad(decoded.loss + divergence, delta, retain_graph=True)
+                grad, = torch.autograd.grad(self._noise_loss(decoded.logits, labels) + divergence, delta,
+                                            retain_graph=True)
                 grad = grad * valid
                 delta = delta + (radius * grad.float() / self._frobenius(grad).clamp_min(1e-12)).to(delta.dtype)
                 delta = delta * (radius / self._frobenius(delta).clamp_min(1e-12)).clamp(max=1.0).to(delta.dtype)
@@ -904,7 +921,8 @@ class OpenViVQAModel(PreTrainedModel):
                 # Scenario 1: the gradient of the original view's answer loss w.r.t. its OCR block,
                 # carried word by word to the related copy, perturbs the related view.
                 start, end = adv_inputs["ocr"]
-                grad, = torch.autograd.grad(result["loss"], adv_inputs["embeds"], retain_graph=True)
+                grad, = torch.autograd.grad(self._noise_loss(result["logits"], labels), adv_inputs["embeds"],
+                                            retain_graph=True)
                 direction = self._carry_to_words(grad[:, start:end], ocr_to_word_map, ocr_rel_to_word_map,
                                                  ocr_rel_attention_mask)
             view, view_mask, _ = self.encode(
