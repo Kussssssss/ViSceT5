@@ -19,7 +19,7 @@ NEW_MODULES = ("ocr_encoder", "semantic_ocr_embedding", "char_embedding", "char_
                "ocr_visual_proj", "dove_projection", "adv_projection")
 AUXILIARY = ("twc_loss", "twc_acc", "view_loss", "twc_pos_logit", "twc_neg_logit", "ground_loss",
              "ground_mass", "ground_area", "span_loss", "span_acc", "dove_loss", "dove_acc", "dove_pos_cos", "dove_neg_cos",
-             "adv_loss", "adv_reg", "adv_kl", "adv_norm", "adv_acc", "adv_pos_cos", "adv_neg_cos")
+             "adv_loss", "adv_reg", "adv_ramp", "adv_kl", "adv_norm", "adv_acc", "adv_pos_cos", "adv_neg_cos")
 SCALARS = ("twc_logit_scale", "instruction_proj_gate", "twc_bias", "consformer_gate")
 
 
@@ -105,7 +105,18 @@ class VQATrainer(Seq2SeqTrainer):
         return torch.nn.functional.cross_entropy(logits.reshape(-1, logits.shape[-1]).float(), labels.reshape(-1),
                                                  ignore_index=-100)
 
+    def _adv_ramp(self, model):
+        """0 -> 1 over the LR warm-up (dove_adv_rampup), else 1; written into the model for the noise."""
+        core = getattr(model, "module", model)
+        ramp = 1.0
+        if model.training and getattr(core.config, "dove_adv_rampup", False):
+            warmup = self.args.get_warmup_steps(self.state.max_steps or 0)
+            ramp = min(1.0, self.state.global_step / warmup) if warmup > 0 else 1.0
+        core.adv_ramp = ramp
+        return ramp
+
     def compute_loss(self, model, inputs, return_outputs=False):
+        ramp = self._adv_ramp(model)
         outputs = model(**inputs)
         labels = inputs.get("labels")
         if labels is None:
@@ -139,7 +150,9 @@ class VQATrainer(Seq2SeqTrainer):
         if "dove_loss" in outputs:
             loss = loss + config.dove_contrastive_weight * outputs["dove_loss"]
         if "adv_reg" in outputs:
-            loss = loss + config.dove_adv_weight * outputs["adv_reg"]
+            ramp = ramp if config.dove_adv in ("ocr_cross", "ocr_both") else 1.0
+            outputs["adv_ramp"] = torch.tensor(ramp)
+            loss = loss + config.dove_adv_weight * ramp * outputs["adv_reg"]
         if model.training and any(key in outputs for key in ("twc_loss", "view_loss", "ground_loss", "span_loss",
                                                              "dove_loss", "adv_reg")):
             for key in AUXILIARY:

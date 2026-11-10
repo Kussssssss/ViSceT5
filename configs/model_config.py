@@ -71,6 +71,7 @@ class OpenViVQAConfig(PretrainedConfig):
         dove_adv_steps: Optional[int] = None,
         dove_adv_weight: Optional[float] = None,
         dove_adv_combine: Optional[str] = None,
+        dove_adv_rampup: Optional[bool] = None,
         ocr_edit_distance: int = 2,
         qa_clip_d_text: Optional[int] = None,
         pad_token_id: Optional[int] = None,
@@ -237,7 +238,11 @@ class OpenViVQAConfig(PretrainedConfig):
         self.dove_adv_eps = float(dove_adv_eps) if dove_adv_eps is not None else 0.05
         self.dove_adv_steps = int(dove_adv_steps) if dove_adv_steps is not None else 2
         self.dove_adv_weight = (float(dove_adv_weight) if dove_adv_weight is not None
-                                else {"fgsm": 1.0, "pgd": 1.5, "ocr_cross": 1.0, "ocr_both": 1.0}.get(self.dove_adv, 0.0))
+                                else {"fgsm": 1.0, "pgd": 1.5, "ocr_cross": 0.5, "ocr_both": 0.5}.get(self.dove_adv, 0.0))
+        # ocr_cross / ocr_both: Surgical-VQLA++ weighs L_CTR 1 against L(x) + L(x + r) = 2 answer terms;
+        # the answer loss here is the MEAN over the passes (total 1), so the same ratio is 0.5.
+        # dove_adv_rampup: noise size and contrast weight grow linearly 0 -> 1 over the LR warm-up.
+        self.dove_adv_rampup = bool(dove_adv_rampup) if dove_adv_rampup is not None else False
         if self.dove_adv_eps < 0 or self.dove_adv_steps < 1 or self.dove_adv_weight < 0:
             raise ValueError("dove_adv_eps >= 0, dove_adv_steps >= 1 and dove_adv_weight >= 0 are required.")
         self.ocr_edit_distance = int(ocr_edit_distance)

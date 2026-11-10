@@ -100,7 +100,8 @@ class ModelArguments:
     dove_adv_eps: float = field(default=0.05, metadata={"help": "Perturbation size relative to the norm of the perturbed tokens."})
     dove_adv_steps: int = field(default=2, metadata={"help": "PGD ascent points K (pgd)."})
     dove_adv_combine: str = field(default="joint", metadata={"help": "ocr_both: joint (one SupCon over 4 views) | mean."})
-    dove_adv_weight: Optional[float] = field(default=None, metadata={"help": "Regulariser weight (default: 1 fgsm, 1.5 pgd)."})
+    dove_adv_rampup: bool = field(default=False, metadata={"help": "ocr_cross / ocr_both: noise and contrast weight 0 -> 1 over the LR warm-up."})
+    dove_adv_weight: Optional[float] = field(default=None, metadata={"help": "Regulariser weight (default: 1 fgsm, 1.5 pgd, 0.5 ocr_cross / ocr_both)."})
     ocr_visual_pool: bool = field(
         default=False, metadata={"help": "OCR token += W LN(mean CLIP patch feature under its box), W = 0 at the start."}
     )
