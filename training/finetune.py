@@ -32,7 +32,8 @@ ARCHITECTURE_FLAGS = ("ablation_use_image", "ablation_use_qaclip", "ablation_use
                       "qavit_gated_joint", "qavit_ground", "qavit_ground_weight", "consformer_span",
                       "consformer_span_weight", "consformer_geometry", "consformer_word_link", "ocr_visual_pool",
                       "dove_contrastive", "dove_contrastive_weight", "dove_temperature",
-                      "dove_adv", "dove_adv_eps", "dove_adv_steps", "dove_adv_weight", "dove_adv_combine")
+                      "dove_adv", "dove_adv_eps", "dove_adv_steps", "dove_adv_weight", "dove_adv_combine",
+                      "dove_adv_rampup")
 
 
 def main(args_list=None):

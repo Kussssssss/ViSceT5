@@ -1684,3 +1684,29 @@ def test_ocr_noise_helpers(make_model):
     alone, _ = model._multiview_contrastive(same, torch.tensor([0, 0, 0]), keep)
     # Identical views, same image (no negatives): each anchor spreads over its 3 equal positives -> log 3.
     torch.testing.assert_close(alone, torch.tensor(3.0).log(), atol=1e-4, rtol=0)
+
+
+def test_ocr_noise_rampup_starts_as_dove(make_model, tokenizer, samples, corrector, tmp_path):
+    model = make_model(use_twc=True, twc_two_views=True, twc_contrastive=False, dove_adv="ocr_cross",
+                       dove_adv_rampup=True)
+    assert model.config.dove_adv_weight == 0.5  # Surgical ratio 1 : (L(x) + L(x + r)) with a mean answer loss
+    collator = build_collator(model, tokenizer, corrector, training=True)
+    batch = collator(samples)
+    args = CustomTrainingArguments(output_dir=str(tmp_path), max_steps=10, warmup_ratio=0.5, per_device_train_batch_size=2,
+                                   logging_steps=1, remove_unused_columns=False, report_to="none",
+                                   save_strategy="no", use_cpu=True, dataloader_pin_memory=False, disable_tqdm=True)
+    trainer = VQATrainer(model=model, args=args, tokenizer=tokenizer, train_dataset=ViT5VQADataset(pd.DataFrame(samples)),
+                         data_collator=collator)
+    trainer.state.max_steps, trainer.state.global_step = 10, 0
+    model.train()
+    loss, outputs = trainer.compute_loss(model, batch, return_outputs=True)
+    assert model.adv_ramp == 0.0 and float(outputs["adv_ramp"]) == 0.0
+    expected = 0.5 * (trainer._answer_loss(outputs["logits"], batch["labels"])
+                      + trainer._answer_loss(outputs["view_logits"], batch["labels"]))
+    torch.testing.assert_close(loss, expected)  # step 0: no noise, no contrast = the DOVE loss
+    trainer.state.global_step = 5
+    loss, outputs = trainer.compute_loss(model, batch, return_outputs=True)
+    assert model.adv_ramp == 1.0
+    expected = 0.5 * (trainer._answer_loss(outputs["logits"], batch["labels"])
+                      + trainer._answer_loss(outputs["view_logits"], batch["labels"])) + 0.5 * outputs["adv_reg"]
+    torch.testing.assert_close(loss, expected)

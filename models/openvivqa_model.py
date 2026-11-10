@@ -155,6 +155,9 @@ class OpenViVQAModel(PreTrainedModel):
         if config.dove_adv != "none":
             if not (config.use_twc and config.twc_two_views):
                 raise ValueError("dove_adv adds a third view to DOVE (use_twc with twc_two_views).")
+        # Warm-up factor of the OCR noise (ocr_cross / ocr_both), set by the trainer each step: 0 at the
+        # first step = the DOVE run, 1 after the LR warm-up. Not a parameter, not saved.
+        self.adv_ramp = 1.0
         if config.dove_adv in ("fgsm", "ocr_cross", "ocr_both"):
             # Surgical-VQLA++: backbone feature -> FFN -> P, contrasted between clean and adversarial.
             with _seeded(seed + 8):
@@ -570,7 +573,7 @@ class OpenViVQAModel(PreTrainedModel):
     def _ocr_noise(self, direction, tokens, mask):
         """Surgical-VQLA++ step (alpha = 1) on the OCR block only: eps * RMS(tokens) * sign(direction),
         padding untouched, detached (a constant input shift, as r in their Eq. 10)."""
-        scale = self.config.dove_adv_eps * self._masked_rms(tokens, mask).to(tokens.dtype)
+        scale = self.config.dove_adv_eps * self.adv_ramp * self._masked_rms(tokens, mask).to(tokens.dtype)
         return (scale * direction.sign() * mask.unsqueeze(-1).to(tokens.dtype)).detach()
 
     @staticmethod
