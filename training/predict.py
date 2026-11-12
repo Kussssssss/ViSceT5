@@ -34,8 +34,9 @@ def _clean(text):
 def predict_split(model, tokenizer, collator, frame, batch_size, num_beams, max_new_tokens, labelled):
     device = next(model.parameters()).device
     frame = frame.copy()
-    if not labelled:
-        frame["answer"] = ""
+    # Generation never reads the answers: an unlabelled batch for every split, so a dev row
+    # without an answer cannot make a mixed batch. Dev metrics use the caller's frame.
+    frame["answer"] = ""
     dataset = ViT5VQADataset(frame)
     predictions = []
     for start in range(0, len(dataset), batch_size):
