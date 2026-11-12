@@ -11,6 +11,7 @@ from transformers import HfArgumentParser, set_seed
 from configs.arguments import CustomTrainingArguments, DataArguments, ModelArguments
 from data.dataset import ViT5VQADataset
 from training.common import (
+    drop_unanswered,
     PROJECT_ROOT,
     build_collator,
     build_corrector,
@@ -48,6 +49,8 @@ def main(args_list=None):
         training_args._n_gpu = 1
     set_seed(training_args.seed)
     frames = load_dataframes(data_args.dataset_name, data_args.data_dir)
+    for split in ("train", "validation"):
+        frames[split] = drop_unanswered(frames[split], split)
     if training_args.smoke_test:
         frames["train"] = frames["train"].head(training_args.smoke_train_samples)
         frames["validation"] = frames["validation"].head(

@@ -304,6 +304,7 @@ class DatasetHubLoader:
         mapper_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
         image_zip_path: Optional[str] = None,
         ocr_zip_path: Optional[str] = None,
+        image_extra_ids: Optional[List[str]] = None,
     ):
         if dataset_name in self.registry:
             raise ValueError("Dataset already registered")
@@ -321,6 +322,7 @@ class DatasetHubLoader:
             "mapper_fn": mapper_fn or _default_vqa_mapper,
             "image_zip_path": image_zip_path,
             "ocr_zip_path": ocr_zip_path,
+            "image_extra_ids": [i for i in (image_extra_ids or []) if str(i).strip()],
         }
 
     def prepare(self, dataset_name: str) -> Dict[str, Any]:
@@ -367,6 +369,24 @@ class DatasetHubLoader:
                     _safe_remove(zip_path_img)
                     _safe_rmtree(raw_dir_img)
 
+        # Extra image archives (OpenViVQA: the test images are a separate zip), each extracted once
+        # into its own directory beside the main image directory (never inside it, so the main leaf
+        # is always the same). build_df looks there for the images the main tree does not have.
+        extra_roots = []
+        for index, extra_id in enumerate(spec.get("image_extra_ids") or []):
+            extra_root = os.path.join(out_dir, f"{spec['image_subdir_name']}_extra_{index}")
+            extra_roots.append(extra_root)
+            if os.path.isdir(extra_root) and _count_in_dir(_find_leaf_dir(extra_root, _is_img), _is_img) > 0:
+                continue
+            raw_dir_extra = _ensure_dir(os.path.join(self.raw_root, f"{dataset_name}_img_extra_{index}"))
+            zip_path_extra = os.path.join(raw_dir_extra, f"images_extra_{index}.zip")
+            print(f"⬇️ [Hub] Extra image archive #{index} ({extra_id})")
+            _maybe_download(extra_id, None, zip_path_extra)
+            _extract_zip(zip_path_extra, extra_root)
+            if self.cleanup:
+                _safe_remove(zip_path_extra)
+                _safe_rmtree(raw_dir_extra)
+
         if spec["ocr_dir_override"] and os.path.isdir(spec["ocr_dir_override"]):
             ocr_dir = _find_leaf_dir(spec["ocr_dir_override"], _is_ocr)
         else:
@@ -389,7 +409,8 @@ class DatasetHubLoader:
                         _safe_remove(zip_path_ocr)
                         _safe_rmtree(raw_dir_ocr)
 
-        self.paths[dataset_name] = {"out_dir": out_dir, "annotations": ann_out, "image_dir": image_dir, "ocr_dir": ocr_dir}
+        self.paths[dataset_name] = {"out_dir": out_dir, "annotations": ann_out, "image_dir": image_dir, "ocr_dir": ocr_dir,
+                                    "image_extra_roots": extra_roots}
         return self.paths[dataset_name]
 
     def build_df(self, dataset_name: str) -> pd.DataFrame:
@@ -411,6 +432,19 @@ class DatasetHubLoader:
                 print(f"⚠️ [Hub] Bỏ qua split '{split}': đọc JSON lỗi ({type(e).__name__}: {e}).")
                 continue
             rows.extend(mapper(data, img_dir, split, ocr_dir))
+        extra_roots = [root for root in p.get("image_extra_roots") or [] if os.path.isdir(root)]
+        if extra_roots:
+            found = 0
+            for row in rows:
+                path, name = row.get("image_path"), row.get("image_filename")
+                if name and not (path and os.path.isfile(path)):
+                    for root in extra_roots:
+                        hit = _file_index(root, _is_img).get(os.path.basename(str(name)))
+                        if hit:
+                            row["image_path"] = hit
+                            found += 1
+                            break
+            print(f"[Hub] {found} image paths resolved in the extra archives.")
         df = pd.DataFrame(rows)
         if "dataset" in df.columns:
             df["dataset"] = dataset_name

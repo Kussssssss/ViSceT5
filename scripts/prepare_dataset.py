@@ -81,6 +81,7 @@ def main(args):
         image_dir_override=image_dir_override,
         ocr_zip_id=ocr_zip_id,
         ocr_dir_override=ocr_dir_override,
+        image_extra_ids=list((config['image'].get('extra_drive_ids') or []) if not image_dir_override else []),
         splits={
             "train":      {"id": train_id, "url": None},
             "validation": {"id": val_id, "url": None},

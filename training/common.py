@@ -1,6 +1,7 @@
 """Shared configuration, dataset and checkpoint setup for VQA entry points."""
 
 import sys
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -47,6 +48,33 @@ def parse_args_with_yaml_and_cli(parser, args_list=None, default_yaml=None):
     return parser.parse_dict(values)
 
 
+def _read_split(path):
+    """Text columns as written: only an empty cell is missing. pandas' default would turn answers
+    such as "None", "NA", "null" or "nan" into NaN, i.e. an unlabelled row in a labelled split."""
+    return pd.read_csv(path, keep_default_na=False, na_values=[""])
+
+
+def _missing_images(frame):
+    if not len(frame) or "image_path" not in frame:
+        return 0
+    return int(sum(not (isinstance(path, str) and os.path.isfile(path)) for path in frame["image_path"]))
+
+
+def _images_present(frame):
+    """False when most image paths of a split do not exist: a cache written before those images
+    were downloaded (a few missing files alone do not trigger a new download)."""
+    return _missing_images(frame) <= 0.5 * len(frame)
+
+
+def drop_unanswered(frame, split):
+    """Training / validation rows need an answer (the collator never mixes labelled and unlabelled
+    samples in one batch). Rows with an empty answer are dropped and counted."""
+    answered = frame["answer"].notna() & frame["answer"].astype(str).str.strip().ne("")
+    if (~answered).any():
+        print(f"[data] {split}: dropped {int((~answered).sum())} of {len(frame)} rows without an answer.")
+    return frame[answered].reset_index(drop=True)
+
+
 def load_dataframes(dataset_name, data_dir):
     paths = {
         split: Path(OUTPUT_PATH) / f"merged_{suffix}.csv"
@@ -57,13 +85,15 @@ def load_dataframes(dataset_name, data_dir):
         )
     }
     if all(path.is_file() for path in paths.values()):
-        frames = {split: pd.read_csv(path) for split, path in paths.items()}
+        frames = {split: _read_split(path) for split, path in paths.items()}
         if all(
             "dataset" in frame and set(frame["dataset"].dropna()) == {dataset_name}
             for frame in frames.values()
             if len(frame)
-        ):
+        ) and all(_images_present(frame) for frame in frames.values()):
             return frames
+        # Cache of another dataset, or of a preparation without some images (e.g. OpenViVQA test
+        # images, a separate archive): prepare again.
     from argparse import Namespace
     from scripts.prepare_dataset import main as prepare_dataset
 
@@ -73,7 +103,12 @@ def load_dataframes(dataset_name, data_dir):
             data_dir=data_dir,
         )
     )
-    return {split: pd.read_csv(path) for split, path in paths.items()}
+    frames = {split: _read_split(path) for split, path in paths.items()}
+    for split, frame in frames.items():
+        missing = _missing_images(frame)
+        if missing:
+            print(f"[data] {dataset_name} {split}: {missing} of {len(frame)} image paths do not exist.")
+    return frames
 
 
 def load_model_and_tokenizer(checkpoint=None, overrides=None):
