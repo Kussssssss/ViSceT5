@@ -30,7 +30,7 @@ from transformers.trainer_pt_utils import LabelSmoother  # noqa: E402
 from configs.arguments import CustomTrainingArguments, DataArguments, ModelArguments  # noqa: E402
 from data.dataset import ViT5VQADataset  # noqa: E402
 from run_pipeline import training_arguments  # noqa: E402
-from training.common import (build_collator, build_corrector, load_dataframes,  # noqa: E402
+from training.common import (build_collator, build_corrector, drop_unanswered, load_dataframes,  # noqa: E402
                              load_model_and_tokenizer, parse_args_with_yaml_and_cli)
 from training.finetune import ARCHITECTURE_FLAGS  # noqa: E402
 
@@ -60,6 +60,7 @@ def main():
     model.to(device).train()
     config = model.config
     frames = load_dataframes(data_args.dataset_name, data_args.data_dir)
+    frames["train"] = drop_unanswered(frames["train"], "train")
     corrector = build_corrector(config, frames["train"], data_args.term_vocab_path,
                                 data_args.viet_vocab_path) if config.use_twc else None
     loader = DataLoader(ViT5VQADataset(frames["train"]), batch_size=training_args.per_device_train_batch_size,

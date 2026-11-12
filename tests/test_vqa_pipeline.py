@@ -1462,7 +1462,9 @@ def test_trainer_adds_the_auxiliary_losses(make_model, tokenizer, samples, tmp_p
                        qavit_ground_weight=0.5, ablation_use_ocr=True, consformer_constituent="tree",
                        consformer_residual=True, consformer_gate=True, consformer_span=True,
                        consformer_span_weight=0.25)
-    trainer = VQATrainer(model=model, args=Seq2SeqTrainingArguments(output_dir=str(tmp_path), report_to=[]),
+    # use_cpu: on a GPU machine the trainer would move the model to cuda and the CPU batch would not follow.
+    trainer = VQATrainer(model=model, args=Seq2SeqTrainingArguments(output_dir=str(tmp_path), report_to=[],
+                                                                    use_cpu=True),
                          tokenizer=tokenizer)
     batch = build_collator(model, tokenizer, training=True)(samples)
     model.train()
@@ -1623,6 +1625,8 @@ def test_dove_adversarial_view(make_model, tokenizer, samples, corrector, tmp_pa
 
 def test_dove_adversarial_switch_reaches_the_config(monkeypatch):
     from run_pipeline import training_arguments
+    for key in ("DOVE_ADV_WEIGHT", "DOVE_ADV_COMBINE", "DOVE_ADV_RAMPUP"):  # set by the notebook cell 3
+        monkeypatch.delenv(key, raising=False)
     for key, value in {"DOVE_ADV": "pgd", "DOVE_ADV_EPS": "0.1", "DOVE_ADV_STEPS": "3"}.items():
         monkeypatch.setenv(key, value)
     parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
