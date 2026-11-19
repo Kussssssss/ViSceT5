@@ -59,6 +59,14 @@ def main():
     if not gt:
         print(f"GT test {args.dataset}: {path} không có đáp án → chưa chấm test.")
         return
+    # Hidden test sets (ViOCRVQA) ship the same placeholder answer ("your answer") for every question:
+    # scoring against it gives EM 0 and means nothing, so no GT file is written.
+    first = [item["answers"][0].strip().lower() for item in gt]
+    distinct = len(set(first))
+    if "your answer" in set(first) or (len(first) >= 100 and distinct <= 5):
+        print(f"GT test {args.dataset}: đáp án test là giả ({distinct} giá trị khác nhau, vd {sorted(set(first))[:3]}) "
+              f"→ test chưa có ground truth công khai, chưa chấm test (chỉ có điểm dev).")
+        return
     out.parent.mkdir(exist_ok=True)
     json.dump({"annotations": gt}, open(out, "w", encoding="utf-8"), ensure_ascii=False)
     print(f"GT test: {out} | {len(gt)} câu có đáp án / {len(anns)} câu")
