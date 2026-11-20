@@ -8,6 +8,8 @@ import thêm trong kernel trộn hai phiên bản (ImportError: reset_sessions .
 
   # liệt kê checkpoint (điểm val từng epoch), tải checkpoint được chọn, ghi đường dẫn ra JSON
   python scripts/hf_io.py prepare --repo USER/REPO --dir OUTPUT_DIR --ckpt best --info_out info.json
+  # chỉ tải file dự đoán đã upload (không tải model) để chấm lại / up điểm; --info_out ghi pred_dir và danh sách file
+  python scripts/hf_io.py download_predictions --repo USER/REPO --dir OUTPUT_DIR --ckpt best --info_out info.json
   python scripts/hf_io.py upload_predictions --repo USER/REPO --dir PRED_DIR --path_in_repo predictions --files a.csv
   # đẩy các checkpoint-N local chưa có trên Hub (train lỡ chạy khi thiếu HF_TOKEN) để resume từ Hub
   python scripts/hf_io.py upload_checkpoints --repo USER/REPO --dir OUTPUT_DIR
@@ -148,6 +150,38 @@ def prepare(a, token):
             json.dump(info, f, ensure_ascii=False, indent=2)
 
 
+def download_predictions(a, token):
+    """Chỉ tải file dự đoán đã có trên Hub (predictions/ hoặc predictions/checkpoint-N/), KHÔNG tải model.
+    Dùng khi chỉ cần chấm điểm / up điểm. Repo hay checkpoint không có thì ghi danh sách file rỗng, notebook
+    rơi về nhánh prepare + predict như cũ."""
+    api = HfApi(token=token)
+    cks, _, _, files = list_checkpoints(api, a.repo, a.dir, token)
+    try:
+        ck = resolve(a.ckpt, cks)
+    except SystemExit:
+        ck = "best"
+    sub = "" if ck == "best" else ck
+    pred_dir = os.path.join(a.dir, f"predict_{ck}") if sub else a.dir
+    pred_repo = f"predictions/{ck}" if sub else "predictions"
+    os.makedirs(pred_dir, exist_ok=True)
+    mine = sorted(f for f in files if f.startswith(pred_repo + "/") and f.count("/") == pred_repo.count("/") + 1)
+    if mine:
+        print(f"⬇️ Tải file dự đoán [{ck}] từ {a.repo}: {', '.join(os.path.basename(f) for f in mine)}")
+        snapshot_download(repo_id=a.repo, repo_type="model", local_dir=a.dir, token=token,
+                          allow_patterns=[f"{pred_repo}/*"])
+        for f in glob.glob(os.path.join(a.dir, *pred_repo.split("/"), "*")):
+            dst = os.path.join(pred_dir, os.path.basename(f))
+            if os.path.isfile(f) and not os.path.exists(dst):
+                shutil.copy2(f, dst)
+    else:
+        print(f"ℹ️ {a.repo} chưa có file dự đoán cho '{ck}'.")
+    info = {"ckpt": ck, "pred_dir": pred_dir, "pred_path_in_repo": pred_repo,
+            "files": [os.path.basename(f) for f in mine]}
+    if a.info_out:
+        with open(a.info_out, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=2)
+
+
 def upload(a, token):
     if not token:
         sys.exit("❌ Thiếu HF_TOKEN → không upload được; hãy tải file về trước khi ngắt phiên.")
@@ -185,7 +219,7 @@ def upload_checkpoints(a, token):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("action", choices=["prepare", "download_best", "upload_predictions", "upload_checkpoints"])
+    ap.add_argument("action", choices=["prepare", "download_best", "download_predictions", "upload_predictions", "upload_checkpoints"])
     ap.add_argument("--repo", required=True)
     ap.add_argument("--dir", required=True)
     ap.add_argument("--ckpt", default="best", help="best | latest | epochN | checkpoint-N")
@@ -199,6 +233,8 @@ def main():
         a.action = "prepare"
     if a.action == "prepare":
         prepare(a, token)
+    elif a.action == "download_predictions":
+        download_predictions(a, token)
     elif a.action == "upload_checkpoints":
         upload_checkpoints(a, token)
     else:
