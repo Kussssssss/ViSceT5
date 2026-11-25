@@ -161,8 +161,17 @@ checkpoints/
 
 # Notebooks
 *.ipynb
-# ...except the curated, token-free Colab runner
+# ...except the curated, token-free Colab runners & ablation notebooks
 !notebooks/finetune_colab.ipynb
+!notebooks/ablations/
+!notebooks/ablations/*/
+!notebooks/ablations/*/*.ipynb
+
+# Local paper & scratch files (keep local)
+paper/
+scratch/
+cache/
+datasets/
 
 # Đáp án test công khai dùng cho training/benchmark_eval.py
 !eval_gt/*.json
