@@ -22,7 +22,8 @@ def main():
         "Notebook dùng nhánh exp/vitextvqa-ocr-ablation, cấu hình ABL1 "
         "16×1, LR 1e-4, QA-ViT/Consformer/TWC tắt. Code này khác commit ABL1 lịch sử; "
         "cần chạy thêm kịch bản 4 trên cùng code để so sánh có kiểm soát.\n",
-        "Mỗi kịch bản có output và Hugging Face repo riêng. Chạy cell theo thứ tự.\n",
+        "Mỗi kịch bản có output và Hugging Face repo riêng; run hoàn tất được tự nhận diện "
+        "và bỏ qua train. Tên repo ổn định ngay cả khi code được cập nhật.\n",
     ]
     config = "".join(notebook["cells"][4]["source"])
     config = replace_once(config, 'GIT_COMMIT     = "cc773b0"', f'GIT_COMMIT     = "{BRANCH}"')
@@ -33,8 +34,16 @@ def main():
         'assert OCR_SCENARIO in (1, 2, 3, 4, 5)\nRUN_NAME += f"-ocr{OCR_SCENARIO}-bs{BATCH_SIZE}x{GRAD_ACCUM}"')
     notebook["cells"][4]["source"] = config.splitlines(keepends=True)
     setup = "".join(notebook["cells"][6]["source"])
+    setup = replace_once(setup, 'import os, re, subprocess, yaml', 'import os, re, subprocess, sys, yaml')
     setup = replace_once(setup, '!git clone -q {GIT_REPO} {REPO_DIR}',
                          '!git clone -q --branch {GIT_COMMIT} {GIT_REPO} {REPO_DIR}')
+    setup = replace_once(setup,
+        'OUTPUT_DIR = f"/content/ViSceT5/output/{CODE_TAG}_{DATASET}_{RUN_NAME}"\n'
+        'HF_REPO = f"{HF_USER}/ViSceT5-{CODE_TAG}-{DATASET.lower()}-{RUN_NAME}"',
+        '# Stable experiment namespace; 9aafc6b is the original published ablation code.\n'
+        'RUN_TAG = "9aafc6b"\n'
+        'OUTPUT_DIR = f"/content/ViSceT5/output/{RUN_TAG}_{DATASET}_{RUN_NAME}"\n'
+        'HF_REPO = f"{HF_USER}/ViSceT5-{RUN_TAG}-{DATASET.lower()}-{RUN_NAME}"')
     marker = 'os.environ.update(ENV, OUTPUT_DIR=OUTPUT_DIR, HF_REPO=HF_REPO, PYTHONUNBUFFERED="1")'
     setup = replace_once(setup, marker, '''ENV.update({
     "OCR_USE_CHAR": _b(OCR_SCENARIO != 1),
@@ -43,11 +52,69 @@ def main():
     "OCR_ALIGN_SPATIAL_VISUAL": _b(OCR_SCENARIO != 5),
 })
 assert all(k in READ for k in ENV), "Commit does not expose every requested flag"
-''' + marker)
+''' + marker + '''
+# Check final Trainer state in a fresh process, avoiding stale HF modules after setup.
+# A failed lookup is an error, not permission to silently start a new run.
+_status_script = """
+import json, os, sys
+from huggingface_hub import HfApi, hf_hub_download
+from huggingface_hub.utils import RepositoryNotFoundError
+repo = os.environ['HF_REPO']
+token = os.environ.get('HF_TOKEN') or None
+try:
+    files = HfApi(token=token).list_repo_files(repo_id=repo, token=token)
+except RepositoryNotFoundError:
+    sys.exit(3)
+has_model = any(f in files for f in ('model.safetensors', 'model.safetensors.index.json',
+                                      'pytorch_model.bin', 'pytorch_model.bin.index.json'))
+states = [f for f in files if f.startswith('checkpoint-') and f.endswith('/trainer_state.json')]
+states.sort(key=lambda f: int(f.split('/')[0].split('-')[-1]))
+state_path = 'trainer_state.json' if 'trainer_state.json' in files else (states[-1] if states else None)
+if not state_path:
+    sys.exit(4)
+state = json.load(open(hf_hub_download(repo, state_path, token=token), encoding='utf-8'))
+steps, maximum = state.get('global_step', 0), state.get('max_steps', 0)
+if not maximum or steps < maximum:
+    sys.exit(4)
+if not has_model:
+    best = (state.get('best_model_checkpoint') or '').replace(chr(92), '/').split('/')[-1]
+    if not best or not any(f.startswith(best + '/model.') or f == best + '/pytorch_model.bin' for f in files):
+        sys.exit(4)
+    print(best)
+sys.exit(0)
+"""
+_runs = []
+for _tag in ("9aafc6b", "a5df1da"):
+    _repo = f"{HF_USER}/ViSceT5-{_tag}-{DATASET.lower()}-{RUN_NAME}"
+    _env = dict(os.environ, HF_REPO=_repo)
+    _status = subprocess.run([sys.executable, "-c", _status_script], env=_env, capture_output=True, text=True)
+    if _status.returncode not in (0, 3, 4):
+        print(_status.stderr)
+        raise RuntimeError("Không kiểm tra được checkpoint trên Hugging Face; dừng để tránh train nhầm.")
+    if _status.returncode in (0, 4):
+        _runs.append((_status.returncode, _tag, _repo, _status.stdout.strip()))
+_selected = next((run for run in _runs if run[0] == 0), _runs[0] if _runs else None)
+TRAIN_FINISHED = bool(_selected and _selected[0] == 0)
+if _selected:
+    _, RUN_TAG, HF_REPO, _saved_best = _selected
+    if _saved_best and PREDICT_CKPT == "best":
+        PREDICT_CKPT = _saved_best
+    OUTPUT_DIR = f"/content/ViSceT5/output/{RUN_TAG}_{DATASET}_{RUN_NAME}"
+    os.environ.update(HF_REPO=HF_REPO, OUTPUT_DIR=OUTPUT_DIR)
+print("Run đã hoàn tất → bỏ qua train." if TRAIN_FINISHED else "Chưa có run hoàn tất → train hoặc resume.")
+print(f"Đã chọn HF_REPO={HF_REPO}")
+''')
     notebook["cells"][6]["source"] = setup.splitlines(keepends=True)
     # Keep the ABL1 setup/test/train/predict flow; the old cross-run analysis cells
     # assume historical code and are not appropriate for this experiment.
     notebook["cells"] = notebook["cells"][:16]
+    for idx in (8, 9, 11):
+        old = "".join(notebook["cells"][idx]["source"])
+        wrapped = ('if TRAIN_FINISHED:\n'
+                   '    print("Run đã hoàn tất trên Hugging Face; bỏ qua bước này.")\n'
+                   'else:\n' + ''.join('    ' + line if line.strip() else line
+                                        for line in old.splitlines(keepends=True)))
+        notebook["cells"][idx]["source"] = wrapped.splitlines(keepends=True)
     # Predict in a fresh Python process: the Colab kernel has imported HF packages
     # before setup.sh can upgrade/downgrade them. Mixing those cached modules with
     # files from the new installation causes errors such as missing reset_sessions.
