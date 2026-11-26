@@ -48,6 +48,37 @@ assert all(k in READ for k in ENV), "Commit does not expose every requested flag
     # Keep the ABL1 setup/test/train/predict flow; the old cross-run analysis cells
     # assume historical code and are not appropriate for this experiment.
     notebook["cells"] = notebook["cells"][:16]
+    # Predict in a fresh Python process: the Colab kernel has imported HF packages
+    # before setup.sh can upgrade/downgrade them. Mixing those cached modules with
+    # files from the new installation causes errors such as missing reset_sessions.
+    prediction = "".join(notebook["cells"][15]["source"])
+    prediction = replace_once(prediction, '"evaluate", "bert-score", "git+https://github.com/salaniz/pycocoevalcap"], check=False)',
+                              '"evaluate", "bert-score", "git+https://github.com/salaniz/pycocoevalcap"], check=True)')
+    prediction = replace_once(prediction,
+        'probe = ("import huggingface_hub, transformers, evaluate, bert_score, pycocoevalcap;"\n'
+        '             "from transformers.models.auto.modeling_auto import MODEL_MAPPING; list(MODEL_MAPPING.keys())")',
+        'probe = "from huggingface_hub import HfApi, hf_hub_download; import transformers, evaluate, bert_score, pycocoevalcap"')
+    import base64
+    encoded = base64.b64encode(prediction.encode("utf-8")).decode("ascii")
+    wrapper = f'''# Dự đoán trong Python mới để không dùng module Hugging Face đã cache trong kernel.
+import json, os, subprocess, sys
+_prediction_env = os.environ.copy()
+_prediction_env["VISCET5_PREDICTION_CONTEXT"] = json.dumps({{
+    key: globals()[key] for key in ("CODE_SHA", "OUTPUT_DIR", "DATASET", "HF_REPO",
+                                     "PREDICT_CKPT", "PREDICT_MIN_DEV_EM")
+}})
+_bootstrap = """
+import base64, json, os
+from IPython.core.interactiveshell import InteractiveShell
+shell = InteractiveShell.instance()
+shell.user_ns.update(json.loads(os.environ['VISCET5_PREDICTION_CONTEXT']))
+source = base64.b64decode('{encoded}').decode('utf-8')
+code = shell.transform_cell(source)
+exec(compile(code, '<predict>', 'exec'), shell.user_ns)
+"""
+subprocess.run([sys.executable, "-u", "-c", _bootstrap], env=_prediction_env, check=True)
+'''
+    notebook["cells"][15]["source"] = wrapper.splitlines(keepends=True)
     for cell in notebook["cells"]:
         if cell["cell_type"] == "code":
             cell["execution_count"] = None
