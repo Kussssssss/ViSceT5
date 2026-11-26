@@ -332,17 +332,31 @@ class OpenViVQAModel(PreTrainedModel):
         for batch_index, item in enumerate(info):
             mapping = indices[batch_index]
             keep = valid[batch_index].unsqueeze(-1)
+            spatial_mapping = mapping
+            spatial_keep = keep
+            spatial_mask = None
+            if not self.config.ocr_align_spatial_visual:
+                # Word features are paired by position, without duplicating subwords.
+                positions = torch.arange(ids.shape[1], device=ids.device)
+                word_count = len(item["texts"])
+                spatial_mapping = positions.clamp(max=boxes.shape[1] - 1)
+                spatial_keep = ((positions < word_count) & token_mask[batch_index].bool()).unsqueeze(-1)
+                spatial_mask = spatial_keep.unsqueeze(0)
             token_info = {
                 "width": item["width"],
                 "height": item["height"],
-                "boxes": boxes[batch_index][mapping] * keep,
-                "det": item["det_features"].to(ids.device, self.target_dtype)[mapping] * keep,
-                "rec": item["rec_features"].to(ids.device, self.target_dtype)[mapping] * keep,
+                "boxes": boxes[batch_index][spatial_mapping] * spatial_keep,
+                "det": item["det_features"].to(ids.device, self.target_dtype)[spatial_mapping] * spatial_keep,
+                "rec": item["rec_features"].to(ids.device, self.target_dtype)[spatial_mapping] * spatial_keep,
             }
             features, _ = self.semantic_ocr_embedding(
                 [token_info],
                 text_features[batch_index : batch_index + 1],
                 (char_features[batch_index][mapping] * keep).unsqueeze(0),
+                use_char=self.config.ocr_use_char,
+                use_bbox=self.config.ocr_use_bbox,
+                use_visual=self.config.ocr_use_visual,
+                spatial_mask=spatial_mask,
             )
             results.append(features.squeeze(0))
         features = torch.stack(results)
@@ -380,7 +394,8 @@ class OpenViVQAModel(PreTrainedModel):
         valid = ((word_map >= 0) & token_mask.bool()).unsqueeze(-1).to(chars.dtype)
         chars = torch.gather(chars, 1, index) * valid
         embedding = self.semantic_ocr_embedding
-        return embedding.layer_norm_tok(text.to(self.target_dtype)) + embedding.layer_norm_char(chars.to(self.target_dtype))
+        text = embedding.layer_norm_tok(text.to(self.target_dtype))
+        return text + (embedding.layer_norm_char(chars.to(self.target_dtype)) if self.config.ocr_use_char else 0.0)
 
     def encode(
         self,

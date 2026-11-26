@@ -45,6 +45,10 @@ class OpenViVQAConfig(PretrainedConfig):
         twc_temperature_init: float = 0.07,
         ocr_feature_norm: Optional[str] = None,
         ocr_full_features: Optional[bool] = None,
+        ocr_use_char: bool = True,
+        ocr_use_bbox: bool = True,
+        ocr_use_visual: bool = True,
+        ocr_align_spatial_visual: bool = True,
         twc_eval_related: Optional[str] = None,
         consformer_constituent: Optional[str] = None,
         consformer_residual: Optional[bool] = None,
@@ -165,6 +169,16 @@ class OpenViVQAConfig(PretrainedConfig):
         # (SemanticOCREmbedding). None (configs before this field) = False: without Consformer the
         # OCR was text-only (ViT5 embedding → RMSNorm → Linear), so those checkpoints load as trained.
         self.ocr_full_features = bool(ocr_full_features) if ocr_full_features is not None else False
+        self.ocr_use_char = bool(ocr_use_char)
+        self.ocr_use_bbox = bool(ocr_use_bbox)
+        self.ocr_use_visual = bool(ocr_use_visual)
+        self.ocr_align_spatial_visual = bool(ocr_align_spatial_visual)
+        if (not self.ablation_use_ocr and not self.ocr_full_features
+                and not (self.ocr_use_char and self.ocr_use_bbox and self.ocr_use_visual
+                         and self.ocr_align_spatial_visual)):
+            raise ValueError("OCR feature ablations need ocr_full_features=True when Consformer is off.")
+        if (not self.ocr_use_bbox and (consformer_geometry or ocr_visual_pool or qavit_ground)):
+            raise ValueError("Disabling OCR boxes requires geometry, visual pooling and grounding to be disabled.")
         # Related OCR copy at evaluation / test (training always uses the TWA augmentation):
         # correct = every correctable word corrected, no character noise (the noise only trains
         # TWC, it carries no information about the answer); augment = the training procedure;

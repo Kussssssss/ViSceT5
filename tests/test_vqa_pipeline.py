@@ -271,6 +271,48 @@ def test_collator_preserves_original_alignment(model, tokenizer, samples):
             torch.testing.assert_close(value, again[key])
 
 
+def test_ocr_feature_ablations_and_positional_fusion(make_model, tokenizer, samples):
+    model = make_model(ablation_use_ocr=True, ocr_full_features=True)
+    batch = build_collator(model, tokenizer)(samples[:1])
+    args = [batch[k] for k in ("ocr_info", "ocr_input_ids", "ocr_attention_mask",
+                                "ocr_to_word_map", "ocr_char_ids", "ocr_char_mask")]
+    model.eval()
+    # The sample maps four tokens to three words: [0, 0, 1, 2].
+    assert batch["ocr_to_word_map"][0].tolist() == [0, 0, 1, 2]
+    captured = []
+    original = model.semantic_ocr_embedding.forward
+
+    def capture(info, text, char, **kwargs):
+        captured.append((info[0]["det"].detach().clone(), kwargs.get("spatial_mask")))
+        return original(info, text, char, **kwargs)
+
+    with patch.object(model.semantic_ocr_embedding, "forward", side_effect=capture):
+        aligned = model._encode_ocr(*args)
+        model.config.ocr_align_spatial_visual = False
+        unaligned = model._encode_ocr(*args)
+    assert captured[0][0][:, 0].tolist() == [0, 0, 3, 4]
+    assert captured[1][0][:, 0].tolist() == [0, 3, 4, 0]
+    assert captured[1][1].flatten().tolist() == [True, True, True, False]
+    assert not torch.allclose(aligned, unaligned)
+    model.config.ocr_align_spatial_visual = True
+    # Changing an excluded stream cannot affect the output, even through projection biases.
+    for flag, key in (("ocr_use_char", "ocr_char_ids"), ("ocr_use_bbox", "boxes"),
+                      ("ocr_use_visual", "det_features")):
+        setattr(model.config, flag, False)
+        first = model._encode_ocr(*args)
+        altered = copy.deepcopy(batch)
+        if key == "ocr_char_ids":
+            altered[key].zero_()
+        else:
+            altered["ocr_info"][0][key].zero_()
+            if key == "det_features":
+                altered["ocr_info"][0]["rec_features"].zero_()
+        changed_args = [altered[k] for k in ("ocr_info", "ocr_input_ids", "ocr_attention_mask",
+                                               "ocr_to_word_map", "ocr_char_ids", "ocr_char_mask")]
+        torch.testing.assert_close(first, model._encode_ocr(*changed_args))
+        setattr(model.config, flag, True)
+
+
 def test_collator_unlabelled_and_missing_features(model, tokenizer, samples, tmp_path):
     collator = build_collator(model, tokenizer)
     unlabelled = [{**sample, "answer": "", "ocr_path": None} for sample in samples]

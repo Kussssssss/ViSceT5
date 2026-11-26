@@ -157,7 +157,8 @@ class SemanticOCREmbedding(nn.Module):
         self.layer_norm_tok = norm()
         self.layer_norm_char = norm()
 
-    def forward(self, ocr_info, ocr_tok_features, ocr_char_features):
+    def forward(self, ocr_info, ocr_tok_features, ocr_char_features, *, use_char=True,
+                use_bbox=True, use_visual=True, spatial_mask=None):
         W = self.linear_boxes.weight
         target_device = W.device
         target_dtype  = W.dtype
@@ -184,6 +185,8 @@ class SemanticOCREmbedding(nn.Module):
 
         ocr_boxes = torch.stack(boxes, dim=0)
         ocr_box_features = self.layer_norm_bboxes(self.linear_boxes(ocr_boxes))
+        if not use_bbox:
+            ocr_box_features = 0.0
 
         if len(dets) > 0:
             ocr_dets = torch.stack(dets, dim=0)
@@ -197,13 +200,22 @@ class SemanticOCREmbedding(nn.Module):
         else:
             ocr_rec_features = 0.0
 
+        if not use_visual:
+            ocr_det_features = ocr_rec_features = 0.0
+        if spatial_mask is not None:
+            # Mask after projection/norm: their learned biases can make a padded zero nonzero.
+            spatial_mask = spatial_mask.to(device=target_device, dtype=target_dtype)
+            ocr_box_features = ocr_box_features * spatial_mask
+            ocr_det_features = ocr_det_features * spatial_mask
+            ocr_rec_features = ocr_rec_features * spatial_mask
+
         ocr_tok_features = ocr_tok_features.to(device=target_device, dtype=target_dtype)
         ocr_char_features = ocr_char_features.to(device=target_device, dtype=target_dtype)
 
         ocr_tok_norm = self.layer_norm_tok(ocr_tok_features)
         ocr_char_norm = self.layer_norm_char(ocr_char_features)
 
-        combined_text_features = ocr_tok_norm + ocr_char_norm
+        combined_text_features = ocr_tok_norm + (ocr_char_norm if use_char else 0.0)
 
         final_features = ocr_box_features + ocr_det_features + ocr_rec_features + combined_text_features
 
