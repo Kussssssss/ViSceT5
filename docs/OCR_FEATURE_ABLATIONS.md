@@ -1,5 +1,11 @@
 # OCR feature ablations
 
+The OCR notebooks include the base learning rate in the run name (for example,
+`base-ocr4-bs8x1-lr5e-5`). Changing LR creates a separate output directory and
+Hugging Face repository. Existing repositories without an LR suffix are preserved
+but are not automatically reused: their training rate cannot be inferred from
+the name. Runs with the same scenario, batch and LR keep the same identity.
+
 The switches below apply to `ocr_full_features: true`. Text remains enabled and
 character features stay aligned to text tokens. Spatial and visual mean bbox and
 the detector/recognizer features, respectively; they do not mean CLIP image tokens.

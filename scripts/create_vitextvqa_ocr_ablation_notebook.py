@@ -1,4 +1,5 @@
 """Build the ViTextVQA OCR ablation Colab notebook from the ABL1 workflow."""
+import copy
 import json
 from pathlib import Path
 
@@ -23,7 +24,8 @@ def main():
         "16×1, LR 1e-4, QA-ViT/Consformer/TWC tắt. Code này khác commit ABL1 lịch sử; "
         "cần chạy thêm kịch bản 4 trên cùng code để so sánh có kiểm soát.\n",
         "Mỗi kịch bản có output và Hugging Face repo riêng; run hoàn tất được tự nhận diện "
-        "và bỏ qua train. Tên repo ổn định ngay cả khi code được cập nhật.\n",
+        "và bỏ qua train. Tên run chứa learning rate: đổi LR tạo repo và output riêng. "
+        "Repo cũ không ghi LR được giữ nguyên, không tự dùng cho run mới.\n",
     ]
     config = "".join(notebook["cells"][4]["source"])
     config = replace_once(config, 'GIT_COMMIT     = "cc773b0"', f'GIT_COMMIT     = "{BRANCH}"')
@@ -31,7 +33,10 @@ def main():
         'QAVIT          = "off"\nOCR_SCENARIO = 1  # 1=text; 2=text+char; 3=text+char+bbox; 5=unaligned; 4=full control')
     config = replace_once(config, 'PREDICT_MIN_DEV_EM = 31.0', 'PREDICT_MIN_DEV_EM = 0.0')
     config = replace_once(config, 'RUN_NAME += f"-bs{BATCH_SIZE}x{GRAD_ACCUM}"',
-        'assert OCR_SCENARIO in (1, 2, 3, 4, 5)\nRUN_NAME += f"-ocr{OCR_SCENARIO}-bs{BATCH_SIZE}x{GRAD_ACCUM}"')
+        'assert OCR_SCENARIO in (1, 2, 3, 4, 5)\n'
+        '_lr_mantissa, _lr_exponent = f"{LEARNING_RATE:.12e}".split("e")\n'
+        'LR_TAG = _lr_mantissa.rstrip("0").rstrip(".") + "e" + str(int(_lr_exponent))\n'
+        'RUN_NAME += f"-ocr{OCR_SCENARIO}-bs{BATCH_SIZE}x{GRAD_ACCUM}-lr{LR_TAG}"')
     notebook["cells"][4]["source"] = config.splitlines(keepends=True)
     setup = "".join(notebook["cells"][6]["source"])
     setup = replace_once(setup, 'import os, re, subprocess, yaml', 'import os, re, subprocess, sys, yaml')
@@ -152,6 +157,17 @@ subprocess.run([sys.executable, "-u", "-c", _bootstrap], env=_prediction_env, ch
             cell["outputs"] = []
     DEST.write_text(json.dumps(notebook, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(DEST)
+    run_all = copy.deepcopy(notebook)
+    variant_config = "".join(run_all["cells"][4]["source"])
+    variant_config = replace_once(variant_config, 'BATCH_SIZE     = 16', 'BATCH_SIZE     = 8')
+    variant_config = replace_once(variant_config, 'GRAD_ACCUM     = 1', 'GRAD_ACCUM     = 2')
+    run_all["cells"][4]["source"] = variant_config.splitlines(keepends=True)
+    run_all["cells"][0]["source"] = [s.replace("16×1", "8×2") for s in run_all["cells"][0]["source"]]
+    # The manual checkpoint-upload cell is an optional recovery operation, not a Run all step.
+    run_all["cells"] = [cell for i, cell in enumerate(run_all["cells"]) if i not in (12, 13)]
+    run_all_path = DEST.with_name("ABL_OCR_features_bs8x2_run_all.ipynb")
+    run_all_path.write_text(json.dumps(run_all, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    print(run_all_path)
 
 
 if __name__ == "__main__":
