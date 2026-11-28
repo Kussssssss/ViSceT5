@@ -195,6 +195,10 @@ class ViT5VQADataCollator:
             ids = self.tokenizer.encode(text, add_special_tokens=False)
             if not ids:
                 ids = [self.tokenizer.unk_token_id]
+            if self.cfg.ocr_tokenization == "first_subword":
+                # One token per OCR entry. Characters and box/det/rec still describe
+                # the complete entry; its remaining subwords do not enter ViT5.
+                ids = ids[:1]
             token_ids.extend(ids)
             word_map.extend([index] * len(ids))
             for position, char in enumerate(text[: self.char_max_num]):

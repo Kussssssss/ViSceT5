@@ -17,6 +17,16 @@ the detector/recognizer features, respectively; they do not mean CLIP image toke
 | 3: text + char + bbox | true | true | false | true |
 | 4: baseline | true | true | true | true |
 | 5: positional fusion | true | true | true | false |
+| 6: first subword per OCR entry | true | true | true | true |
+
+Scenario 6 additionally sets `ocr_tokenization: first_subword` (`OCR_TOKENIZATION`
+in the environment). Each OCR entry is independently tokenized and only its first
+subword ID enters ViT5. Its character features still cover the original entry;
+box, det and rec remain at entry level, with one-to-one alignment. Empty tokenization
+uses the unknown token. Padding is masked as before. Other scenarios keep the
+default `all_subwords`. The choice is saved with the checkpoint and used by the
+prediction collator. This is input-token selection, not BERT contextual first-token
+pooling as in TWA, and changes both sequence length and retained text information.
 
 Pass the switches as CLI options to `training/finetune.py`, or use the equivalent
 uppercase environment variables with `run_pipeline.py`. They are saved in the

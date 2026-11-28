@@ -49,6 +49,7 @@ class OpenViVQAConfig(PretrainedConfig):
         ocr_use_bbox: bool = True,
         ocr_use_visual: bool = True,
         ocr_align_spatial_visual: bool = True,
+        ocr_tokenization: str = "all_subwords",
         twc_eval_related: Optional[str] = None,
         consformer_constituent: Optional[str] = None,
         consformer_residual: Optional[bool] = None,
@@ -173,6 +174,9 @@ class OpenViVQAConfig(PretrainedConfig):
         self.ocr_use_bbox = bool(ocr_use_bbox)
         self.ocr_use_visual = bool(ocr_use_visual)
         self.ocr_align_spatial_visual = bool(ocr_align_spatial_visual)
+        if ocr_tokenization not in ("all_subwords", "first_subword"):
+            raise ValueError("ocr_tokenization must be all_subwords or first_subword.")
+        self.ocr_tokenization = ocr_tokenization
         if (not self.ablation_use_ocr and not self.ocr_full_features
                 and not (self.ocr_use_char and self.ocr_use_bbox and self.ocr_use_visual
                          and self.ocr_align_spatial_visual)):

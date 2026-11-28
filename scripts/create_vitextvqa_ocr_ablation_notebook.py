@@ -19,7 +19,9 @@ def main():
     notebook = json.loads(SOURCE.read_text(encoding="utf-8"))
     notebook["cells"][0]["source"] = [
         "# ViTextVQA — ablation đặc trưng OCR\n",
-        "Chọn kịch bản 1, 2, 3 hoặc 5 trong cell cấu hình. Kịch bản 4 là ABL1. "
+        "Chọn kịch bản 1–6 trong cell cấu hình. Kịch bản 4 là ABL1; kịch bản 6 giữ "
+        "subword đầu tiên của mỗi entry OCR, cùng character/bbox/det/rec của entry đó. "
+        "Đây là embedding đầu vào ViT5, không phải hidden state BERT của paper TWA. "
         "Notebook dùng nhánh exp/vitextvqa-ocr-ablation, cấu hình ABL1 "
         "16×1, LR 1e-4, QA-ViT/Consformer/TWC tắt. Code này khác commit ABL1 lịch sử; "
         "cần chạy thêm kịch bản 4 trên cùng code để so sánh có kiểm soát.\n",
@@ -30,10 +32,10 @@ def main():
     config = "".join(notebook["cells"][4]["source"])
     config = replace_once(config, 'GIT_COMMIT     = "cc773b0"', f'GIT_COMMIT     = "{BRANCH}"')
     config = replace_once(config, 'QAVIT          = "off"',
-        'QAVIT          = "off"\nOCR_SCENARIO = 1  # 1=text; 2=text+char; 3=text+char+bbox; 5=unaligned; 4=full control')
+        'QAVIT          = "off"\nOCR_SCENARIO = 1  # 1=text; 2=+char; 3=+bbox; 4=full; 5=unaligned; 6=first subword, word-aligned')
     config = replace_once(config, 'PREDICT_MIN_DEV_EM = 31.0', 'PREDICT_MIN_DEV_EM = 0.0')
     config = replace_once(config, 'RUN_NAME += f"-bs{BATCH_SIZE}x{GRAD_ACCUM}"',
-        'assert OCR_SCENARIO in (1, 2, 3, 4, 5)\n'
+        'assert OCR_SCENARIO in (1, 2, 3, 4, 5, 6)\n'
         '_lr_mantissa, _lr_exponent = f"{LEARNING_RATE:.12e}".split("e")\n'
         'LR_TAG = _lr_mantissa.rstrip("0").rstrip(".") + "e" + str(int(_lr_exponent))\n'
         'RUN_NAME += f"-ocr{OCR_SCENARIO}-bs{BATCH_SIZE}x{GRAD_ACCUM}-lr{LR_TAG}"')
@@ -52,9 +54,10 @@ def main():
     marker = 'os.environ.update(ENV, OUTPUT_DIR=OUTPUT_DIR, HF_REPO=HF_REPO, PYTHONUNBUFFERED="1")'
     setup = replace_once(setup, marker, '''ENV.update({
     "OCR_USE_CHAR": _b(OCR_SCENARIO != 1),
-    "OCR_USE_BBOX": _b(OCR_SCENARIO in (3, 4, 5)),
-    "OCR_USE_VISUAL": _b(OCR_SCENARIO in (4, 5)),
+    "OCR_USE_BBOX": _b(OCR_SCENARIO in (3, 4, 5, 6)),
+    "OCR_USE_VISUAL": _b(OCR_SCENARIO in (4, 5, 6)),
     "OCR_ALIGN_SPATIAL_VISUAL": _b(OCR_SCENARIO != 5),
+    "OCR_TOKENIZATION": "first_subword" if OCR_SCENARIO == 6 else "all_subwords",
 })
 assert all(k in READ for k in ENV), "Commit does not expose every requested flag"
 ''' + marker + '''
@@ -166,8 +169,9 @@ subprocess.run([sys.executable, "-u", "-c", _bootstrap], env=_prediction_env, ch
     # The manual checkpoint-upload cell is an optional recovery operation, not a Run all step.
     run_all["cells"] = [cell for i, cell in enumerate(run_all["cells"]) if i not in (12, 13)]
     run_all_path = DEST.with_name("ABL_OCR_features_bs8x2_run_all.ipynb")
-    run_all_path.write_text(json.dumps(run_all, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-    print(run_all_path)
+    if run_all_path.exists():
+        run_all_path.write_text(json.dumps(run_all, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        print(run_all_path)
 
 
 if __name__ == "__main__":

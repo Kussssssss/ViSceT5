@@ -313,6 +313,54 @@ def test_ocr_feature_ablations_and_positional_fusion(make_model, tokenizer, samp
         setattr(model.config, flag, True)
 
 
+def test_first_subword_keeps_word_features_and_survives_checkpoint(make_model, tokenizer, samples, tmp_path):
+    model = make_model(ablation_use_ocr=False, ocr_full_features=True,
+                       ocr_tokenization="first_subword").eval()
+    collator = build_collator(model, tokenizer)
+    batch = collator([samples[0], {**samples[1], "ocr_path": None}])
+    # cà phê has two text tokens; keep cà but retain the whole OCR entry's characters.
+    assert batch["ocr_input_ids"][0].tolist() == tokenizer.encode("cà 123 sữa", add_special_tokens=False)
+    assert batch["ocr_to_word_map"].tolist() == [[0, 1, 2], [0, -1, -1]]
+    assert int(batch["ocr_char_mask"][0, 0].sum()) == len("cà phê")
+    assert batch["ocr_info"][0]["det_features"][:3, 0].tolist() == [0, 3, 4]
+    args = [batch[k] for k in ("ocr_info", "ocr_input_ids", "ocr_attention_mask",
+                                "ocr_to_word_map", "ocr_char_ids", "ocr_char_mask")]
+    captured = []
+    original = model.semantic_ocr_embedding.forward
+
+    def capture(info, text, char, **kwargs):
+        captured.append(info[0]["rec"].detach().clone())
+        return original(info, text, char, **kwargs)
+
+    with patch.object(model.semantic_ocr_embedding, "forward", side_effect=capture):
+        model._encode_ocr(*args)
+    assert captured[0][:, 0].tolist() == [10, 13, 14]
+    outputs = model(**batch)
+    assert torch.isfinite(outputs["loss"])
+    outputs["loss"].backward()
+    assert model.get_input_embeddings().weight.grad is not None
+    model.save_pretrained(tmp_path)
+    loaded = OpenViVQAModel.from_pretrained(tmp_path).eval()
+    assert loaded.config.ocr_tokenization == "first_subword"
+    # Inference creates its collator from the checkpoint config, without a CLI override.
+    inference = build_collator(loaded, tokenizer)([{**samples[0], "answer": None}])
+    assert inference["ocr_to_word_map"][0].tolist() == [0, 1, 2]
+    with torch.no_grad():
+        torch.testing.assert_close(outputs["logits"], loaded(**batch)["logits"])
+        assert loaded.generate(**inference, max_new_tokens=2).shape[0] == 1
+
+
+def test_first_subword_switch_reaches_training_config(monkeypatch):
+    from run_pipeline import training_arguments
+    monkeypatch.setenv("OCR_TOKENIZATION", "first_subword")
+    parser = HfArgumentParser((ModelArguments, DataArguments, CustomTrainingArguments))
+    model_args, _, _ = parse_args_with_yaml_and_cli(parser, training_arguments())
+    assert model_args.ocr_tokenization == "first_subword"
+    assert OpenViVQAConfig().ocr_tokenization == "all_subwords"
+    with pytest.raises(ValueError, match="ocr_tokenization"):
+        OpenViVQAConfig(ocr_tokenization="unknown")
+
+
 def test_collator_unlabelled_and_missing_features(model, tokenizer, samples, tmp_path):
     collator = build_collator(model, tokenizer)
     unlabelled = [{**sample, "answer": "", "ocr_path": None} for sample in samples]

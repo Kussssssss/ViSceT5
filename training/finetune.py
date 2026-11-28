@@ -25,7 +25,7 @@ from training.trainer import VQATrainer
 from utils.debug_tools import print_parameter_summary
 from utils.io_utils import download_and_extract_checkpoint
 
-ARCHITECTURE_FLAGS = ("ocr_use_char", "ocr_use_bbox", "ocr_use_visual", "ocr_align_spatial_visual", "ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "use_twc",
+ARCHITECTURE_FLAGS = ("ocr_tokenization", "ocr_use_char", "ocr_use_bbox", "ocr_use_visual", "ocr_align_spatial_visual", "ablation_use_image", "ablation_use_qaclip", "ablation_use_ocr", "use_twc",
                       "twc_weight", "twc_adv_probability", "twc_temperature_init", "ocr_feature_norm",
                       "ocr_full_features", "twc_eval_related", "consformer_constituent",
                       "consformer_residual", "twc_two_views", "twc_contrastive", "consformer_gate",

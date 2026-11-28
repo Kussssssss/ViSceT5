@@ -20,6 +20,7 @@ class ModelArguments:
     ocr_use_bbox: bool = field(default=True)
     ocr_use_visual: bool = field(default=True)
     ocr_align_spatial_visual: bool = field(default=True)
+    ocr_tokenization: str = field(default="all_subwords")
     # Module switches
     ablation_use_qaclip: bool = field(
         default=False, metadata={"help": "QA-ViT: the question enters the late CLIP layers through the "

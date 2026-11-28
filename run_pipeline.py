@@ -40,6 +40,7 @@ def training_arguments():
         "OCR_USE_BBOX": "ocr_use_bbox",
         "OCR_USE_VISUAL": "ocr_use_visual",
         "OCR_ALIGN_SPATIAL_VISUAL": "ocr_align_spatial_visual",
+        "OCR_TOKENIZATION": "ocr_tokenization",
         "USE_TWC": "use_twc",
         "TWC_WEIGHT": "twc_weight",
         "TWC_TEMPERATURE": "twc_temperature_init",
